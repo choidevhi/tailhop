@@ -31,16 +31,18 @@ import bridge
 import i18n
 import protocol as p
 import store
+import thumbs
 import vicons
 from i18n import t
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
 TEXT_PREVIEW = 400
+THUMB_MEMORY = 120  # 화면에 들고 있는 썸네일 이미지 수(넘으면 오래된 것부터 버린다)
 PAUSE_HOUR = 3600
 
 # 중립 회색 팔레트 (라이트, 다크)
@@ -253,6 +255,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.sendto_var = tk.BooleanVar(value=bridge.sendto_enabled())
         self.hotkey_var = tk.BooleanVar(value=self.node.settings.get("hotkey") is True)
         self.hotkey: bridge.Hotkey | None = None
+        self.preview_var = tk.BooleanVar(value=self.node.settings.get("previews") is not False)
+        self.thumb_images: dict[str, ctk.CTkImage] = {}  # 원본 경로별 화면용 이미지(넣은 순서 = 오래된 순)
+        self.thumb_waiting: dict[str, list[ctk.CTkLabel]] = {}
+        self.thumbs = thumbs.Worker(lambda src, out: self.events.put(("thumb", {"src": str(src), "out": out})))
         self.receiving_var = tk.BooleanVar(value=self.node.receiving)
         last = self.node.settings.get("current")
         self.current: str | None = last if last in self.node.pairings else next(iter(self.node.pairings), None)
@@ -520,6 +526,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         menu.add_command(label=t("menu.open_folder"), command=self._open_save_dir)
         menu.add_command(label=t("menu.change_folder"), command=self._change_save_dir)
         menu.add_checkbutton(label=t("menu.autostart"), variable=self.autostart_var, command=self._toggle_autostart)
+        menu.add_checkbutton(label=t("menu.previews"), variable=self.preview_var, command=self._toggle_previews)
         menu.add_checkbutton(label=t("menu.sendto"), variable=self.sendto_var, command=self._toggle_sendto)
         menu.add_checkbutton(label=t("menu.hotkey", key=bridge.HOTKEY_LABEL), variable=self.hotkey_var,
                              command=self._toggle_hotkey)
@@ -725,6 +732,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             inner = ctk.CTkFrame(box, fg_color="transparent")
             inner.pack(padx=12, pady=10)
+            self._thumbnail(box, inner, item)
             round_icon(inner, "file", 38, fg=MAIN_BG if mine else BUBBLE).pack(side="left")
             names = ctk.CTkFrame(inner, fg_color="transparent")
             names.pack(side="left", padx=(10, 4))
@@ -736,6 +744,54 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         meta = f"{when:%H:%M} · {hint}" if mine else hint
         ctk.CTkLabel(row, text=meta, font=font(10), text_color=SECONDARY, height=14).pack(anchor=side, padx=6)
         bind_tree(box, "<Button-1>", lambda _e, it=item: self._open_history_item(it))
+
+    def _thumbnail(self, box, inner, item: dict) -> None:
+        """이미지·영상 파일이면 말풍선 위쪽에 미리보기 자리를 두고, 썸네일이 준비되면 채운다."""
+        path = Path(item.get("path") or "")
+        if not self.preview_var.get() or not thumbs.previewable(item.get("name", "")) or not path.is_file():
+            return
+
+        key = str(path)
+        label = ctk.CTkLabel(box, text="", fg_color="transparent")
+        label.pack(before=inner, padx=8, pady=(8, 0), anchor="w")
+        image = self.thumb_images.get(key)
+        if image is not None:
+            label.configure(image=image)
+            return
+
+        self.thumb_waiting.setdefault(key, []).append(label)
+        self.thumbs.request(path)
+
+    def _on_thumb(self, src: str, out: Path | None) -> None:
+        labels = [x for x in self.thumb_waiting.pop(src, []) if x.winfo_exists()]
+        if out is None:
+            for label in labels:
+                label.pack_forget()
+            return
+
+        try:
+            with Image.open(out) as im:
+                im.load()
+                picture = im.copy()
+        except OSError:
+            return
+
+        size = (max(1, picture.width // 2), max(1, picture.height // 2))  # 캐시는 2배 픽셀(고배율 화면용)
+        image = ctk.CTkImage(light_image=picture, dark_image=picture, size=size)
+        self.thumb_images[src] = image
+        while len(self.thumb_images) > THUMB_MEMORY:
+            self.thumb_images.pop(next(iter(self.thumb_images)))
+        canvas = self.log._parent_canvas
+        at_bottom = canvas.yview()[1] >= 0.98
+        for label in labels:
+            label.configure(image=image)
+        if labels and at_bottom:  # 맨 아래를 보고 있었으면 그림이 늘어난 만큼 따라 내려간다
+            self.after(30, lambda: canvas.yview_moveto(1.0))
+
+    def _toggle_previews(self) -> None:
+        self.node.settings["previews"] = bool(self.preview_var.get())
+        self.node.save_settings()
+        self._render_history()
 
     def _open_history_item(self, item: dict) -> None:
         if item["kind"] == "text":
@@ -1282,6 +1338,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             else:  # 창이 숨어 있을 때(명령줄·단축키) 보이지 않는 대화상자 대신 알림
                 self._notify(t("dialog.send_failed", error=data["error"]))
             self._next_job()
+        elif kind == "thumb":
+            self._on_thumb(data["src"], data["out"])
         elif kind == "packing":
             self._show_progress(t("progress.packing", name=data["name"]), None)
         elif kind == "hotkey":

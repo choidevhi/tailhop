@@ -168,5 +168,6 @@
   "cli.missing": "File not found: {paths}",
   "cli.failed": "Couldn't send: {error}",
   "cli.no_app": "TailHop isn't running.",
-  "cli.usage": "Unknown argument: {arg}\nUsage: TailHop.exe [--to DEVICE] [--text TEXT] [FILE_OR_FOLDER...] | --list"
+  "cli.usage": "Unknown argument: {arg}\nUsage: TailHop.exe [--to DEVICE] [--text TEXT] [FILE_OR_FOLDER...] | --list",
+  "menu.previews": "Image and video previews"
 }

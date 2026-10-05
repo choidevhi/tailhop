@@ -168,5 +168,6 @@
   "cli.missing": "없는 파일입니다: {paths}",
   "cli.failed": "보내지 못했습니다: {error}",
   "cli.no_app": "TailHop이 실행 중이 아닙니다.",
-  "cli.usage": "알 수 없는 인자: {arg}\n사용법: TailHop.exe [--to 기기] [--text 글] [파일·폴더...] | --list"
+  "cli.usage": "알 수 없는 인자: {arg}\n사용법: TailHop.exe [--to 기기] [--text 글] [파일·폴더...] | --list",
+  "menu.previews": "이미지·영상 미리보기"
 }

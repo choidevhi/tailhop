@@ -168,5 +168,6 @@
   "cli.missing": "ファイルがありません: {paths}",
   "cli.failed": "送れませんでした: {error}",
   "cli.no_app": "TailHop が起動していません。",
-  "cli.usage": "不明な引数: {arg}\n使い方: TailHop.exe [--to デバイス] [--text 文字] [ファイル・フォルダー...] | --list"
+  "cli.usage": "不明な引数: {arg}\n使い方: TailHop.exe [--to デバイス] [--text 文字] [ファイル・フォルダー...] | --list",
+  "menu.previews": "画像・動画のプレビュー"
 }

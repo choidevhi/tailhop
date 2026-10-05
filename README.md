@@ -8,6 +8,7 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - `android/` — Android 앱 (Kotlin, 공유 메뉴, 수신 서비스)
 - 1.5.0부터 두 앱 모두 한국어·English·日本語·简体中文(기본은 시스템 언어, 설정에서 고르기)와 수신 중지(포트를 닫고 보내기만, 1시간 타이머)를 지원한다. 화면 문자열은 PC `windows/locales/*.json`, Android `res/values*/strings.xml`
 - 1.6.0부터 PC 앱은 폴더를 zip으로 묶어 보내고, 탐색기 '보내기' 메뉴·명령줄·전역 단축키(Ctrl+Alt+Shift+C, 켤 때만)로 보낼 수 있다. 보내는 중에 더 보내면 차례로 보낸다. 선(wire) 형식은 그대로라 예전 앱·Android도 받는다
+- 1.6.1부터 PC 대화방에 이미지·영상 미리보기(썸네일)를 보여 준다(메뉴에서 끌 수 있음). PC 안에서만 만들고 네트워크로 보내지 않는다. 이미지는 8000×8000 픽셀을 넘으면 만들지 않고, 영상은 Windows 탐색기와 같은 셸 썸네일을 쓴다. 캐시는 동기화되지 않는 `%LOCALAPPDATA%\TailHop\thumbs`에 두고 30일 안 쓰면 지운다
 - `docs/PROTOCOL.md` — 전송 프로토콜, `docs/test_vectors.json` — 두 구현이 공유하는 테스트 벡터
 
 ## 보안 (1.5.0 점검 반영)

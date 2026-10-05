@@ -168,5 +168,6 @@
   "cli.missing": "文件不存在：{paths}",
   "cli.failed": "发送失败：{error}",
   "cli.no_app": "TailHop 没有运行。",
-  "cli.usage": "未知参数：{arg}\n用法：TailHop.exe [--to 设备] [--text 文字] [文件或文件夹...] | --list"
+  "cli.usage": "未知参数：{arg}\n用法：TailHop.exe [--to 设备] [--text 文字] [文件或文件夹...] | --list",
+  "menu.previews": "图片和视频预览"
 }
