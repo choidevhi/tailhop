@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "TailHop"
+DEFAULT_APP_DIR = Path.home() / "AppData" / "Roaming" / "TailHop"  # 보통 사용자의 설정 폴더(중복 실행 방지 이름에 씀)
 DEFAULT_SAVE_DIR = Path.home() / "Downloads" / "TailHop"
 HISTORY_LIMIT = 500
 TEXT_INLINE = 2000  # 기록 목록에 그대로 두는 텍스트 길이(글자). 넘으면 texts/에 따로 저장

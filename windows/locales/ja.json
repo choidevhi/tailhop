@@ -2,27 +2,23 @@
   "lang.system": "システムの設定に従う",
   "kind.phone": "スマホ",
   "kind.pc": "PC",
-
   "status.checking": "Tailscale を確認中…",
   "status.listening": "{name} · 受信待機中",
   "status.offline": "{error}",
   "status.paused": "受信停止中 · 送信はできます",
   "status.paused_until": "受信停止中 · {time} に再開します",
   "status.blocked": "接続をブロックしました: {error}",
-
   "sidebar.new_device": "新しいデバイスを接続",
   "sidebar.devices": "デバイス",
   "sidebar.no_devices": "接続済みのデバイスはまだありません",
   "sidebar.receive": "受信",
   "device.no_messages": "メッセージなし",
-
   "header.no_device": "接続済みのデバイスなし",
   "header.connected": "{kind} · 接続済み",
   "header.offline": "{kind} · この PC はオフライン",
   "header.paused": "{kind} · この PC は受信停止中",
   "chip.connect": "デバイスを接続",
   "composer.placeholder": "何でも送れます · ファイルはドラッグ＆ドロップ",
-
   "menu.show_pair": "新しいデバイスを接続（QR・コードを表示）",
   "menu.enter_code": "ほかの PC のコードを入力…",
   "menu.open_folder": "受信フォルダーを開く",
@@ -41,7 +37,6 @@
   "devmenu.send_files": "ファイルを送信…",
   "devmenu.clear": "会話を消去",
   "devmenu.unpair": "接続を解除",
-
   "date.header": "{month}月{day}日 {weekday}",
   "date.weekdays": "月曜日,火曜日,水曜日,木曜日,金曜日,土曜日,日曜日",
   "date.months": "1月,2月,3月,4月,5月,6月,7月,8月,9月,10月,11月,12月",
@@ -54,7 +49,6 @@
   "empty.connect_title": "デバイスを接続しましょう",
   "empty.connect_sub": "スマホは TailHop アプリで QR を読み取り、ほかの PC は接続コードを貼り付けてください",
   "empty.connect_button": "新しいデバイスを接続",
-
   "flash.copied": "コピーしました",
   "flash.received": "受信しました",
   "flash.sent": "送信しました",
@@ -69,12 +63,9 @@
   "progress.sending_bytes": "送信中 {done} / {total}",
   "pick.title": "{name} に送るファイルを選択",
   "folder.title": "受信したファイルの保存フォルダー",
-
   "dialog.file_missing": "ファイルが移動または削除されています。",
   "dialog.clear_confirm": "{name} との会話を消去しますか？（受信したファイルは削除されません）",
   "dialog.connect_first": "先にデバイスを接続してください。",
-  "dialog.busy": "送信中です。完了してからもう一度お試しください。",
-  "dialog.no_folders": "フォルダーは送信できません。ファイルだけを送信します。",
   "dialog.no_clip_text": "クリップボードにテキストがありません。",
   "dialog.paired": "{name} と接続しました！\n\n確認コード: {code}\n相手のデバイスに表示されたコードと同じか確認してください。\n違う場合はすぐに接続を解除してください。",
   "dialog.send_failed": "送信できませんでした。\n{error}\n\n相手のデバイスで TailHop と Tailscale が起動していて、受信が停止されていないか確認してください。",
@@ -83,7 +74,6 @@
   "dialog.unpair_confirm": "{name} との接続を解除しますか？このデバイスとの履歴も削除されます（受信したファイルは残ります）。再び使うには QR またはコードで接続し直す必要があります。\n（相手のデバイスでもこの PC の接続を解除してください）",
   "dialog.peer_unpaired": "{name} が接続を取り消しました（確認コードが違うと選択）。\nこの PC でも接続と履歴を削除しました。自分のデバイスなら接続し直してください。",
   "dialog.already_running": "TailHop はすでに起動しています。トレイアイコンを確認してください。",
-
   "pair.title": "新しいデバイスを接続",
   "pair.phone_hint": "スマホ: TailHop アプリ →「新しいデバイスを接続」で QR を読み取り",
   "pair.pc_hint": "ほかの PC: TailHop →「ほかの PC の接続コードを入力」に下のコードを入力",
@@ -100,7 +90,6 @@
   "join.connecting": "接続中…",
   "join.checking": "相手の PC を確認中…",
   "join.failed": "接続できませんでした: {error}",
-
   "tray.open": "開く",
   "tray.send_clipboard": "クリップボードを送信",
   "tray.receiving": "受信",
@@ -111,7 +100,6 @@
   "tray.title_paused": "TailHop · 受信停止中",
   "notify.text": "{peer}: テキストを受信（クリップボードにコピー済み）\n{text}",
   "notify.file": "{peer}: ファイルを受信 · {name}",
-
   "err.disconnected": "接続が途中で切れました。",
   "err.after_last": "最後のフレームの後にデータが届きました。",
   "err.bad_frame_len": "フレーム長が正しくありません。",
@@ -167,5 +155,18 @@
   "err.file_changed": "送信中にファイルのサイズが変わりました。",
   "err.paused_pairing": "受信を停止している間は新しいデバイスを接続できません。受信を再開してください。",
   "err.tagged_node": "タグ付きの Tailscale デバイス（サーバー・共有デバイスなど）とは接続しません。",
-  "err.disk_full": "受信するためのディスク容量が足りません。"
+  "err.disk_full": "受信するためのディスク容量が足りません。",
+  "menu.sendto": "エクスプローラーの「送る」メニューに追加",
+  "menu.hotkey": "{key} でクリップボードを送る",
+  "flash.sendto_on": "エクスプローラーでファイル・フォルダーを右クリック → 送る → TailHop",
+  "dialog.hotkey_taken": "{key} のショートカットは別のプログラムがすでに使っています。",
+  "dialog.no_device": "送り先のデバイスが見つかりません: {name}",
+  "notify.queued": "送信待ち (残り {count} 件)",
+  "notify.sending_to": "{name} に送信中",
+  "progress.packing": "フォルダー「{name}」を zip にまとめています…",
+  "cli.sending": "{name} に送ります。進み具合は TailHop のトレイ通知で確認できます。",
+  "cli.missing": "ファイルがありません: {paths}",
+  "cli.failed": "送れませんでした: {error}",
+  "cli.no_app": "TailHop が起動していません。",
+  "cli.usage": "不明な引数: {arg}\n使い方: TailHop.exe [--to デバイス] [--text 文字] [ファイル・フォルダー...] | --list"
 }

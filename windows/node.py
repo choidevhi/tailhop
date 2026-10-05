@@ -409,7 +409,8 @@ class Node:
         self.on_event("sent", self.history.add("out", "text", text=text, peer=pairing.name, peer_id=stable_id,
                                                peer_kind=pairing.kind))
 
-    def send_file(self, stable_id: str, path: Path) -> None:
+    def send_file(self, stable_id: str, path: Path, record_path: Path | None = None) -> None:
+        """record_path: 기록에 남길 원본 경로(폴더를 임시 zip으로 묶어 보낼 때 원래 폴더)."""
         sock, pairing = self._connect(stable_id)
 
         def progress(done: int, total: int) -> None:
@@ -419,5 +420,6 @@ class Node:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
             p.send_file(ch, self.me.name, path, progress)
             p.read_reply(ch)
-        self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(path), size=path.stat().st_size,
+        self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(record_path or path),
+                                               size=path.stat().st_size,
                                                peer=pairing.name, peer_id=stable_id, peer_kind=pairing.kind))

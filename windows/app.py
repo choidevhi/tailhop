@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import ctypes
 import datetime as dt
+import hashlib
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import tkinter as tk
 import winreg
+from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -24,6 +27,7 @@ import qrcode
 from PIL import Image, ImageGrab
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+import bridge
 import i18n
 import protocol as p
 import store
@@ -32,7 +36,7 @@ from i18n import t
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -93,10 +97,16 @@ def human_size(n: int) -> str:
     return f"{n} B"
 
 
-def exe_command() -> str:
+def exe_parts() -> tuple[str, str]:
+    """(실행 파일, 앞에 붙는 인자): 설치본은 TailHop.exe, 개발 중에는 pythonw.exe "app.py"."""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --hidden'
-    return f'"{Path(sys.executable).with_name("pythonw.exe")}" "{Path(__file__).resolve()}" --hidden'
+        return sys.executable, ""
+    return str(Path(sys.executable).with_name("pythonw.exe")), f'"{Path(__file__).resolve()}"'
+
+
+def exe_command() -> str:
+    target, args = exe_parts()
+    return " ".join(x for x in (f'"{target}"', args, "--hidden") if x)
 
 
 def autostart_enabled() -> bool:
@@ -214,7 +224,7 @@ def date_label(when: dt.datetime) -> str:
 
 
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
-    def __init__(self, start_hidden: bool) -> None:
+    def __init__(self, start_hidden: bool, request: bridge.Request | None = None) -> None:
         super().__init__(fg_color=MAIN_BG)
         self.TkdndVersion = TkinterDnD._require(self)
         _SCALE[0] = ctk.ScalingTracker.get_widget_scaling(self)  # 아이콘을 이 배율의 픽셀 크기로 그린다
@@ -231,6 +241,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.lang_var = tk.StringVar(value=self.node.settings.get("language", i18n.SYSTEM))
         i18n.set_language(self.lang_var.get())
         self.busy = False
+        self.jobs: deque = deque()  # 보내는 중에 들어온 보내기 (이름표, 할 일). 앞의 것이 끝나면 차례로 보낸다
         self.qr_window: ctk.CTkToplevel | None = None
         self.join_window: ctk.CTkToplevel | None = None
         self.status: tuple[str, dict] = ("status.checking", {})
@@ -239,6 +250,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.sidebar_open = True
         self.visible_rows = HISTORY_PAGE
         self.autostart_var = tk.BooleanVar(value=autostart_enabled())
+        self.sendto_var = tk.BooleanVar(value=bridge.sendto_enabled())
+        self.hotkey_var = tk.BooleanVar(value=self.node.settings.get("hotkey") is True)
+        self.hotkey: bridge.Hotkey | None = None
         self.receiving_var = tk.BooleanVar(value=self.node.receiving)
         last = self.node.settings.get("current")
         self.current: str | None = last if last in self.node.pairings else next(iter(self.node.pairings), None)
@@ -250,9 +264,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_all()
         self._start_tray()
         self.node.start()
+        try:
+            self.bridge: bridge.Server | None = bridge.Server(self._on_bridge)
+        except OSError:
+            self.bridge = None  # 명령줄·'보내기' 메뉴만 안 될 뿐 앱은 그대로 쓴다
+        if self.hotkey_var.get():
+            self._start_hotkey(quiet=True)
         self.after(100, self._poll)
         if start_hidden:
             self.withdraw()
+        if request is not None and request.has_work:
+            self.after(300, lambda: self._do_request(request))
 
     # ---------- 기기 ----------
     @property
@@ -452,8 +474,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             return "break"
         return None
 
-    def _send_clipboard_image(self, image: Image.Image) -> None:
-        target = self._target()
+    def _send_clipboard_image(self, image: Image.Image, stable_id: str | None = None) -> None:
+        target = self._target(stable_id)
         if target is None:
             return
         name = dt.datetime.now().strftime("clipboard_%Y%m%d_%H%M%S.png")
@@ -498,6 +520,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         menu.add_command(label=t("menu.open_folder"), command=self._open_save_dir)
         menu.add_command(label=t("menu.change_folder"), command=self._change_save_dir)
         menu.add_checkbutton(label=t("menu.autostart"), variable=self.autostart_var, command=self._toggle_autostart)
+        menu.add_checkbutton(label=t("menu.sendto"), variable=self.sendto_var, command=self._toggle_sendto)
+        menu.add_checkbutton(label=t("menu.hotkey", key=bridge.HOTKEY_LABEL), variable=self.hotkey_var,
+                             command=self._toggle_hotkey)
         languages = self._menu()
         languages.add_radiobutton(label=t("lang.system"), variable=self.lang_var, value=i18n.SYSTEM,
                                   command=lambda: self._set_language(i18n.SYSTEM))
@@ -771,14 +796,22 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         return pairing.name if pairing else ""
 
     def _run_bg(self, label: str, job) -> None:
+        """보내기는 한 번에 하나씩. 보내는 중이면 대기열에 넣고 앞의 것이 끝나면 이어서 보낸다."""
         if self.busy:
-            messagebox.showinfo(APP_NAME, t("dialog.busy"), parent=self)
+            self.jobs.append((label, job))
+            self._notify(t("notify.queued", count=len(self.jobs)))
             return
         self.busy = True
         self._show_progress(label, None)
 
         def work() -> None:
             try:
+                # 막 켜진 앱(명령줄·'보내기' 메뉴로 켰을 때): Tailscale 주소를 얻을 때까지 15초까지 기다린다
+                waited = threading.Event()
+                for _ in range(150):
+                    if self.node.me is not None:
+                        break
+                    waited.wait(0.1)
                 job()
                 self.events.put(("job_done", {}))
             except Exception as exc:  # noqa: BLE001
@@ -787,18 +820,25 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         threading.Thread(target=work, daemon=True).start()
 
     def _send_paths(self, paths: list[Path], stable_id: str | None = None) -> None:
+        """파일은 그대로, 폴더는 임시 zip(<폴더 이름>.zip)으로 묶어 보낸다."""
         target = self._target(stable_id)
-        files = [x for x in paths if x.is_file()]
-        if target is None or not files:
+        items = [x for x in paths if x.is_file() or x.is_dir()]
+        if target is None or not items:
             return
-        if len(files) != len(paths):
-            messagebox.showwarning(APP_NAME, t("dialog.no_folders"), parent=self)
 
         def job() -> None:
-            for f in files:
-                self.node.send_file(target, f)
+            for item in items:
+                if item.is_file():
+                    self.node.send_file(target, item)
+                    continue
+                self.events.put(("packing", {"name": item.name}))
+                folder = Path(tempfile.mkdtemp(prefix="tailhop_"))
+                try:
+                    self.node.send_file(target, bridge.pack_folder(item, folder), record_path=item)
+                finally:
+                    shutil.rmtree(folder, ignore_errors=True)
 
-        self._run_bg(t("progress.sending_files", name=self._target_name(target), count=len(files)), job)
+        self._run_bg(t("progress.sending_files", name=self._target_name(target), count=len(items)), job)
 
     def _on_drop(self, event, stable_id: str | None = None) -> str:
         self.log.configure(fg_color=MAIN_BG)
@@ -824,6 +864,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._on_typing()
 
     def _send_clipboard(self, stable_id: str | None = None) -> None:
+        """클립보드 보내기(트레이·단축키): 텍스트, 없으면 복사한 파일·폴더, 없으면 이미지."""
         target = self._target(stable_id)
         if target is None:
             return
@@ -834,8 +875,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if text.strip():
             self._run_bg(t("progress.sending_clipboard", name=self._target_name(target)),
                          lambda: self.node.send_text(target, text))
+            return
+        try:
+            clip = ImageGrab.grabclipboard()
+        except Exception:  # noqa: BLE001
+            clip = None
+        if isinstance(clip, list) and clip:
+            self._send_paths([Path(x) for x in clip], target)
+        elif isinstance(clip, Image.Image):
+            self._send_clipboard_image(clip, target)
         else:
-            messagebox.showinfo(APP_NAME, t("dialog.no_clip_text"), parent=self)
+            self._notify(t("dialog.no_clip_text"))
 
     # ---------- 페어링 ----------
     def _show_pair_qr(self) -> None:
@@ -987,6 +1037,72 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             messagebox.showerror(APP_NAME, str(exc), parent=self)
             self.autostart_var.set(autostart_enabled())
 
+    def _toggle_sendto(self) -> None:
+        target, args = exe_parts()
+        try:
+            bridge.set_sendto(self.sendto_var.get(), target, args, str(resource_path("assets/tailhop.ico")))
+        except (OSError, subprocess.SubprocessError) as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self)
+        self.sendto_var.set(bridge.sendto_enabled())
+        if self.sendto_var.get():
+            self._flash(t("flash.sendto_on"))
+
+    def _start_hotkey(self, quiet: bool = False) -> bool:
+        self.hotkey = bridge.Hotkey(lambda: self.events.put(("hotkey", {})))
+        if self.hotkey.ok.is_set():
+            return True
+
+        self.hotkey = None
+        if not quiet:
+            messagebox.showwarning(APP_NAME, t("dialog.hotkey_taken", key=bridge.HOTKEY_LABEL), parent=self)
+        return False
+
+    def _toggle_hotkey(self) -> None:
+        on = self.hotkey_var.get()
+        if self.hotkey is not None:
+            self.hotkey.stop()
+            self.hotkey = None
+        if on and not self._start_hotkey():
+            self.hotkey_var.set(False)
+            on = False
+        self.node.settings["hotkey"] = on
+        self.node.save_settings()
+
+    # ---------- 명령줄·'보내기' 메뉴 ----------
+    def _on_bridge(self, data: dict) -> dict:
+        """bridge 스레드에서 불린다. 기기 목록·검사만 여기서 답하고, 보내기는 이벤트로 화면 스레드에 넘긴다."""
+        try:
+            req = bridge.request_from_json(data)
+        except bridge.ArgError:
+            return {"ok": False, "error": "bad_request"}
+        devices = [{"id": sid, "name": x.name, "kind": x.kind, "current": sid == self.current}
+                   for sid, x in self._devices()]
+        if req.list_devices:
+            return {"ok": True, "devices": devices}
+        target = bridge.resolve_device([(d["id"], d["name"]) for d in devices], req.to, self.current)
+        if target is None:
+            return {"ok": False, "error": "no_device", "devices": devices}
+        missing = [x for x in req.paths if not Path(x).exists()]
+        if missing:
+            return {"ok": False, "error": "missing", "paths": missing}
+        self.events.put(("bridge", {"request": req, "target": target}))
+        return {"ok": True, "to": self.node.pairings[target].name}
+
+    def _do_request(self, req: bridge.Request, target: str | None = None) -> None:
+        if target is None:
+            devices = [(sid, x.name) for sid, x in self._devices()]
+            target = bridge.resolve_device(devices, req.to, self.current)
+            if target is None:
+                self._show()
+                messagebox.showwarning(APP_NAME, t("dialog.no_device", name=req.to or ""), parent=self)
+                return
+        text = req.text
+        if text is not None and text.strip():
+            self._run_bg(t("progress.sending"), lambda: self.node.send_text(target, text))
+        if req.paths:
+            self._send_paths([Path(x) for x in req.paths], target)
+        self._notify(t("notify.sending_to", name=self._target_name(target)))
+
     def _set_language(self, choice: str) -> None:
         self.lang_var.set(choice)
         self.node.settings["language"] = choice
@@ -1077,7 +1193,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.lift()
         self.focus_force()
 
+    def _next_job(self) -> None:
+        if self.jobs and not self.busy:
+            label, job = self.jobs.popleft()
+            self._run_bg(label, job)
+
     def _quit(self) -> None:
+        if self.bridge is not None:
+            self.bridge.close()
+        if self.hotkey is not None:
+            self.hotkey.stop()
         self.node.stop()
         self.tray.stop()
         self.destroy()
@@ -1148,10 +1273,24 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         elif kind == "job_done":
             self.busy = False
             self._flash(t("flash.sent"))
+            self._next_job()
         elif kind == "job_error":
             self.busy = False
             self._hide_progress()
-            messagebox.showerror(APP_NAME, t("dialog.send_failed", error=data["error"]), parent=self)
+            if self.winfo_viewable():
+                messagebox.showerror(APP_NAME, t("dialog.send_failed", error=data["error"]), parent=self)
+            else:  # 창이 숨어 있을 때(명령줄·단축키) 보이지 않는 대화상자 대신 알림
+                self._notify(t("dialog.send_failed", error=data["error"]))
+            self._next_job()
+        elif kind == "packing":
+            self._show_progress(t("progress.packing", name=data["name"]), None)
+        elif kind == "hotkey":
+            if self.current is None:
+                self._notify(t("dialog.connect_first"))
+            else:
+                self._send_clipboard()
+        elif kind == "bridge":
+            self._do_request(data["request"], data["target"])
         elif kind == "join_error":
             if self.join_window is not None and self.join_window.winfo_exists():
                 self.join_window.on_error(data["error"])
@@ -1166,16 +1305,83 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._show_pair_qr()
 
 
-def main() -> None:
+def instance_mutex() -> str:
+    """기본 설정 폴더면 1.5 이하와 같은 이름(새 버전과 예전 버전이 함께 뜨지 않게), 다른 폴더면 폴더별 이름."""
+    if store.APP_DIR == store.DEFAULT_APP_DIR:
+        return "Local\\TailHopSingleInstance"
+    digest = hashlib.sha256(str(store.APP_DIR).casefold().encode("utf-8")).hexdigest()[:16]
+    return f"Local\\TailHopSingleInstance-{digest}"
+
+
+def _console() -> None:
+    """창 없는 exe(--windowed)를 터미널에서 불렀을 때 그 터미널에 결과를 찍는다."""
+    if sys.stdout is None and ctypes.windll.kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8")  # noqa: SIM115 - 프로세스가 끝날 때까지 쓴다
+        sys.stderr = sys.stdout
+
+
+def _say(text: str) -> None:
+    if sys.stdout is not None:
+        print(text)
+
+
+def _print_reply(req: bridge.Request, reply: dict) -> int:
+    if req.list_devices or reply.get("error") == "no_device":
+        for d in reply.get("devices", []):
+            _say(f"{'*' if d['current'] else ' '} {d['name']}  ({kind_label(d['kind'])}, {d['id']})")
+    if reply.get("ok"):
+        if not req.list_devices:
+            _say(t("cli.sending", name=reply.get("to", "")))
+        return 0
+
+    error = reply.get("error")
+    if error == "no_device":
+        _say(t("dialog.no_device", name=req.to or ""))
+    elif error == "missing":
+        _say(t("cli.missing", paths=", ".join(reply.get("paths", []))))
+    else:
+        _say(t("cli.failed", error=error))
+    return 1
+
+
+def _forward(req: bridge.Request) -> int:
+    """이미 떠 있는 앱에 요청을 넘긴다. 막 켜지는 중이면 bridge.json이 생길 때까지 5초까지 다시 시도한다."""
+    waited = threading.Event()
+    for _ in range(25):
+        try:
+            return _print_reply(req, bridge.send_request(req))
+        except OSError:
+            waited.wait(0.2)
+    _say(t("cli.no_app"))
+    return 1
+
+
+def main() -> int:
     i18n.set_language(store.load_settings().get("language", i18n.SYSTEM))
-    # 중복 실행 방지
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\TailHopSingleInstance")
+    _console()
+    try:
+        req = bridge.parse_args(sys.argv[1:])
+    except bridge.ArgError as exc:
+        _say(t("cli.usage", arg=str(exc)))
+        return 2
+
+    # 중복 실행 방지: 이미 떠 있으면 할 일만 넘기고 끝낸다. 설정 폴더마다 하나(bridge.json도 그 폴더에 있다)
+    ctypes.windll.kernel32.CreateMutexW(None, False, instance_mutex())
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        if req.has_work:
+            return _forward(req)
+
         ctypes.windll.user32.MessageBoxW(None, t("dialog.already_running"), APP_NAME, 0x40)
-        return
+        return 0
+
+    if req.list_devices:
+        _say(t("cli.no_app"))
+        return 1
+
     ctk.set_appearance_mode("system")
-    App(start_hidden="--hidden" in sys.argv).mainloop()
+    App(start_hidden=req.hidden or req.has_work, request=req).mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

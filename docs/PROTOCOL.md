@@ -89,7 +89,9 @@ PC ↔ PC 값(`k_pc_host_to_joiner_hex`, `k_pc_joiner_to_host_hex`, `msg_pc_*`, 
 1.2 이하의 `phone_ip`/`phone_port`/`phone_name`/`phone_stable_id` 형식은 처음 읽을 때 `kind:"phone"`으로 옮긴다. 1.5.0 이전에 남기던 원본 사본 `pairings.json.v1.bak`(해제한 기기의 비밀까지 담김)은 새 형식을 제대로 읽으면 지운다. 기기 표시가 없는 예전 기록은 첫 폰의 대화로 옮겨 저장한다.
 연결 해제(PC 1.5.0): 페어링과 함께 그 기기와 주고받은 기록(`texts/`의 긴 글 포함)도 지운다(Android와 같음). 받은 파일 자체는 지우지 않는다.
 
-`settings.json`(1.5.0): `language`(`system`|`ko`|`en`|`ja`|`zh_CN`), `receiving`(기본 true), `pause_until`(유닉스 초, 시간을 정해 멈췄을 때만).
+`settings.json`(1.5.0): `language`(`system`|`ko`|`en`|`ja`|`zh_CN`), `receiving`(기본 true), `pause_until`(유닉스 초, 시간을 정해 멈췄을 때만), `hotkey`(1.6.0, 전역 단축키를 켰을 때 true).
+
+`bridge.json`(PC 1.6.0): 명령줄·탐색기 '보내기' 메뉴가 실행 중인 앱에 보내기를 맡기는 로컬 소켓(`127.0.0.1`)의 `port`, `token`(32바이트 hex), `pid`. 이 사용자만 읽는 ACL로 쓰고 앱이 끝나면 지운다. 요청은 JSON 한 줄(`token`, `paths`, `text`, `to`, `list`)이고 토큰이 틀리면 답하지 않는다. 기기 사이 선(wire) 형식과는 상관없다. 폴더는 `<폴더 이름>.zip`으로 묶어 보통 파일(§4 `file`)로 보낸다(링크는 따라가지 않는다).
 
 기록(1.5.0): 2000자보다 긴 텍스트는 `texts/<32자 hex>.txt`에 따로 두고 `history.json` 항목에는 앞 2000자(`text`), 파일 이름(`text_file`), 전체 글자 수(`text_len`)만 남긴다. 1.4 이하 기록은 처음 열 때 한 번 옮긴다. 항목이 잘리거나 지워지면 그 파일도 지운다. Android는 같은 방식으로 `files/texts/<id>.txt`와 `tlen`을 쓴다.
 

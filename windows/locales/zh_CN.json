@@ -2,27 +2,23 @@
   "lang.system": "跟随系统设置",
   "kind.phone": "手机",
   "kind.pc": "电脑",
-
   "status.checking": "正在检查 Tailscale…",
   "status.listening": "{name} · 等待接收",
   "status.offline": "{error}",
   "status.paused": "已暂停接收 · 仍可发送",
   "status.paused_until": "已暂停接收 · 将于 {time} 恢复",
   "status.blocked": "已拦截连接：{error}",
-
   "sidebar.new_device": "连接新设备",
   "sidebar.devices": "设备",
   "sidebar.no_devices": "还没有已连接的设备",
   "sidebar.receive": "接收",
   "device.no_messages": "暂无消息",
-
   "header.no_device": "未连接设备",
   "header.connected": "{kind} · 已连接",
   "header.offline": "{kind} · 此电脑已离线",
   "header.paused": "{kind} · 此电脑已暂停接收",
   "chip.connect": "连接设备",
   "composer.placeholder": "发送任何内容 · 文件可直接拖入",
-
   "menu.show_pair": "连接新设备（显示二维码/连接码）",
   "menu.enter_code": "输入其他电脑的连接码…",
   "menu.open_folder": "打开接收文件夹",
@@ -41,7 +37,6 @@
   "devmenu.send_files": "发送文件…",
   "devmenu.clear": "清除聊天记录",
   "devmenu.unpair": "断开连接",
-
   "date.header": "{month}月{day}日 {weekday}",
   "date.weekdays": "星期一,星期二,星期三,星期四,星期五,星期六,星期日",
   "date.months": "1月,2月,3月,4月,5月,6月,7月,8月,9月,10月,11月,12月",
@@ -54,7 +49,6 @@
   "empty.connect_title": "请连接设备",
   "empty.connect_sub": "手机用 TailHop 应用扫描二维码，其他电脑粘贴连接码即可",
   "empty.connect_button": "连接新设备",
-
   "flash.copied": "已复制",
   "flash.received": "接收完成",
   "flash.sent": "发送完成",
@@ -69,12 +63,9 @@
   "progress.sending_bytes": "正在发送 {done} / {total}",
   "pick.title": "选择要发送到 {name} 的文件",
   "folder.title": "接收文件的保存文件夹",
-
   "dialog.file_missing": "文件已被移动或删除。",
   "dialog.clear_confirm": "要清除与 {name} 的聊天记录吗？（已接收的文件不会被删除）",
   "dialog.connect_first": "请先连接设备。",
-  "dialog.busy": "正在发送，请完成后再试。",
-  "dialog.no_folders": "无法发送文件夹，只发送其中选中的文件。",
   "dialog.no_clip_text": "剪贴板中没有文字。",
   "dialog.paired": "已与 {name} 连接！\n\n确认码：{code}\n请确认与对方设备上显示的确认码一致。\n如果不一致，请立即断开连接。",
   "dialog.send_failed": "发送失败。\n{error}\n\n请确认对方设备上的 TailHop 和 Tailscale 已开启，且没有暂停接收。",
@@ -83,7 +74,6 @@
   "dialog.unpair_confirm": "要断开与 {name} 的连接吗？与此设备的记录也会被删除（已接收的文件会保留）。之后需要用二维码或连接码重新连接才能使用。\n（请在对方设备上也断开与此电脑的连接）",
   "dialog.peer_unpaired": "{name} 取消了连接（选择了确认码不一致）。\n此电脑上的连接和记录也已删除。如果确实是你的设备，请重新连接。",
   "dialog.already_running": "TailHop 已在运行，请查看系统托盘图标。",
-
   "pair.title": "连接新设备",
   "pair.phone_hint": "手机：在 TailHop 应用中点「连接新设备」扫描二维码",
   "pair.pc_hint": "其他电脑：在 TailHop 中选择「输入其他电脑的连接码」，输入下方连接码",
@@ -100,7 +90,6 @@
   "join.connecting": "正在连接…",
   "join.checking": "正在确认对方电脑…",
   "join.failed": "无法连接：{error}",
-
   "tray.open": "打开",
   "tray.send_clipboard": "发送剪贴板",
   "tray.receiving": "接收",
@@ -111,7 +100,6 @@
   "tray.title_paused": "TailHop · 已暂停接收",
   "notify.text": "{peer}：收到文字（已复制到剪贴板）\n{text}",
   "notify.file": "{peer}：收到文件 · {name}",
-
   "err.disconnected": "连接中途断开。",
   "err.after_last": "最后一帧之后仍收到了数据。",
   "err.bad_frame_len": "帧长度无效。",
@@ -167,5 +155,18 @@
   "err.file_changed": "发送过程中文件大小发生了变化。",
   "err.paused_pairing": "暂停接收期间无法连接新设备，请先恢复接收。",
   "err.tagged_node": "TailHop 不与带标签的 Tailscale 设备（服务器、共享设备等）连接。",
-  "err.disk_full": "磁盘空间不足，无法接收文件。"
+  "err.disk_full": "磁盘空间不足，无法接收文件。",
+  "menu.sendto": "添加到资源管理器的“发送到”菜单",
+  "menu.hotkey": "用 {key} 发送剪贴板",
+  "flash.sendto_on": "在资源管理器中右键点击文件或文件夹 → 发送到 → TailHop",
+  "dialog.hotkey_taken": "{key} 快捷键已被其他程序占用。",
+  "dialog.no_device": "找不到要发送的设备：{name}",
+  "notify.queued": "等待发送（还有 {count} 项）",
+  "notify.sending_to": "正在发送到 {name}",
+  "progress.packing": "正在把文件夹“{name}”打包为 zip…",
+  "cli.sending": "正在发送到 {name}。可在 TailHop 托盘通知中查看进度。",
+  "cli.missing": "文件不存在：{paths}",
+  "cli.failed": "发送失败：{error}",
+  "cli.no_app": "TailHop 没有运行。",
+  "cli.usage": "未知参数：{arg}\n用法：TailHop.exe [--to 设备] [--text 文字] [文件或文件夹...] | --list"
 }

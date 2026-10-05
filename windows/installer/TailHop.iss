@@ -1,5 +1,5 @@
 #define AppName "TailHop"
-#define AppVersion "1.5.0"
+#define AppVersion "1.6.0"
 #define AppExe "TailHop.exe"
 
 [Setup]
@@ -35,10 +35,15 @@ english.AutoStart=Start automatically with Windows (in the tray)
 korean.AutoStart=Windows 시작 시 자동 실행(트레이)
 japanese.AutoStart=Windows の起動時に自動で実行(トレイ)
 chinesesimplified.AutoStart=开机时自动启动（托盘）
+english.SendTo=Add to Explorer's "Send to" menu
+korean.SendTo=탐색기 '보내기' 메뉴에 추가
+japanese.SendTo=エクスプローラーの「送る」メニューに追加
+chinesesimplified.SendTo=添加到资源管理器的“发送到”菜单
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "autostart"; Description: "{cm:AutoStart}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "sendto"; Description: "{cm:SendTo}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 Source: "..\dist\TailHop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -47,6 +52,8 @@ Source: "..\dist\TailHop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdi
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+; 탐색기 오른쪽 클릭 → 보내기 → TailHop (1.6.0). 고른 파일·폴더를 인자로 넘기면 실행 중인 앱이 지금 대화방 기기로 보낸다.
+Name: "{usersendto}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: sendto
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExe}"" --hidden"; Tasks: autostart; Flags: uninsdeletevalue

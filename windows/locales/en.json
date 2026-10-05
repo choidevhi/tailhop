@@ -2,27 +2,23 @@
   "lang.system": "Use system language",
   "kind.phone": "Phone",
   "kind.pc": "PC",
-
   "status.checking": "Checking Tailscale…",
   "status.listening": "{name} · Ready to receive",
   "status.offline": "{error}",
   "status.paused": "Receiving paused · You can still send",
   "status.paused_until": "Receiving paused · Resumes at {time}",
   "status.blocked": "Blocked a connection: {error}",
-
   "sidebar.new_device": "Connect a device",
   "sidebar.devices": "Devices",
   "sidebar.no_devices": "No devices connected yet",
   "sidebar.receive": "Receive",
   "device.no_messages": "No messages",
-
   "header.no_device": "No device connected",
   "header.connected": "{kind} · Connected",
   "header.offline": "{kind} · This PC is offline",
   "header.paused": "{kind} · Receiving paused on this PC",
   "chip.connect": "Connect a device",
   "composer.placeholder": "Send anything · Drop files here",
-
   "menu.show_pair": "Connect a device (show QR / code)",
   "menu.enter_code": "Enter another PC's code…",
   "menu.open_folder": "Open received folder",
@@ -41,7 +37,6 @@
   "devmenu.send_files": "Send files…",
   "devmenu.clear": "Clear conversation",
   "devmenu.unpair": "Disconnect",
-
   "date.header": "{weekday}, {month_name} {day}",
   "date.weekdays": "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday",
   "date.months": "January,February,March,April,May,June,July,August,September,October,November,December",
@@ -54,7 +49,6 @@
   "empty.connect_title": "Connect a device",
   "empty.connect_sub": "Scan the QR code with the TailHop app on your phone, or paste the connection code on another PC",
   "empty.connect_button": "Connect a device",
-
   "flash.copied": "Copied",
   "flash.received": "Received",
   "flash.sent": "Sent",
@@ -69,12 +63,9 @@
   "progress.sending_bytes": "Sending {done} / {total}",
   "pick.title": "Choose files to send to {name}",
   "folder.title": "Folder for received files",
-
   "dialog.file_missing": "The file has been moved or deleted.",
   "dialog.clear_confirm": "Clear the conversation with {name}? (Received files are kept.)",
   "dialog.connect_first": "Connect a device first.",
-  "dialog.busy": "Still sending. Try again when it's done.",
-  "dialog.no_folders": "Folders can't be sent. Only the files will be sent.",
   "dialog.no_clip_text": "There's no text on the clipboard.",
   "dialog.paired": "Connected to {name}!\n\nConfirmation code: {code}\nMake sure it matches the code on the other device.\nIf it doesn't, disconnect right away.",
   "dialog.send_failed": "Couldn't send.\n{error}\n\nMake sure TailHop and Tailscale are running on the other device and that receiving isn't paused there.",
@@ -83,7 +74,6 @@
   "dialog.unpair_confirm": "Disconnect {name}? The history with this device will be deleted too (received files stay). To use it again you'll need to reconnect with a QR or code.\n(Disconnect this PC on the other device too.)",
   "dialog.peer_unpaired": "{name} cancelled the connection (the confirmation code was marked as different).\nThe connection and its history were removed from this PC too. If it really is your device, connect again.",
   "dialog.already_running": "TailHop is already running. Check the tray icon.",
-
   "pair.title": "Connect a device",
   "pair.phone_hint": "Phone: in the TailHop app, tap 'Connect a device' and scan the QR",
   "pair.pc_hint": "Another PC: in TailHop, choose 'Enter another PC's connection code' and enter this code",
@@ -100,7 +90,6 @@
   "join.connecting": "Connecting…",
   "join.checking": "Checking the other PC…",
   "join.failed": "Couldn't connect: {error}",
-
   "tray.open": "Open",
   "tray.send_clipboard": "Send clipboard",
   "tray.receiving": "Receive",
@@ -111,7 +100,6 @@
   "tray.title_paused": "TailHop · Receiving paused",
   "notify.text": "{peer}: Text received (copied to clipboard)\n{text}",
   "notify.file": "{peer}: File received · {name}",
-
   "err.disconnected": "The connection was cut off.",
   "err.after_last": "Data arrived after the final frame.",
   "err.bad_frame_len": "Invalid frame length.",
@@ -167,5 +155,18 @@
   "err.file_changed": "The file size changed while sending.",
   "err.paused_pairing": "You can't connect a new device while receiving is paused. Turn receiving back on first.",
   "err.tagged_node": "TailHop doesn't connect to tagged Tailscale devices (servers, shared devices, etc.).",
-  "err.disk_full": "Not enough disk space to receive the file."
+  "err.disk_full": "Not enough disk space to receive the file.",
+  "menu.sendto": "Add to Explorer's 'Send to' menu",
+  "menu.hotkey": "Send clipboard with {key}",
+  "flash.sendto_on": "In Explorer, right-click files or folders → Send to → TailHop",
+  "dialog.hotkey_taken": "Another program is already using the {key} shortcut.",
+  "dialog.no_device": "Couldn't find the device to send to: {name}",
+  "notify.queued": "Queued ({count} waiting)",
+  "notify.sending_to": "Sending to {name}",
+  "progress.packing": "Zipping folder '{name}'…",
+  "cli.sending": "Sending to {name}. Watch the TailHop tray notifications for progress.",
+  "cli.missing": "File not found: {paths}",
+  "cli.failed": "Couldn't send: {error}",
+  "cli.no_app": "TailHop isn't running.",
+  "cli.usage": "Unknown argument: {arg}\nUsage: TailHop.exe [--to DEVICE] [--text TEXT] [FILE_OR_FOLDER...] | --list"
 }

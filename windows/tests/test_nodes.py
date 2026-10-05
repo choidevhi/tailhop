@@ -59,7 +59,8 @@ def wait_for(cond, timeout: float = 5.0) -> bool:
 
 class TwoNodeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # 멈춘 노드의 마지막 수신 스레드가 정리 직전에 파일을 쓸 수 있어 정리 오류는 무시한다(임시 폴더라 남아도 된다)
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name)
         self.table = {
             IP_A: tsnet.Peer("nodeA", USER, "pc-a"),
@@ -132,6 +133,23 @@ class TwoNodeTests(unittest.TestCase):
         again = {x.stable_id: x for x in store.load_pairings(self.root / "B" / "app")}
         self.assertEqual(again["nodeA"].role, "joiner")
         self.assertNotIn(pb.secret.hex(), (self.root / "B" / "app" / "pairings.json").read_text("utf-8"))
+
+    def test_folder_is_sent_as_zip_and_history_keeps_folder(self):
+        import zipfile
+
+        import bridge
+
+        self.pair_ab()
+        folder = self.root / "프로젝트"
+        (folder / "src").mkdir(parents=True)
+        (folder / "src" / "main.py").write_text("print(1)", "utf-8")
+        packed = bridge.pack_folder(folder, self.root / "tmpzip")
+        self.a.send_file("nodeB", packed, record_path=folder)
+        self.assertTrue(wait_for(lambda: any(k == "received" for k, _ in self.ev_b)))
+        with zipfile.ZipFile(self.root / "B" / "recv" / "프로젝트.zip") as zf:
+            self.assertEqual(zf.read("src/main.py"), b"print(1)")
+        sent = self.a.history.for_peer("nodeB")[-1]
+        self.assertEqual((sent["name"], sent["path"]), ("프로젝트.zip", str(folder)))
 
     def test_pair_with_link(self):
         self.pair_ab(use_uri=True)

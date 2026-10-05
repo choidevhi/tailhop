@@ -7,6 +7,7 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - `windows/` — PC 앱 (Python, customtkinter, 트레이 상주, 드래그 앤 드롭). 1.4.0부터 다른 PC와도 연결(연결 코드 붙여넣기)
 - `android/` — Android 앱 (Kotlin, 공유 메뉴, 수신 서비스)
 - 1.5.0부터 두 앱 모두 한국어·English·日本語·简体中文(기본은 시스템 언어, 설정에서 고르기)와 수신 중지(포트를 닫고 보내기만, 1시간 타이머)를 지원한다. 화면 문자열은 PC `windows/locales/*.json`, Android `res/values*/strings.xml`
+- 1.6.0부터 PC 앱은 폴더를 zip으로 묶어 보내고, 탐색기 '보내기' 메뉴·명령줄·전역 단축키(Ctrl+Alt+Shift+C, 켤 때만)로 보낼 수 있다. 보내는 중에 더 보내면 차례로 보낸다. 선(wire) 형식은 그대로라 예전 앱·Android도 받는다
 - `docs/PROTOCOL.md` — 전송 프로토콜, `docs/test_vectors.json` — 두 구현이 공유하는 테스트 벡터
 
 ## 보안 (1.5.0 점검 반영)
@@ -16,10 +17,15 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - 받은 파일 이름에서 글자 순서를 바꾸는 문자와 Windows 장치 이름을 막고, 공간이 부족하면 받기 전에 거부한다.
 - 자세한 규칙은 `docs/PROTOCOL.md`.
 
+## 명령줄 (PC 1.6.0)
+- `TailHop.exe [--to 기기] [--text 글] [파일·폴더...]`: 실행 중인 앱에 넘겨 보낸다(앱이 꺼져 있으면 트레이로 켜고 보낸다). `--to`가 없으면 지금 대화방 기기, 있으면 기기 ID·이름·이름 앞부분(하나만 맞을 때)으로 찾는다
+- `TailHop.exe --list`: 연결된 기기 목록(`*`가 지금 대화방)
+- 앱과는 `127.0.0.1`의 로컬 소켓으로만 말하고, 포트와 토큰은 이 사용자만 읽는 `%APPDATA%\TailHop\bridge.json`에 있다. 토큰이 틀리면 응답하지 않는다
+
 ## 테스트
 - PC: `cd windows && set PYTHONPATH=. && .venv\Scripts\python -m unittest discover -s tests` (두 PC 시뮬레이션·번역 표·수신 중지·대용량 스트리밍 메모리 포함, 임시 폴더와 빈 포트만 씀)
 - Android: `cd android && ./gradlew testDebugUnitTest lintDebug` (번역 누락은 lint 오류, 릴리즈 빌드도 막음. 페어링 확인·공유 authority·파일명 정리 회귀 테스트 포함)
-- 실제 Tailscale 위 수동 확인: `tests\e2e_tailscale.py`(가짜 폰), `tests\e2e_pc_pair.py`(한 PC 안의 두 노드)
+- 실제 Tailscale 위 수동 확인: `tests\e2e_tailscale.py`(가짜 폰), `tests\e2e_pc_pair.py`(한 PC 안의 두 노드), `tests\e2e_bridge.py`(실제 앱을 임시 설정 폴더로 띄워 명령줄로 파일·폴더·텍스트 보내기)
 
 ## 빌드
 - PC: `windows\build.bat` → `dist\TailHop_Setup_<버전>.exe` (Inno Setup 6 필요)

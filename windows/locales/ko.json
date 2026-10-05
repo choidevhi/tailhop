@@ -2,27 +2,23 @@
   "lang.system": "시스템 설정 따르기",
   "kind.phone": "폰",
   "kind.pc": "PC",
-
   "status.checking": "Tailscale 확인 중…",
   "status.listening": "{name} · 수신 대기 중",
   "status.offline": "{error}",
   "status.paused": "수신 중지됨 · 보내기는 할 수 있어요",
   "status.paused_until": "수신 중지됨 · {time}에 다시 받아요",
   "status.blocked": "차단한 연결: {error}",
-
   "sidebar.new_device": "새 기기 연결",
   "sidebar.devices": "기기",
   "sidebar.no_devices": "아직 연결된 기기가 없어요",
   "sidebar.receive": "수신",
   "device.no_messages": "대화 없음",
-
   "header.no_device": "연결된 기기 없음",
   "header.connected": "{kind} · 연결됨",
   "header.offline": "{kind} · 이 PC가 오프라인",
   "header.paused": "{kind} · 이 PC는 수신 중지됨",
   "chip.connect": "기기 연결",
   "composer.placeholder": "무엇이든 보내세요 · 파일은 끌어다 놓기",
-
   "menu.show_pair": "새 기기 연결 (QR·코드 보여주기)",
   "menu.enter_code": "다른 PC의 코드 입력…",
   "menu.open_folder": "받은 폴더 열기",
@@ -41,7 +37,6 @@
   "devmenu.send_files": "파일 보내기…",
   "devmenu.clear": "대화 지우기",
   "devmenu.unpair": "연결 해제",
-
   "date.header": "{month}월 {day}일 {weekday}",
   "date.weekdays": "월요일,화요일,수요일,목요일,금요일,토요일,일요일",
   "date.months": "1월,2월,3월,4월,5월,6월,7월,8월,9월,10월,11월,12월",
@@ -54,7 +49,6 @@
   "empty.connect_title": "기기를 연결하세요",
   "empty.connect_sub": "폰은 TailHop 앱으로 QR을 스캔하고, 다른 PC는 연결 코드를 붙여 넣으면 돼요",
   "empty.connect_button": "새 기기 연결",
-
   "flash.copied": "복사했어요",
   "flash.received": "받기 완료",
   "flash.sent": "보내기 완료",
@@ -69,12 +63,9 @@
   "progress.sending_bytes": "보내는 중 {done} / {total}",
   "pick.title": "{name}(으)로 보낼 파일 선택",
   "folder.title": "받은 파일 저장 폴더",
-
   "dialog.file_missing": "파일이 이동되었거나 삭제되었습니다.",
   "dialog.clear_confirm": "{name} 대화를 지울까요? (받은 파일은 지우지 않습니다)",
   "dialog.connect_first": "먼저 기기를 연결하세요.",
-  "dialog.busy": "보내는 중입니다. 끝난 뒤 다시 시도하세요.",
-  "dialog.no_folders": "폴더는 보낼 수 없습니다. 파일만 보냅니다.",
   "dialog.no_clip_text": "클립보드에 텍스트가 없습니다.",
   "dialog.paired": "{name} 연결 완료!\n\n확인 코드: {code}\n상대 기기 화면의 코드와 같은지 확인하세요.\n다르면 바로 연결 해제하세요.",
   "dialog.send_failed": "보내지 못했습니다.\n{error}\n\n상대 기기에서 TailHop과 Tailscale이 켜져 있고, 수신이 중지되어 있지 않은지 확인하세요.",
@@ -83,7 +74,6 @@
   "dialog.unpair_confirm": "{name} 연결을 해제할까요? 이 기기와 주고받은 기록도 지워집니다(받은 파일은 남습니다). 다시 쓰려면 QR이나 코드로 다시 연결해야 합니다.\n(상대 기기에서도 이 PC를 연결 해제하세요)",
   "dialog.peer_unpaired": "{name}에서 연결을 취소했습니다(확인 코드가 다르다고 선택함).\n이 PC에서도 연결과 기록을 지웠습니다. 내 기기가 맞다면 다시 연결하세요.",
   "dialog.already_running": "TailHop이 이미 실행 중입니다. 트레이 아이콘을 확인하세요.",
-
   "pair.title": "새 기기 연결",
   "pair.phone_hint": "폰: TailHop 앱 → '새 기기 연결'로 QR 스캔",
   "pair.pc_hint": "다른 PC: TailHop → '다른 PC의 연결 코드 입력'에 아래 코드를 입력",
@@ -100,7 +90,6 @@
   "join.connecting": "연결 중…",
   "join.checking": "상대 PC 확인 중…",
   "join.failed": "연결하지 못했어요: {error}",
-
   "tray.open": "열기",
   "tray.send_clipboard": "클립보드 보내기",
   "tray.receiving": "수신",
@@ -111,7 +100,6 @@
   "tray.title_paused": "TailHop · 수신 중지됨",
   "notify.text": "{peer}: 텍스트 받음 (클립보드에 복사됨)\n{text}",
   "notify.file": "{peer}: 파일 받음 · {name}",
-
   "err.disconnected": "연결이 중간에 끊겼습니다.",
   "err.after_last": "마지막 프레임 뒤에 데이터가 왔습니다.",
   "err.bad_frame_len": "프레임 길이가 잘못되었습니다.",
@@ -167,5 +155,18 @@
   "err.file_changed": "보내는 중 파일 크기가 바뀌었습니다.",
   "err.paused_pairing": "수신을 중지한 동안에는 새 기기를 연결할 수 없습니다. 수신을 다시 켜세요.",
   "err.tagged_node": "태그가 붙은 Tailscale 기기(서버·공유 기기 등)와는 연결하지 않습니다.",
-  "err.disk_full": "받을 디스크 공간이 부족합니다."
+  "err.disk_full": "받을 디스크 공간이 부족합니다.",
+  "menu.sendto": "탐색기 '보내기' 메뉴에 추가",
+  "menu.hotkey": "{key}로 클립보드 보내기",
+  "flash.sendto_on": "탐색기에서 파일·폴더를 오른쪽 클릭 → 보내기 → TailHop",
+  "dialog.hotkey_taken": "{key} 단축키를 다른 프로그램이 이미 쓰고 있습니다.",
+  "dialog.no_device": "받을 기기를 찾지 못했습니다: {name}",
+  "notify.queued": "보내기 대기 중 ({count}개 남음)",
+  "notify.sending_to": "{name}(으)로 보내는 중",
+  "progress.packing": "'{name}' 폴더를 zip으로 묶는 중…",
+  "cli.sending": "{name}(으)로 보냅니다. 진행 상황은 TailHop 트레이 알림에서 볼 수 있습니다.",
+  "cli.missing": "없는 파일입니다: {paths}",
+  "cli.failed": "보내지 못했습니다: {error}",
+  "cli.no_app": "TailHop이 실행 중이 아닙니다.",
+  "cli.usage": "알 수 없는 인자: {arg}\n사용법: TailHop.exe [--to 기기] [--text 글] [파일·폴더...] | --list"
 }
