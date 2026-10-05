@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FFFFFF</color>
+    <color name="card">#F7F7F8</color>
+    <color name="label">#0D0D0D</color>
+    <color name="secondary">#8E8E8E</color>
+    <color name="header">#8E8E8E</color>
+    <color name="separator">#ECECEC</color>
+    <color name="accent">#0D0D0D</color>
+    <color name="accentTint">#F1F1F3</color>
+    <color name="onAccent">#FFFFFF</color>
+    <color name="green">#34C759</color>
+    <color name="red">#E5484D</color>
+    <color name="orange">#B7791F</color>
+    <color name="gray">#C4C4C4</color>
+    <color name="field">#F1F1F3</color>
+    <color name="pressed">#0F000000</color>
+    <color name="launcherBg">#181E2C</color>
+    <color name="bubbleOut">#F1F1F3</color>
+    <color name="bubbleIn">#00000000</color>
+    <color name="composerBg">#FFFFFF</color>
+    <color name="composerBorder">#E5E5E5</color>
+    <color name="sendDisabled">#D9D9D9</color>
+    <color name="iconCircle">#F1F1F3</color>
+</resources>

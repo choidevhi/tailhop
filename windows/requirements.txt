@@ -1,0 +1,8 @@
+cryptography==50.0.2
+pillow==12.3.0
+pyinstaller==6.22.3
+pystray==0.19.5
+qrcode==8.2
+tkinterdnd2==0.6.3
+customtkinter==6.0.0
+darkdetect==0.8.0

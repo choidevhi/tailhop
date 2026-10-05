@@ -1,0 +1,9 @@
+<!-- TailHop 앱 아이콘: 어두운 둥근 사각형 위 두 색 화살표(Lucide arrow-right-left를 0.72배로 가운데에). PC .ico와 같은 원본. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="1.9"
+     stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0.5" y="0.5" width="23" height="23" rx="5.5" fill="#181E2C" stroke="none" />
+  <path d="M14.88 5.52 17.76 8.4 14.88 11.28" stroke="#408CFF" />
+  <path d="M17.76 8.4H6.24" stroke="#408CFF" />
+  <path d="M9.12 18.48 6.24 15.6 9.12 12.72" stroke="#40D2A0" />
+  <path d="M6.24 15.6H17.76" stroke="#40D2A0" />
+</svg>

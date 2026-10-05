@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- build_icons.py가 만든 파일(원본: windows/assets/icons/laptop.svg, Lucide ISC). 직접 고치지 않는다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M18,5A2,2 0 0,1 20,7L20,15.526A2,2 0 0,0 20.212,16.423L21.28,18.55A1,1 0 0,1 20.38,20L3.62,20A1,1 0 0,1 2.72,18.55L3.788,16.423A2,2 0 0,0 4,15.526L4,7A2,2 0 0,1 6,5Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path android:pathData="M20.054,15.987L3.946,15.987"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

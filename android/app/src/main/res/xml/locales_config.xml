@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 13+ 설정 > 앱 > TailHop > 언어 에 보이는 목록. values-* 폴더와 같게 둔다. -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="ko" />
+    <locale android:name="ja" />
+    <locale android:name="zh-CN" />
+</locale-config>

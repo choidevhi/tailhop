@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical"
+        android:paddingStart="20dp" android:paddingEnd="8dp" android:paddingTop="12dp" android:paddingBottom="4dp">
+        <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:text="@string/app_name" android:textSize="30sp" android:textStyle="bold" android:textColor="@color/label"
+            android:accessibilityHeading="true" />
+        <ImageButton android:id="@+id/moreBtn" android:layout_width="44dp" android:layout_height="44dp"
+            android:background="@drawable/bg_row_press" android:src="@drawable/ic_more" android:tint="@color/label"
+            android:contentDescription="@string/more" />
+    </LinearLayout>
+
+    <LinearLayout android:id="@+id/addRow" android:layout_width="match_parent" android:layout_height="60dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="20dp" android:paddingEnd="20dp"
+        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="9dp"
+            android:background="@drawable/circle_outline" android:src="@drawable/ic_plus" android:tint="@color/label"
+            android:importantForAccessibility="no" />
+        <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:layout_marginStart="14dp" android:text="@string/main_new_device" android:textSize="16sp" android:textColor="@color/label" />
+        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_qr"
+            android:tint="@color/secondary" android:importantForAccessibility="no" />
+    </LinearLayout>
+
+    <!-- 수신 켜기/끄기: 끄면 수신 서비스(포트·상시 알림)가 멈추고 보내기만 된다 -->
+    <LinearLayout android:id="@+id/receiveRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:minHeight="60dp" android:orientation="horizontal" android:gravity="center_vertical"
+        android:paddingStart="20dp" android:paddingEnd="16dp" android:paddingTop="6dp" android:paddingBottom="6dp"
+        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="10dp"
+            android:background="@drawable/circle_outline" android:src="@drawable/ic_arrow_down" android:tint="@color/label"
+            android:importantForAccessibility="no" />
+        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:layout_marginStart="14dp" android:orientation="vertical">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="@string/main_receive" android:textSize="16sp" android:textColor="@color/label" />
+            <TextView android:id="@+id/svcState" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="1dp" android:textSize="12sp" android:textColor="@color/secondary"
+                android:maxLines="2" android:ellipsize="end" />
+        </LinearLayout>
+        <androidx.appcompat.widget.SwitchCompat android:id="@+id/receiveSwitch"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp"
+            android:contentDescription="@string/main_receive" />
+    </LinearLayout>
+
+    <TextView android:id="@+id/devHeader" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:paddingStart="20dp" android:paddingTop="18dp" android:paddingBottom="6dp"
+        android:text="@string/main_devices" android:textSize="13sp" android:textStyle="bold" android:textColor="@color/secondary" />
+
+    <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+        <androidx.recyclerview.widget.RecyclerView android:id="@+id/devices"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+        <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:orientation="vertical" android:gravity="center" android:padding="32dp" android:visibility="gone">
+            <ImageView android:layout_width="72dp" android:layout_height="72dp" android:padding="20dp"
+                android:background="@drawable/circle_outline_lg" android:src="@drawable/ic_laptop"
+                android:tint="@color/label" android:importantForAccessibility="no" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="20dp" android:text="@string/main_empty_title" android:textSize="26sp"
+                android:textStyle="bold" android:textColor="@color/label" android:gravity="center" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:gravity="center" android:textSize="15sp" android:textColor="@color/secondary"
+                android:text="@string/main_empty_sub" />
+            <Button android:id="@+id/qrBtn" style="@style/Btn.Primary" android:layout_width="wrap_content"
+                android:layout_weight="0" android:layout_marginTop="24dp" android:paddingStart="28dp"
+                android:paddingEnd="28dp" android:text="@string/main_scan_qr" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>
