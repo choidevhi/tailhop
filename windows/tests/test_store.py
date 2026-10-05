@@ -77,7 +77,12 @@ class MigrationTests(unittest.TestCase):
         dacl = sddl[sddl.index("D:"):]
         self.assertTrue(dacl.startswith("D:P"), dacl)  # 상속 끊김
         self.assertEqual(dacl.count("(A;"), 1, dacl)  # 허용 항목 하나
-        self.assertIn(store._current_user_sid(), dacl)
+        # SDDL may print a well-known alias (e.g. "LA" for the built-in Administrator on CI), so ask for the SID itself.
+        sids = subprocess.run(["powershell", "-NoProfile", "-Command",
+                               f"(Get-Acl -LiteralPath '{self.dir / 'pairings.json'}').GetAccessRules($true, $false, "
+                               "[System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }"],
+                              capture_output=True, text=True, timeout=60).stdout.split()
+        self.assertEqual(sids, [store._current_user_sid()])
 
     def test_explorer_command_quotes_whole_path(self):
         cmd = store.explorer_select_command(Path(r"C:\Users\me\Downloads\TailHop\a,b,%PATH%,c.txt"))
