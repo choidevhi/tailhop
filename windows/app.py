@@ -1086,6 +1086,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             req = bridge.request_from_json(data)
         except bridge.ArgError:
             return {"ok": False, "error": "bad_request"}
+        if req.quit:
+            self.events.put(("quit", {}))  # 화면 스레드에서 끈다(설치 프로그램이 업데이트 전에 부른다)
+            return {"ok": True, "quit": True}
         devices = [{"id": sid, "name": x.name, "kind": x.kind, "current": sid == self.current}
                    for sid, x in self._devices()]
         if req.list_devices:
@@ -1381,6 +1384,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._on_outbox(data)
         elif kind == "ui_call":
             data["fn"]()
+        elif kind == "quit":
+            self._quit()
         elif kind in ("cloud_in", "cloud_changed"):
             if kind == "cloud_in":
                 self._notify(t("notify.cloud_in", peer=data["peer"], name=data["name"]))
@@ -1448,7 +1453,7 @@ def _print_reply(req: bridge.Request, reply: dict) -> int:
         for d in reply.get("devices", []):
             _say(f"{'*' if d['current'] else ' '} {d['name']}  ({kind_label(d['kind'])}, {d['id']})")
     if reply.get("ok"):
-        if req.list_devices:
+        if req.list_devices or req.quit:
             return 0
         _say(t("cli.delivered", name=reply.get("to", "")) if reply.get("delivered")
              else t("cli.sending", name=reply.get("to", "")))
@@ -1503,6 +1508,8 @@ def main() -> int:
     if req.list_devices:
         _say(t("cli.no_app"))
         return 1
+    if req.quit:
+        return 0  # 끌 앱이 없다
 
     ctk.set_appearance_mode("system")
     App(start_hidden=req.hidden or req.has_work, request=req).mainloop()

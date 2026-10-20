@@ -50,6 +50,13 @@ class ParseArgsTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(bridge.ArgError):
                 bridge.parse_args(argv)
 
+    def test_quit_flag(self):
+        req = bridge.parse_args(["--quit"])
+        self.assertTrue(req.quit and req.has_work)
+        self.assertEqual(bridge.request_from_json(req.to_json()), req)
+        with self.assertRaises(bridge.ArgError):
+            bridge.request_from_json({**req.to_json(), "quit": "yes"})
+
     def test_old_cli_request_does_not_wait(self):
         """1.6 명령줄이 보낸 요청(wait 없음)은 예전처럼 넘기기만 한다."""
         req = bridge.request_from_json({"paths": [], "text": "x", "to": None, "list": False})

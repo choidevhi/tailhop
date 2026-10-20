@@ -50,14 +50,15 @@ class Request:
     hidden: bool = False
     wait: bool = True  # 상대가 받을 때까지 기다린다(1.7.0). 1.6 명령줄이 보낸 요청에는 없으므로 False로 읽는다
     timeout: float = DEFAULT_WAIT
+    quit: bool = False  # 실행 중인 앱을 끈다(1.8.0, 설치 프로그램이 업데이트 전에 부른다)
 
     @property
     def has_work(self) -> bool:
-        return bool(self.paths) or self.text is not None or self.list_devices
+        return bool(self.paths) or self.text is not None or self.list_devices or self.quit
 
     def to_json(self) -> dict:
         return {"paths": self.paths, "text": self.text, "to": self.to, "list": self.list_devices,
-                "wait": self.wait, "timeout": self.timeout}
+                "wait": self.wait, "timeout": self.timeout, "quit": self.quit}
 
 
 class ArgError(ValueError):
@@ -75,6 +76,8 @@ def parse_args(argv: list[str]) -> Request:
             req.list_devices = True
         elif arg == "--no-wait":
             req.wait = False
+        elif arg == "--quit":
+            req.quit = True
         elif arg == "--timeout":
             value = next(it, None)
             try:
@@ -116,7 +119,11 @@ def request_from_json(data: dict) -> Request:
         raise ArgError("wait")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout <= MAX_WAIT:
         raise ArgError("timeout")
-    return Request(paths=paths, text=text, to=to, list_devices=listing, wait=wait, timeout=float(timeout))
+    quit_app = data.get("quit", False)
+    if not isinstance(quit_app, bool):
+        raise ArgError("quit")
+    return Request(paths=paths, text=text, to=to, list_devices=listing, wait=wait, timeout=float(timeout),
+                   quit=quit_app)
 
 
 def resolve_device(devices: list[tuple[str, str]], query: str | None, current: str | None) -> str | None:
@@ -252,7 +259,7 @@ def send_request(req: Request, app_dir: Path | None = None, timeout: float | Non
     """실행 중인 앱에 요청을 넘기고 응답을 돌려준다. 앱이 없거나 응답이 없으면 OSError.
     받을 때까지 기다리는 요청이면 그 시간만큼 응답을 더 기다린다."""
     if timeout is None:
-        timeout = CONNECT_TIMEOUT + (req.timeout if req.wait and not req.list_devices else 0)
+        timeout = CONNECT_TIMEOUT + (req.timeout if req.wait and not req.list_devices and not req.quit else 0)
     try:
         info = json.loads(_bridge_path(app_dir).read_text("utf-8"))
         port, token = int(info["port"]), str(info["token"])
