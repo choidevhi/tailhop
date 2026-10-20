@@ -11,6 +11,8 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - 1.6.1부터 PC 대화방에 이미지·영상 미리보기(썸네일)를 보여 준다(메뉴에서 끌 수 있음). PC 안에서만 만들고 네트워크로 보내지 않는다. 이미지는 8000×8000 픽셀을 넘으면 만들지 않고, 영상은 Windows 탐색기와 같은 셸 썸네일을 쓴다. 캐시는 동기화되지 않는 `%LOCALAPPDATA%\TailHop\thumbs`에 두고 30일 안 쓰면 지운다
 - 1.7.0부터 보내기는 보낼 곳 목록에 남아 상대가 꺼져 있어도 24시간 동안 저절로 다시 보낸다. 끊기면 받던 곳부터 이어 받고 끝에 SHA-256으로 확인한다(§11). 대화방에 아직 못 보낸 건이 상태와 함께 보이고, 다시 보내기·취소를 할 수 있다. Android는 받기 서비스를 하루 6시간 제한이 없는 종류로 바꿨다
 - 1.8.0부터 클라우드 모드(§12): 켠 기기의 클라우드 폴더(PC 기본 `%USERPROFILE%\TailHop Cloud`, 폰 `Download/TailHop/Cloud`)를 연결된 모든 기기가 보고, 가져오고, 올리고, 지운다(PC에서 지운 것은 휴지통). 대화방으로 받은 파일도 클라우드에 모으는 설정이 있다. PC는 사이드바의 '클라우드', 폰은 홈의 '클라우드'
+- 1.9.0부터 사이드바의 … 버튼이 설정 창을 연다(일반·받기·클라우드·기기·업데이트, 받은 파일 폴더와 클라우드 폴더 바꾸기). PC 창은 Windows 11 아크릴 흐림 위에 shadcn 카드가 떠 있다(Windows 10은 단색 바탕)
+- 1.9.0부터 Tailscale 업데이트(§13): 빌드한 PC에서 `windows\tools\publish_update.py`를 돌리면 그 PC가 새 설치 파일·APK를 내주고, 다른 PC는 설정 → 업데이트, 폰은 홈의 새 버전 줄이나 메뉴의 '업데이트 확인'으로 받아 바로 설치한다. PC 설치 프로그램은 실행 중인 앱을 `--quit`으로 끄고 설치한 뒤 다시 켠다. 폰은 같은 서명의 APK만 설치한다
 - `docs/PROTOCOL.md` — 전송 프로토콜, `docs/test_vectors.json` — 두 구현이 공유하는 테스트 벡터
 
 ## 보안 (1.5.0 점검 반영)
@@ -32,6 +34,7 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - 실제 Tailscale 위 수동 확인: `tests\e2e_tailscale.py`(가짜 폰), `tests\e2e_pc_pair.py`(한 PC 안의 두 노드), `tests\e2e_bridge.py`(실제 앱을 임시 설정 폴더로 띄워 명령줄로 파일·폴더·텍스트 보내기)
 
 ## 빌드
+- 업데이트로 내주기: 두 빌드를 마친 뒤 `cd windows && .venv\Scripts\python tools\publish_update.py` (`%APPDATA%\TailHop\updates`에 복사하고 manifest를 쓴다. 디버그 서명 APK는 거부)
 - PC: `windows\build.bat` → `dist\TailHop_Setup_<버전>.exe` (Inno Setup 6 필요)
 - Android: `cd android && ./gradlew assembleRelease` (서명 키는 저장소에 없음)
 - 릴리즈(`.github/workflows/release.yml`): Android 서명 키 시크릿(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, 선택 `ANDROID_KEY_PASSWORD`)이 없으면 실패한다. 올리기 전에 APK가 debuggable이 아닌지, 서명 인증서 SHA-256이 워크플로의 기대값(또는 저장소 변수 `ANDROID_SIGNER_SHA256`)과 같은지 확인한다.
