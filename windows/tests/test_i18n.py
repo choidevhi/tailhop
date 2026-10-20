@@ -150,3 +150,11 @@ class ReplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeywordNameTests(unittest.TestCase):
+    def test_placeholder_named_key_does_not_clash(self):
+        """문장 자리 이름이 key여도 된다(1.6.1까지 메뉴의 단축키 항목 때문에 … 메뉴가 열리지 않았다)."""
+        import i18n
+        self.assertIn("Ctrl", i18n.t("menu.hotkey", key="Ctrl+Alt+Shift+C"))
+        self.assertIn("Ctrl", i18n.text("ko", "menu.hotkey", key="Ctrl+Alt+Shift+C"))

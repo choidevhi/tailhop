@@ -29,6 +29,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import bridge
 import cloud_ui
 import i18n
+import settings_ui
 import outbox
 import protocol as p
 import store
@@ -37,11 +38,12 @@ import vicons
 from i18n import t
 from ui import (MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, BUBBLE, INK, INK_TEXT, INK_HOVER,
                 MUTED_BUTTON, GREEN, RED, AMBER, DROP, DROP_ROW, MONO, KIND_ICON, _SCALE, icon, kind_label,
-                resource_path, human_size, font, ghost_button, round_icon, CircleButton, drop_tree, bind_tree)
+                resource_path, human_size, font, ghost_button, round_icon, CircleButton, drop_tree, bind_tree,
+                GUTTER, apply_glass, card)
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -133,6 +135,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._render_pending = False
         self.qr_window: ctk.CTkToplevel | None = None
         self.cloud_window: cloud_ui.CloudWindow | None = None
+        self.settings_window: settings_ui.SettingsWindow | None = None
+        self.version = APP_VERSION
+        self.hotkey_label = bridge.HOTKEY_LABEL
         self.cloud_on_var = tk.BooleanVar(value=self.node.cloud_on)
         self.cloud_collect_var = tk.BooleanVar(value=self.node.cloud_collect)
         self.join_window: ctk.CTkToplevel | None = None
@@ -168,6 +173,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._start_hotkey(quiet=True)
         self.after(100, self._poll)
         self.after(1000, self._tick_pending)
+        self.after(30, lambda: apply_glass(self))
         if start_hidden:
             self.withdraw()
         if request is not None and request.has_work:
@@ -206,17 +212,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         target.dnd_bind("<<Drop>>", self._on_drop)
 
     def _build(self) -> None:
-        # 왼쪽: 사이드바
-        self.sidebar = ctk.CTkFrame(self, fg_color=SIDEBAR_BG, corner_radius=0, width=SIDEBAR_WIDTH)
-        self.sidebar.pack(side="left", fill="y")
+        # 창 바탕은 유리(아크릴), 사이드바와 대화방은 그 위에 뜬 카드 두 장이다(ui.apply_glass).
+        # 왼쪽: 사이드바 카드
+        self.sidebar = card(self, fg_color=SIDEBAR_BG, width=SIDEBAR_WIDTH)
+        self.sidebar.pack(side="left", fill="y", padx=(GUTTER, GUTTER // 2), pady=GUTTER)
         self.sidebar.pack_propagate(False)
-        self.sidebar_line = ctk.CTkFrame(self, fg_color=BORDER, width=1, corner_radius=0)
-        self.sidebar_line.pack(side="left", fill="y")
 
         head = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=52)
-        head.pack(fill="x", padx=10, pady=(6, 4))
+        head.pack(fill="x", padx=10, pady=(8, 4))
         ctk.CTkLabel(head, text=APP_NAME, font=font(17, "bold"), text_color=TEXT).pack(side="left", padx=6)
-        ghost_button(head, "ellipsis", self._open_app_menu).pack(side="right")
+        ghost_button(head, "ellipsis", self.open_settings).pack(side="right")
         ghost_button(head, "folder", self._open_save_dir).pack(side="right")
 
         new_row = ctk.CTkFrame(self.sidebar, fg_color="transparent", corner_radius=6, height=36, cursor="hand2")
@@ -255,15 +260,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                                                   scrollbar_button_color=SIDEBAR_BG, scrollbar_button_hover_color=BORDER)
         self.device_list.pack(fill="both", expand=True, padx=(2, 0))
 
-        # 오른쪽: 대화방
-        self.main = ctk.CTkFrame(self, fg_color=MAIN_BG, corner_radius=0)
-        self.main.pack(side="left", fill="both", expand=True)
+        # 오른쪽: 대화방 카드
+        self.main = card(self)
+        self.main.pack(side="left", fill="both", expand=True, padx=(GUTTER // 2, GUTTER), pady=GUTTER)
         if not self.sidebar_open:
             self.sidebar.pack_forget()
-            self.sidebar_line.pack_forget()
+            self.main.pack_configure(padx=GUTTER)
 
         top = ctk.CTkFrame(self.main, fg_color="transparent", height=52)
-        top.pack(fill="x", padx=10, pady=(6, 0))
+        top.pack(fill="x", padx=10, pady=(8, 0))
         top.pack_propagate(False)
         ghost_button(top, "panel-left", self._toggle_sidebar).pack(side="left")
         titles = ctk.CTkFrame(top, fg_color="transparent")
@@ -277,7 +282,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # 아래 입력창 (먼저 아래에 고정)
         composer_area = ctk.CTkFrame(self.main, fg_color="transparent")
-        composer_area.pack(side="bottom", fill="x", padx=24, pady=(4, 18))
+        composer_area.pack(side="bottom", fill="x", padx=20, pady=(4, 16))
         self.progress_row = ctk.CTkFrame(composer_area, fg_color="transparent")
         self.progress = ctk.CTkProgressBar(self.progress_row, height=3, corner_radius=2, progress_color=INK, fg_color=BORDER)
         self.progress.pack(fill="x", padx=16)
@@ -313,14 +318,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         # 가운데 대화 기록 (창 전체가 드롭 영역)
         self.log = ctk.CTkScrollableFrame(self.main, fg_color=MAIN_BG, corner_radius=0,
                                           scrollbar_button_color=BORDER, scrollbar_button_hover_color=SECONDARY)
-        self.log.pack(fill="both", expand=True, padx=12)
+        self.log.pack(fill="both", expand=True, padx=8)
         self.log.drop_target_register(DND_FILES)
         self._bind_main_drop(self.log)
 
     def _rebuild(self) -> None:
         """언어를 바꾼 뒤 창 내용을 다시 그린다. 진행 중인 보내기·받기는 다른 스레드라 그대로 이어진다."""
         typed = self._typed_text()
-        for widget in (self.sidebar, self.sidebar_line, self.main):
+        for widget in (self.sidebar, self.main):
             widget.destroy()
         self._build()
         if typed:
@@ -334,10 +339,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _toggle_sidebar(self) -> None:
         if self.sidebar_open:
             self.sidebar.pack_forget()
-            self.sidebar_line.pack_forget()
+            self.main.pack_configure(padx=GUTTER)
         else:
-            self.sidebar.pack(side="left", fill="y", before=self.main)
-            self.sidebar_line.pack(side="left", fill="y", before=self.main)
+            self.sidebar.pack(side="left", fill="y", padx=(GUTTER, GUTTER // 2), pady=GUTTER, before=self.main)
+            self.main.pack_configure(padx=(GUTTER // 2, GUTTER))
         self.sidebar_open = not self.sidebar_open
 
     # ---------- 입력창 ----------
@@ -403,43 +408,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     # ---------- 메뉴 ----------
     def _menu(self) -> tk.Menu:
         return tk.Menu(self, tearoff=0, font=(i18n.ui_font(), 10))
-
-    def _open_app_menu(self) -> None:
-        menu = self._menu()
-        menu.add_command(label=t("menu.show_pair"), command=self._show_pair_qr)
-        menu.add_command(label=t("menu.enter_code"), command=self._show_join_dialog)
-        menu.add_separator()
-        if self.node.receiving:
-            menu.add_command(label=t("menu.pause"), command=lambda: self._set_receiving(False))
-            menu.add_command(label=t("menu.pause_hour"), command=lambda: self._set_receiving(False, PAUSE_HOUR))
-        else:
-            menu.add_command(label=t("menu.resume"), command=lambda: self._set_receiving(True))
-        menu.add_separator()
-        menu.add_command(label=t("menu.cloud_open"), command=self.open_cloud)
-        menu.add_checkbutton(label=t("menu.cloud_on"), variable=self.cloud_on_var, command=self._on_cloud_switch)
-        menu.add_checkbutton(label=t("menu.cloud_collect"), variable=self.cloud_collect_var,
-                             command=self._on_collect_switch, state="normal" if self.node.cloud_on else "disabled")
-        menu.add_command(label=t("menu.cloud_folder"), command=self._change_cloud_dir)
-        menu.add_separator()
-        menu.add_command(label=t("menu.open_folder"), command=self._open_save_dir)
-        menu.add_command(label=t("menu.change_folder"), command=self._change_save_dir)
-        menu.add_checkbutton(label=t("menu.autostart"), variable=self.autostart_var, command=self._toggle_autostart)
-        menu.add_checkbutton(label=t("menu.previews"), variable=self.preview_var, command=self._toggle_previews)
-        menu.add_checkbutton(label=t("menu.sendto"), variable=self.sendto_var, command=self._toggle_sendto)
-        menu.add_checkbutton(label=t("menu.hotkey", key=bridge.HOTKEY_LABEL), variable=self.hotkey_var,
-                             command=self._toggle_hotkey)
-        languages = self._menu()
-        languages.add_radiobutton(label=t("lang.system"), variable=self.lang_var, value=i18n.SYSTEM,
-                                  command=lambda: self._set_language(i18n.SYSTEM))
-        languages.add_separator()
-        for code, name in i18n.LANGS.items():
-            languages.add_radiobutton(label=name, variable=self.lang_var, value=code,
-                                      command=lambda c=code: self._set_language(c))
-        menu.add_cascade(label=t("menu.language"), menu=languages)
-        menu.add_separator()
-        menu.add_command(label=self._status_text(), state="disabled")
-        menu.add_command(label=f"{APP_NAME} {APP_VERSION}", state="disabled")
-        menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
 
     def _open_pair_menu(self) -> None:
         menu = self._menu()
@@ -1278,6 +1246,20 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._render_history()
 
         self.after(150, run)
+
+    # ---------- 설정 ----------
+    def open_settings(self) -> None:
+        win = self.settings_window
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            return
+        self.settings_window = settings_ui.SettingsWindow(self)
+
+    @staticmethod
+    def confirm_code(pairing: store.Pairing) -> str:
+        return p.confirm_code(pairing.secret)
 
     # ---------- 클라우드 ----------
     def open_cloud(self, source: str | None = None) -> None:

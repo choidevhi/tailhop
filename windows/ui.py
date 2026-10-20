@@ -1,6 +1,7 @@
 """두 창(대화방, 클라우드)이 같이 쓰는 화면 도구: 색, 벡터 아이콘, 글꼴, 버튼, 크기 표시."""
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -128,3 +129,59 @@ def bind_tree(widget, sequence: str, handler) -> None:
     widget.bind(sequence, handler)
     for child in widget.winfo_children():
         bind_tree(child, sequence, handler)
+
+
+# ---------- 유리(아크릴) 창 ----------
+# 창 바탕을 이 색으로 칠하고 그 색을 투명색으로 지정하면, 그 자리에 Windows 아크릴 흐림(뒤 화면을 흐리게 비춤)이 보인다.
+# 카드(사이드바·대화방)는 불투명하게 그리고, 카드 사이 틈과 가장자리만 유리가 된다. 이 색은 다른 곳에 쓰지 않는다
+# (같은 색 픽셀은 모두 뚫리고 클릭도 뒤 창으로 간다).
+GLASS_KEY = ("#F2F3F5", "#131315")
+_GLASS_ALPHA = (0x30, 0x70)  # 흐림 위에 얹는 색의 진하기(밝은, 어두운)
+CARD_BG = MAIN_BG  # --card
+GUTTER = 12  # 카드 사이 틈(유리가 보이는 곳)
+
+
+class _Accent(ctypes.Structure):
+    _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int), ("GradientColor", ctypes.c_uint),
+                ("AnimationId", ctypes.c_int)]
+
+
+class _CompositionData(ctypes.Structure):
+    _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.c_void_p), ("SizeOfData", ctypes.c_size_t)]
+
+
+def glass_supported() -> bool:
+    """Windows 11(빌드 22000+)에서만 쓴다. 10에서는 아크릴 흐림이 끌 때 느리고 깜박인다."""
+    return sys.platform == "win32" and sys.getwindowsversion().build >= 22000
+
+
+def is_dark() -> bool:
+    return ctk.get_appearance_mode() == "Dark"
+
+
+def apply_glass(win) -> bool:
+    """창 바탕을 유리로. 안 되면(Windows 10 등) 사이드바 색으로 칠하고 False."""
+    dark = is_dark()
+    win.update_idletasks()
+    hwnd = ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)  # GA_ROOT
+    mode = ctypes.c_int(1 if dark else 0)
+    ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(mode), 4)  # 제목 줄도 어둡게
+    corner = ctypes.c_int(2)
+    ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), 4)  # 둥근 모서리
+    if not glass_supported():
+        win.configure(fg_color=SIDEBAR_BG)
+        return False
+    key = GLASS_KEY[1 if dark else 0]
+    win.configure(fg_color=GLASS_KEY)
+    win.wm_attributes("-transparentcolor", key)
+    r, g, b = int(key[1:3], 16), int(key[3:5], 16), int(key[5:7], 16)
+    color = (_GLASS_ALPHA[1 if dark else 0] << 24) | (b << 16) | (g << 8) | r  # AABBGGRR
+    accent = _Accent(4, 2, color, 0)  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+    data = _CompositionData(19, ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p), ctypes.sizeof(accent))
+    return bool(ctypes.windll.user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data)))
+
+
+def card(parent, **kw) -> ctk.CTkFrame:
+    """shadcn Card: 둥근 모서리(rounded-xl) + 테두리, 불투명."""
+    return ctk.CTkFrame(parent, fg_color=kw.pop("fg_color", CARD_BG), corner_radius=12, border_width=1,
+                        border_color=BORDER, **kw)

@@ -186,3 +186,24 @@ PC ↔ PC 값(`k_pc_host_to_joiner_hex`, `k_pc_joiner_to_host_hex`, `msg_pc_*`, 
 | `not_found` | 그런 파일·폴더가 없다 |
 | `cloud_changed` | 이어 받는 사이 파일이 바뀌었다 |
 | `cloud_denied` | 지울 수 없다(권한·사용 중) |
+
+## 13. 업데이트 (1.9.0, v1 확장)
+빌드한 PC(이하 **배포 PC**)가 새 설치 파일을 들고 있다가, 페어링된 다른 PC와 폰이 설정에서 바로 받아 설치한다. 오가는 길은 §3 그대로(Tailscale + 페어링 키)다. 인터넷·GitHub를 거치지 않는다.
+
+### 13.1 배포 PC
+- `%APPDATA%\TailHop\updates\manifest.json`과 같은 폴더의 파일이 있으면 배포 PC다. 빌드 스크립트(`windows\tools\publish_update.py`)가 설치 파일과 APK를 복사하고 manifest를 쓴다.
+- manifest: `{"pc":{"version":"1.9.0","file":"TailHop_Setup_1.9.0.exe","size":<정수>,"sha256":"<64자 hex>"},"android":{"version":"1.9.0","code":9,"file":"TailHop-1.9.0.apk","size":<정수>,"sha256":"<64자 hex>"}}` (둘 중 하나만 있어도 된다).
+- `file`은 폴더 안의 이름이어야 한다(경로 성분 금지, §5 파일명 정리를 거쳐도 같은 이름). manifest를 읽을 때 크기를 확인한다.
+- hello 응답(§11.1)에 `"updates":{"pc":{"version","size"},"android":{"version","code","size"}}`를 더한다(있는 것만). `caps`에 `"update"`를 넣는다.
+
+### 13.2 받기
+- `update_get`: `{"target":"pc"|"android"}` + 빈 `last=1` 프레임 → 응답은 §12.2 `cloud_get`과 같은 모양이다. 먼저 `{"ok":true,"version","size","sha256"}`를 `last=0`으로, 이어서 파일 전체를 데이터 프레임으로(마지막 `last=1`). 없으면 `not_found`.
+- 받는 쪽은 받은 크기와 SHA-256이 첫 프레임과 같은지 확인한다. 다르면 버린다(`hash_mismatch`).
+- PC: 받은 설치 파일을 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH`로 실행한다. 설치 프로그램은 실행 중인 앱을 `--quit`으로 끄고 설치한 뒤 `/RELAUNCH`면 앱을 다시 켠다.
+- Android: 받은 APK의 서명 인증서가 지금 앱과 같을 때만 PackageInstaller로 설치한다(다르면 `update_signer`). 처음 한 번은 시스템이 "이 앱에서 설치 허용"과 확인을 묻는다. 그 뒤로는 확인 없이 바로 바뀐다(Android 12+, TailHop이 설치한 앱일 때).
+- 지금 버전보다 높을 때만 업데이트로 보인다(PC는 `version` 비교, Android는 `code` 비교).
+
+### 13.3 오류 코드 추가
+| code | 뜻 |
+|---|---|
+| `update_signer` | (화면용) 받은 APK의 서명이 지금 앱과 다르다 |

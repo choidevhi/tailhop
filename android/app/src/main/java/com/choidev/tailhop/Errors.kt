@@ -64,6 +64,10 @@ object Errors {
         "cloud_changed" to R.string.err_cloud_changed,
         "cloud_denied" to R.string.err_cloud_denied,
         "cloud_unsupported" to R.string.err_cloud_unsupported,
+        // 1.9.0 업데이트(§13.3 update_signer는 화면용, 나머지 둘도 이 폰 안에서만)
+        "update_signer" to R.string.err_update_signer,
+        "update_bad" to R.string.err_update_bad,
+        "update_install" to R.string.err_update_install,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

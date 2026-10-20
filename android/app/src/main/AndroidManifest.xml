@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- 업데이트(1.9.0): 페어링한 배포 PC에서 받은 새 APK(같은 서명일 때만)를 PackageInstaller로 설치한다 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -89,6 +91,8 @@
         <receiver android:name=".PauseReceiver" android:exported="false" />
         <receiver android:name=".ResumeReceiver" android:exported="false" />
         <receiver android:name=".SendCancelReceiver" android:exported="false" />
+        <!-- PackageInstaller 결과(Updater.install의 명시적 PendingIntent로만 온다) -->
+        <receiver android:name=".UpdateReceiver" android:exported="false" />
 
         <!-- Android 12 이하: 앱에서 고른 언어를 AppCompat이 저장·적용한다 -->
         <service

@@ -22,6 +22,7 @@ object Notifs {
 
     const val ID_RESUME = 2
     const val ID_SEND = 3
+    const val ID_UPDATE = 4
     const val CH_SEND = "send"
     const val CH_SEND_FAILED = "send_failed"
 
@@ -147,6 +148,36 @@ object Notifs {
             .setAutoCancel(true)
             .build()
         try { ctx.getSystemService(NotificationManager::class.java).notify(nid, n) } catch (e: SecurityException) { }
+    }
+
+    /** 업데이트 설치에 사용자 확인이 필요한데 화면을 띄울 수 없었다(백그라운드): 탭하면 시스템 확인 화면(1.9.0). */
+    fun updateConfirm(ctx: Context, confirm: Intent) {
+        if (!canPost(ctx)) return
+        ensureChannels(ctx)
+        val pi = PendingIntent.getActivity(ctx, ID_UPDATE, confirm, flags())
+        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle(ctx.getString(R.string.update_confirm_title))
+            .setContentText(ctx.getString(R.string.update_confirm_text))
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        try { ctx.getSystemService(NotificationManager::class.java).notify(ID_UPDATE, n) } catch (e: SecurityException) { }
+    }
+
+    /** 새 버전으로 바뀌었다(MY_PACKAGE_REPLACED, 이 앱이 넘긴 설치일 때만). 탭하면 앱을 연다. */
+    fun updated(ctx: Context, version: String) {
+        if (!canPost(ctx)) return
+        ensureChannels(ctx)
+        val open = PendingIntent.getActivity(ctx, ID_UPDATE, Intent(ctx, MainActivity::class.java), flags())
+        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle(ctx.getString(R.string.update_done_title, version))
+            .setContentText(ctx.getString(R.string.update_done_text))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        try { ctx.getSystemService(NotificationManager::class.java).notify(ID_UPDATE, n) } catch (e: SecurityException) { }
     }
 
     /** PC 클라우드에서 가져오기를 끝냄(1.8.0). 탭하면 연다. 대화 기록에는 넣지 않는다(대화가 아니다). */

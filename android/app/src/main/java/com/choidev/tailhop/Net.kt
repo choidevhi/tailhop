@@ -189,6 +189,35 @@ object Net {
         }
     }
 
+    /**
+     * §13.2 update_get: 배포 PC에서 Android APK를 받는다. 첫 프레임(버전·크기·SHA-256)을 받으면 open으로 쓸 곳을 받고, 파일 전체를
+     * 데이터 프레임으로 받는다(크기는 CloudWire.readData가 확인, SHA-256은 부른 쪽이 Updates.checkSha로). 첫 프레임을 돌려준다.
+     */
+    fun updateGet(p: Pairing, token: SendToken? = null, open: (UpdateHead) -> OutputStream,
+                  onProgress: ((Long, Long) -> Unit)? = null): UpdateHead {
+        val h = header("update_get").put("target", "android")
+        connect(p.pcIp, p.pcPort, token).use { s ->
+            val ch = msgChannel(p, s)
+            ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
+            ch.send(ByteArray(0), last = true)
+            token?.tick()
+            val (raw, last) = try { ch.recv() } catch (e: ProtocolException) { throw e } catch (e: IOException) {
+                throw ProtocolException("pc_forgot")
+            }
+            val head = when (val first = Updates.parseFirst(raw, last)) {
+                is Updates.First.Refused -> throw refusal(first.reply)
+                is Updates.First.Ok -> first.head
+            }
+            open(head).use { out ->
+                CloudWire.readData(ch, 0, head.size, out) { got ->
+                    token?.tick()
+                    onProgress?.invoke(got, head.size)
+                }
+            }
+            return head
+        }
+    }
+
     /** 텍스트 한 건. xfer는 상대가 hello에서 "xfer"를 알렸을 때만(상대가 중복을 무시한다). 기록은 부른 쪽이 남긴다. */
     fun sendText(p: Pairing, text: String, xfer: String?, token: SendToken? = null) {
         val bytes = text.toByteArray(Charsets.UTF_8)

@@ -217,4 +217,29 @@
     <string name="cloud_job_failed">失败: %1$s</string>
     <string name="cloud_job_cancel">取消传输</string>
     <string name="cloud_load_more">正在加载更多…</string>
+    <!-- 1.9.0 업데이트 -->
+    <string name="err_update_signer">下载的更新与此应用的签名不同,因此未安装。</string>
+    <string name="err_update_bad">下载的文件不是此应用的新版本。</string>
+    <string name="err_update_install">无法开始安装。</string>
+    <string name="menu_update_check">检查更新</string>
+    <string name="update_banner">有新版本 %1$s · 更新</string>
+    <string name="update_banner_sub">从 %1$s 下载并安装</string>
+    <string name="update_checking">正在检查更新…</string>
+    <string name="update_latest">已是最新版本 (%1$s)。</string>
+    <string name="update_check_failed">无法连接到电脑,未能检查更新。</string>
+    <string name="update_found_title">TailHop %1$s</string>
+    <string name="update_found_msg">%1$s 上有 TailHop %2$s (%3$s)。要下载并安装吗?</string>
+    <string name="update_install">更新</string>
+    <string name="update_downloading">正在下载… %1$d%%</string>
+    <string name="update_verifying">正在检查文件…</string>
+    <string name="update_installing">正在安装…</string>
+    <string name="update_perm_title">需要允许安装</string>
+    <string name="update_perm_msg">要安装新版本,请在下一个页面为 TailHop 开启“允许来自此来源”,然后返回。只需设置一次。</string>
+    <string name="update_perm_open">打开设置</string>
+    <string name="update_failed">无法更新: %1$s</string>
+    <string name="update_aborted">已取消安装。</string>
+    <string name="update_done_title">TailHop 已更新到 %1$s</string>
+    <string name="update_done_text">点按打开</string>
+    <string name="update_confirm_title">需要确认 TailHop 更新</string>
+    <string name="update_confirm_text">点按以完成安装</string>
 </resources>

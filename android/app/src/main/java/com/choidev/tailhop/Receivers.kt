@@ -14,6 +14,8 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
             ReceiverService.start(context)
         }
+        // 업데이트(1.9.0) 뒤: 받기 서비스는 위에서 다시 켜졌다. 이 앱이 넘긴 설치였으면 "업데이트했습니다" 알림.
+        if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) Updater.onReplaced(context)
     }
 }
 

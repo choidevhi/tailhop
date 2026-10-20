@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var busy = false
 
     private val historyListener: () -> Unit = { ui.post { reload() } }
+    private val updateListener: () -> Unit = { ui.post { updateRow() } }
 
     private val scan = registerForActivityResult(ScanContract()) { r -> r.contents?.let { onScanned(it) } }
 
@@ -71,17 +72,29 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.cloudRow).setOnClickListener { startActivity(Intent(this, CloudActivity::class.java)) }
         receiveRow.setOnClickListener { receiveSwitch.toggle() }
         receiveSwitch.setOnCheckedChangeListener(onSwitch)
+        findViewById<View>(R.id.updateRow).setOnClickListener { Updater.found(this)?.let { startUpdate(it) } }
         History.addListener(historyListener)
+        Updater.addListener(updateListener)
         requestPerms()
     }
 
-    override fun onDestroy() { History.removeListener(historyListener); super.onDestroy() }
+    override fun onDestroy() {
+        History.removeListener(historyListener)
+        Updater.removeListener(updateListener)
+        super.onDestroy()
+    }
+
     override fun onResume() {
         super.onResume()
         // 정해 둔 수신 중지 시간이 지났으면(알람이 늦거나 막혔어도) 여기서 다시 켠다.
         if (Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.OFF) ReceiverService.start(this)
         SendService.resumeIfNeeded(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
         reload(); ui.post(ticker)
+        // 업데이트(1.9.0): 6시간에 한 번 조용히 확인. 설치 허용 설정에서 돌아왔으면 이어서 설치한다.
+        updateRow()
+        if (Store.isPaired(this)) Updater.autoCheckIfDue(this) { ui.post { updateRow() } }
+        val waiting = pendingUpdate
+        if (waiting != null && packageManager.canRequestPackageInstalls()) { pendingUpdate = null; runUpdate(waiting) }
     }
     override fun onPause() { super.onPause(); ui.removeCallbacks(ticker) }
 
@@ -109,6 +122,7 @@ class MainActivity : AppCompatActivity() {
             m.menu.add(0, 5, 3, R.string.menu_cloud_host).apply { isCheckable = true; isChecked = CloudMode.isOn(this@MainActivity) }
             if (CloudMode.isOn(this)) m.menu.add(0, 6, 4, R.string.menu_cloud_collect)
                 .apply { isCheckable = true; isChecked = CloudMode.collectSetting(this@MainActivity) }
+            m.menu.add(0, 7, 5, R.string.menu_update_check)
         }
         m.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -118,10 +132,101 @@ class MainActivity : AppCompatActivity() {
                 4 -> requestBatteryExemption(this)
                 5 -> setCloud(!CloudMode.isOn(this))
                 6 -> setCollect(!CloudMode.collectSetting(this))
+                7 -> checkUpdate()
             }
             true
         }
         m.show()
+    }
+
+    // ---------- 업데이트(1.9.0, docs/PROTOCOL.md §13) ----------
+
+    /** 페어링한 PC 중 배포 PC가 새 버전을 알렸으면 홈 맨 위에 한 줄. */
+    private fun updateRow() {
+        val f = Updater.found(this)
+        val row = findViewById<View>(R.id.updateRow)
+        row.visibility = if (f == null) View.GONE else View.VISIBLE
+        if (f == null) return
+        findViewById<TextView>(R.id.updateTitle).text = getString(R.string.update_banner, f.offer.version)
+        findViewById<TextView>(R.id.updateSub).text = getString(R.string.update_banner_sub, f.pc.pcName)
+    }
+
+    /** 메뉴의 "업데이트 확인": 모든 PC에 묻고 결과를 알린다(새 버전이면 설치할지 묻는다). */
+    private fun checkUpdate() {
+        toast(getString(R.string.update_checking))
+        val app = applicationContext
+        Thread {
+            val (found, any) = try { Updater.check(app) } catch (e: Exception) { null to false }
+            ui.post {
+                if (isDestroyed) return@post
+                updateRow()
+                when {
+                    found != null -> AlertDialog.Builder(this).setTitle(getString(R.string.update_found_title, found.offer.version))
+                        .setMessage(getString(R.string.update_found_msg, found.pc.pcName, found.offer.version,
+                            android.text.format.Formatter.formatShortFileSize(this, found.offer.size)))
+                        .setPositiveButton(R.string.update_install) { _, _ -> startUpdate(found) }
+                        .setNegativeButton(R.string.battery_later, null).show()
+                    any -> toast(getString(R.string.update_latest, BuildConfig.VERSION_NAME))
+                    else -> toast(getString(R.string.update_check_failed))
+                }
+            }
+        }.start()
+    }
+
+    /** 설치 허용 설정에서 돌아오면 이어서 설치할 업데이트. */
+    private var pendingUpdate: Updater.Found? = null
+
+    /**
+     * 업데이트 시작. "출처를 알 수 없는 앱 설치"를 허용하지 않았으면 먼저 짧게 설명하고 이 앱의 설정 화면으로 보낸다
+     * (돌아오면 onResume에서 이어서 설치한다).
+     */
+    private fun startUpdate(f: Updater.Found) {
+        if (packageManager.canRequestPackageInstalls()) { runUpdate(f); return }
+        AlertDialog.Builder(this).setTitle(R.string.update_perm_title).setMessage(R.string.update_perm_msg)
+            .setPositiveButton(R.string.update_perm_open) { _, _ ->
+                pendingUpdate = f
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                } catch (e: Exception) { pendingUpdate = null; toast(getString(R.string.update_failed, getString(R.string.err_update_install))) }
+            }
+            .setNegativeButton(R.string.cancel, null).show()
+    }
+
+    /** 받기(진행률) → 크기·SHA-256·서명 확인 → PackageInstaller. 확인 화면·결과는 시스템과 UpdateReceiver가 맡는다. */
+    private fun runUpdate(f: Updater.Found) {
+        val d = resources.displayMetrics.density
+        val label = TextView(this).apply { text = getString(R.string.update_downloading, 0); textSize = 15f }
+        val bar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((22 * d).toInt(), (12 * d).toInt(), (22 * d).toInt(), 0)
+            addView(label)
+            addView(bar)
+        }
+        val token = SendToken()
+        val dlg = AlertDialog.Builder(this).setTitle(getString(R.string.update_found_title, f.offer.version)).setView(box)
+            .setCancelable(false).setNegativeButton(R.string.cancel) { _, _ -> token.cancel() }.show()
+        val app = applicationContext
+        Thread {
+            try {
+                val apk = Updater.download(app, f, token) { got, total ->
+                    val pct = if (total > 0) (got * 100 / total).toInt().coerceIn(0, 100) else 0
+                    ui.post { bar.progress = pct; label.text = getString(R.string.update_downloading, pct) }
+                }
+                ui.post { label.text = getString(R.string.update_verifying); bar.isIndeterminate = true }
+                Updater.verify(app, apk)
+                ui.post { label.text = getString(R.string.update_installing) }
+                Updater.install(app, apk)
+                ui.post { if (!isDestroyed) dlg.dismiss() }
+            } catch (e: Exception) {
+                ui.post {
+                    if (isDestroyed) return@post
+                    dlg.dismiss()
+                    if (!token.cancelled) toast(getString(R.string.update_failed, Errors.text(this, e)))
+                    updateRow()
+                }
+            }
+        }.start()
     }
 
     /** 이 폰을 클라우드로 쓰기. 받기 서비스가 요청을 받으므로 수신을 멈춘 동안에는 PC가 볼 수 없다고 알린다. */

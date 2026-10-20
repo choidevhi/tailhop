@@ -23,6 +23,7 @@ import protocol as p
 import resume
 import store
 import tsnet
+import updates
 from i18n import t
 
 PC_PORT = p.DEFAULT_PC_PORT
@@ -60,6 +61,7 @@ class Node:
         self.guard = p.ReplayGuard(self.app_dir / "seen.json")
         self.history = store.History(self.app_dir)
         self.book = resume.ResumeBook(self.app_dir)
+        self.shelf = updates.Shelf(self.app_dir)
         self.outbox = outbox.Outbox(self.deliver, self.app_dir, on_event)
         self._caps: dict[str, tuple[float, frozenset[str]]] = {}
         self._ip_refreshed = 0.0
@@ -395,6 +397,9 @@ class Node:
         if kind in p.CLOUD_REQUESTS:
             self._serve_cloud(conn, ch, hub, got.header, pairing)
             return
+        if kind == "update_get":
+            self._serve_update(conn, ch, got.header)
+            return
         if kind == "cloud_put":
             p.send_reply(ch, True, name=got.path.name)
             self.on_event("cloud_in", {"peer": pairing.name, "peer_id": pairing.stable_id, "name": got.path.name})
@@ -418,7 +423,10 @@ class Node:
 
     def _hello_reply(self, peer: str, header: dict) -> dict:
         """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
-        reply = {"caps": ["xfer", "cloud"], "cloud": self.cloud_on, "have": 0, "done": False}
+        reply = {"caps": ["xfer", "cloud", "update"], "cloud": self.cloud_on, "have": 0, "done": False}
+        offered = self.shelf.advert()
+        if offered:
+            reply["updates"] = offered
         xfer, size = header.get("xfer"), header.get("size")
         if resume.valid_xfer(xfer) and isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             reply["done"] = self.book.is_done(peer, xfer)
@@ -451,6 +459,25 @@ class Node:
             self._refuse(conn, ch, exc)
         except OSError:
             self._refuse(conn, ch, p.ProtocolError("cloud_denied"))
+
+    def _serve_update(self, conn: socket.socket, ch: p.Channel, header: dict) -> None:
+        """§13 update_get: 머리 {"ok","version","size","sha256"}(last=0) 뒤에 파일 전체(마지막 데이터 프레임 last=1)."""
+        pkg = self.shelf.packages().get(header.get("target")) if isinstance(header.get("target"), str) else None
+        if pkg is None:
+            self._refuse(conn, ch, p.ProtocolError("not_found"))
+            return
+        try:
+            src = open(pkg.path, "rb")
+        except OSError:
+            self._refuse(conn, ch, p.ProtocolError("not_found"))
+            return
+        with src:
+            ch.send(json.dumps({"ok": True, "version": pkg.version, "size": pkg.size, "sha256": pkg.sha256,
+                                "code": pkg.code}).encode("utf-8"), last=False)
+            try:
+                Node._stream_file(ch, src, pkg.size)
+            except OSError:
+                return  # 머리를 보낸 뒤에는 끊기만 한다(§12.2와 같다)
 
     @staticmethod
     def _refuse(conn: socket.socket, ch: p.Channel, exc: p.ProtocolError) -> None:
@@ -704,6 +731,45 @@ class Node:
                 p.read_reply(ch)
         self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(record), size=size,
                                                peer=pairing.name, peer_id=job.peer_id, peer_kind=pairing.kind))
+
+    # ---------- 업데이트(§13, 상대가 배포 PC) ----------
+    def peer_updates(self, stable_id: str) -> dict[str, dict]:
+        """상대가 내주는 업데이트(hello의 updates). 예전 기기면 빈 dict."""
+        return updates.parse_advert(self._hello(stable_id).get("updates"))
+
+    def fetch_update(self, stable_id: str, target: str, dest: Path, on_progress=None) -> tuple[Path, str]:
+        """업데이트 파일을 dest 폴더로 받는다. 크기·SHA-256이 머리와 다르면 지우고 hash_mismatch. (경로, 버전)."""
+        sock, pairing = self._connect(stable_id)
+        dest.mkdir(parents=True, exist_ok=True)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            ch.send(json.dumps(p.new_header("update_get", self.me.name, target=target)).encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            raw, last = ch.recv()
+            head = p.parse_reply(raw) if last else p.parse_reply(raw, last_ok=False)
+            if last:
+                raise p.ProtocolError("bad_reply")
+            version, size, sha = head.get("version"), head.get("size"), head.get("sha256")
+            if not updates.parse_advert({target: {"version": version, "size": size}}) or not isinstance(sha, str):
+                raise p.ProtocolError("bad_reply")
+            suffix = ".exe" if target == "pc" else ".apk"
+            path = dest / f"TailHop-{version}-{target}{suffix}"
+            got = 0
+            with open(path, "wb") as out:
+                while True:
+                    data, last = ch.recv()
+                    got += len(data)
+                    if got > size:
+                        raise p.ProtocolError("file_too_big")
+                    out.write(data)
+                    if on_progress:
+                        on_progress(got, size)
+                    if last:
+                        break
+        if got != size or not updates.verify(path, size, sha):
+            path.unlink(missing_ok=True)
+            raise p.ProtocolError("hash_mismatch")
+        return path, version
 
     # ---------- 클라우드 쓰기(§12, 상대가 허브) ----------
     def cloud_info(self, stable_id: str) -> bool:

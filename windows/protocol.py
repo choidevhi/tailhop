@@ -517,7 +517,7 @@ class Received:
 # 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
 CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir")
 CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
-_EMPTY_BODY = ("unpair", "hello") + CLOUD_REQUESTS
+_EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS
 
 
 def _is_int(value: object) -> bool:
@@ -552,7 +552,7 @@ def receive_message(
         header = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError("bad_header") from exc
-    known = ("text", "file", "unpair") + (("hello",) + CLOUD_TYPES if book is not None else ())
+    known = ("text", "file", "unpair") + (("hello", "update_get") + CLOUD_TYPES if book is not None else ())
     if not isinstance(header, dict) or header.get("v") != 1 or header.get("type") not in known:
         raise ProtocolError("unsupported")
     guard.check_and_add(header.get("id"), header.get("ts"))

@@ -66,14 +66,14 @@ def current() -> str:
     return _current if _current is not None else set_language(SYSTEM)
 
 
-def text(lang: str, key: str, **kw) -> str:
+def text(lang: str, key: str, /, **kw) -> str:
     value = table(lang).get(key)
     if value is None:
         value = table(FALLBACK).get(key, key)
     return value.format(**kw) if kw else value
 
 
-def t(key: str, **kw) -> str:
+def t(key: str, /, **kw) -> str:
     return text(current(), key, **kw)
 
 

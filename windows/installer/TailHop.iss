@@ -60,6 +60,11 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Code]
 // 트레이 앱은 Restart Manager의 닫기 요청에 창만 숨기므로, 설치 전에 실행 중인 앱에 직접 꺼 달라고 한다(1.8.0+).
+function ShouldRelaunch: Boolean;
+begin
+  Result := WizardSilent and (Pos('/RELAUNCH', UpperCase(GetCmdTail)) > 0);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -74,3 +79,5 @@ end;
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; Tailscale 업데이트(설정 창의 지금 업데이트)는 /RELAUNCH로 조용히 설치한 뒤 앱을 다시 켠다(1.9.0)
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch

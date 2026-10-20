@@ -25,8 +25,9 @@ import outbox
 import protocol as p
 import store
 from i18n import t
-from ui import (BORDER, DROP, GREEN, HOVER, INK, INK_HOVER, INK_TEXT, KIND_ICON, MAIN_BG, RED, SECONDARY, SELECTED,
-                SIDEBAR_BG, TEXT, AMBER, bind_tree, font, ghost_button, human_size, icon, round_icon)
+from ui import (BORDER, DROP, GREEN, GUTTER, HOVER, INK, INK_HOVER, INK_TEXT, KIND_ICON, MAIN_BG, RED, SECONDARY,
+                SELECTED, SIDEBAR_BG, TEXT, AMBER, apply_glass, bind_tree, card, font, ghost_button, human_size, icon,
+                round_icon)
 
 LOCAL = ""  # 왼쪽 목록에서 '이 PC'
 RENDER_PAGE = 100  # 한 번에 그리는 줄 수(CTk 위젯이 무거워 나눠 그린다)
@@ -58,6 +59,7 @@ class CloudWindow(ctk.CTkToplevel):
         self.dnd_bind("<<DropLeave>>", lambda e: (self.list.configure(fg_color=MAIN_BG), e.action)[1])
         self.dnd_bind("<<Drop>>", self._on_drop)
         self.after(250, self._set_icon)
+        self.after(30, lambda: apply_glass(self))
         self.check_sources()
         self.open_source(self.source)
 
@@ -83,24 +85,24 @@ class CloudWindow(ctk.CTkToplevel):
 
     # ---------- 화면 ----------
     def _build(self) -> None:
-        self.side = ctk.CTkFrame(self, fg_color=SIDEBAR_BG, corner_radius=0, width=220)
-        self.side.pack(side="left", fill="y")
+        # 큰 창과 같이: 유리 바탕 위에 카드 두 장(기기 목록, 폴더 목록)
+        self.side = card(self, fg_color=SIDEBAR_BG, width=220)
+        self.side.pack(side="left", fill="y", padx=(GUTTER, GUTTER // 2), pady=GUTTER)
         self.side.pack_propagate(False)
-        ctk.CTkFrame(self, fg_color=BORDER, width=1, corner_radius=0).pack(side="left", fill="y")
         head = ctk.CTkFrame(self.side, fg_color="transparent", height=52)
-        head.pack(fill="x", padx=10, pady=(6, 4))
+        head.pack(fill="x", padx=10, pady=(8, 4))
         ctk.CTkLabel(head, text=" " + t("cloud.title"), image=icon("cloud", 18), compound="left",
                      font=font(17, "bold"), text_color=TEXT).pack(side="left", padx=6)
         ghost_button(head, "refresh-cw", self.check_sources).pack(side="right")
         self.source_list = ctk.CTkScrollableFrame(self.side, fg_color="transparent", corner_radius=0,
                                                   scrollbar_button_color=SIDEBAR_BG,
                                                   scrollbar_button_hover_color=BORDER)
-        self.source_list.pack(fill="both", expand=True, padx=(2, 0))
+        self.source_list.pack(fill="both", expand=True, padx=(2, 0), pady=(0, 10))  # 카드의 아래 둥근 모서리를 덮지 않게
 
-        main = ctk.CTkFrame(self, fg_color=MAIN_BG, corner_radius=0)
-        main.pack(side="left", fill="both", expand=True)
+        main = card(self)
+        main.pack(side="left", fill="both", expand=True, padx=(GUTTER // 2, GUTTER), pady=GUTTER)
         top = ctk.CTkFrame(main, fg_color="transparent", height=52)
-        top.pack(fill="x", padx=10, pady=(6, 0))
+        top.pack(fill="x", padx=10, pady=(8, 0))
         top.pack_propagate(False)
         self.up_button = ghost_button(top, "chevron-left", self.go_up)
         self.up_button.pack(side="left")
@@ -118,7 +120,7 @@ class CloudWindow(ctk.CTkToplevel):
 
         self.list = ctk.CTkScrollableFrame(main, fg_color=MAIN_BG, corner_radius=0,
                                            scrollbar_button_color=BORDER, scrollbar_button_hover_color=SECONDARY)
-        self.list.pack(fill="both", expand=True, padx=12)
+        self.list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
         self.list.drop_target_register(DND_FILES)
         self.list.dnd_bind("<<Drop>>", self._on_drop)
         self.update_transfers()

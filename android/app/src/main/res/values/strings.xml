@@ -228,4 +228,29 @@
     <string name="cloud_job_cancel">Cancel transfer</string>
     <string name="cloud_load_more">Loading more…</string>
     <string name="cloud_file_meta" translatable="false">%1$s · %2$s</string>
+    <!-- 1.9.0 업데이트 -->
+    <string name="err_update_signer">The downloaded update is signed differently from this app, so it was not installed.</string>
+    <string name="err_update_bad">The downloaded file isn\'t a newer version of this app.</string>
+    <string name="err_update_install">Couldn\'t start the installation.</string>
+    <string name="menu_update_check">Check for updates</string>
+    <string name="update_banner">New version %1$s available · Update</string>
+    <string name="update_banner_sub">Downloads from %1$s and installs</string>
+    <string name="update_checking">Checking for updates…</string>
+    <string name="update_latest">You have the latest version (%1$s).</string>
+    <string name="update_check_failed">Couldn\'t reach any PC to check for updates.</string>
+    <string name="update_found_title">TailHop %1$s</string>
+    <string name="update_found_msg">%1$s has TailHop %2$s (%3$s). Download and install it?</string>
+    <string name="update_install">Update</string>
+    <string name="update_downloading">Downloading… %1$d%%</string>
+    <string name="update_verifying">Checking the file…</string>
+    <string name="update_installing">Installing…</string>
+    <string name="update_perm_title">Allow installing updates</string>
+    <string name="update_perm_msg">To install the new version, turn on \"Allow from this source\" for TailHop on the next screen, then come back. This is needed only once.</string>
+    <string name="update_perm_open">Open settings</string>
+    <string name="update_failed">Couldn\'t update: %1$s</string>
+    <string name="update_aborted">The installation was cancelled.</string>
+    <string name="update_done_title">TailHop was updated to %1$s</string>
+    <string name="update_done_text">Tap to open</string>
+    <string name="update_confirm_title">Confirm the TailHop update</string>
+    <string name="update_confirm_text">Tap to finish installing</string>
 </resources>

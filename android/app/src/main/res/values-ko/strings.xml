@@ -217,4 +217,29 @@
     <string name="cloud_job_failed">실패: %1$s</string>
     <string name="cloud_job_cancel">전송 취소</string>
     <string name="cloud_load_more">더 불러오는 중…</string>
+    <!-- 1.9.0 업데이트 -->
+    <string name="err_update_signer">받은 업데이트의 서명이 지금 앱과 달라 설치하지 않았습니다.</string>
+    <string name="err_update_bad">받은 파일이 이 앱의 새 버전이 아닙니다.</string>
+    <string name="err_update_install">설치를 시작하지 못했습니다.</string>
+    <string name="menu_update_check">업데이트 확인</string>
+    <string name="update_banner">새 버전 %1$s 있음 · 업데이트</string>
+    <string name="update_banner_sub">%1$s에서 받아 설치합니다</string>
+    <string name="update_checking">업데이트 확인 중…</string>
+    <string name="update_latest">최신 버전입니다 (%1$s).</string>
+    <string name="update_check_failed">PC에 연결할 수 없어 확인하지 못했습니다.</string>
+    <string name="update_found_title">TailHop %1$s</string>
+    <string name="update_found_msg">%1$s에 TailHop %2$s이 있습니다 (%3$s). 받아서 설치할까요?</string>
+    <string name="update_install">업데이트</string>
+    <string name="update_downloading">받는 중… %1$d%%</string>
+    <string name="update_verifying">파일을 확인하는 중…</string>
+    <string name="update_installing">설치하는 중…</string>
+    <string name="update_perm_title">설치 허용이 필요합니다</string>
+    <string name="update_perm_msg">새 버전을 설치하려면 다음 화면에서 TailHop의 \"이 출처 허용\"을 켠 뒤 돌아와 주세요. 처음 한 번만 필요합니다.</string>
+    <string name="update_perm_open">설정 열기</string>
+    <string name="update_failed">업데이트하지 못했습니다: %1$s</string>
+    <string name="update_aborted">설치를 취소했습니다.</string>
+    <string name="update_done_title">TailHop을 %1$s(으)로 업데이트했습니다</string>
+    <string name="update_done_text">탭해서 열기</string>
+    <string name="update_confirm_title">TailHop 업데이트 확인이 필요합니다</string>
+    <string name="update_confirm_text">탭해서 설치를 마치세요</string>
 </resources>
