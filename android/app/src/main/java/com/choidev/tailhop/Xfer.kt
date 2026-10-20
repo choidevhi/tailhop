@@ -12,8 +12,8 @@ object Xfer {
     /** 조각·끝난 xfer를 기억하는 시간이자 보내는 쪽이 포기하기까지의 시간(§11.2, §11.3). */
     const val KEEP_MS = 24L * 3600 * 1000
 
-    /** 이 기기가 아는 확장(hello 응답의 caps). 클라우드(§12)를 더하면 "cloud"를 넣는다. */
-    val CAPS: List<String> = listOf("xfer")
+    /** 이 기기가 아는 확장(hello 응답의 caps). 클라우드 모드(§12)는 꺼져 있어도 안다 — 켜졌는지는 hello의 "cloud". */
+    val CAPS: List<String> = listOf("xfer", "cloud")
 
     private val XFER_RE = Regex("[0-9a-f]{32}")
     private val SHA_RE = Regex("[0-9a-f]{64}")

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 클라우드 목록의 한 줄: PC, 폴더, 파일, 전송(올리기·가져오기). 홈의 기기 줄과 같은 모양 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="64dp"
+    android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="20dp" android:paddingEnd="12dp"
+    android:paddingTop="8dp" android:paddingBottom="8dp"
+    android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+    <ImageView android:id="@+id/icon" android:layout_width="40dp" android:layout_height="40dp" android:padding="10dp"
+        android:background="@drawable/circle_icon" android:src="@drawable/ic_doc" android:tint="@color/label"
+        android:importantForAccessibility="no" />
+    <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+        android:orientation="vertical" android:layout_marginStart="14dp">
+        <TextView android:id="@+id/name" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textSize="16sp" android:textColor="@color/label" android:maxLines="2" android:ellipsize="middle" />
+        <TextView android:id="@+id/sub" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="2dp" android:textSize="13sp" android:textColor="@color/secondary"
+            android:maxLines="3" android:ellipsize="end" />
+    </LinearLayout>
+    <ImageView android:id="@+id/trail" android:layout_width="20dp" android:layout_height="20dp"
+        android:layout_marginStart="8dp" android:src="@drawable/ic_chevron_right" android:tint="@color/secondary"
+        android:importantForAccessibility="no" />
+</LinearLayout>

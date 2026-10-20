@@ -62,11 +62,19 @@ object Transfers {
 
     @Synchronized fun isDone(ctx: Context, peer: String, xfer: String): Boolean = book(ctx).isDone(peer, xfer)
 
-    @Synchronized fun claim(ctx: Context, peer: String, xfer: String, size: Long): PartialRec? =
-        book(ctx).claim(peer, xfer, size)?.also { save(ctx) }
+    /**
+     * 이어 받을 조각을 잡는다. 받을 폴더(dest)가 다르면(대화방 파일 ↔ 클라우드, 다른 클라우드 폴더, 설정이 바뀜) 그 조각을 지우고 null —
+     * 보내는 쪽은 resume_lost를 받고 hello를 다시 하면 have 0을 받아 처음부터 보낸다(같은 조각으로 계속 맴돌지 않게).
+     */
+    fun claim(ctx: Context, peer: String, xfer: String, size: Long, dest: String = ""): PartialRec? {
+        val rec = synchronized(this) { book(ctx).claim(peer, xfer, size)?.also { save(ctx) } } ?: return null
+        if (rec.dest == dest) return rec
+        drop(ctx, peer, xfer, rec.loc)
+        return null
+    }
 
-    fun begin(ctx: Context, peer: String, xfer: String, size: Long, loc: String, name: String) {
-        val old = synchronized(this) { book(ctx).begin(peer, xfer, size, loc, name).also { save(ctx) } }
+    fun begin(ctx: Context, peer: String, xfer: String, size: Long, loc: String, name: String, dest: String = "") {
+        val old = synchronized(this) { book(ctx).begin(peer, xfer, size, loc, name, dest).also { save(ctx) } }
         old?.let { PartFiles.delete(ctx, it.loc) }
     }
 
@@ -94,32 +102,50 @@ object Transfers {
  * 조각 파일. API 29+는 MediaStore 대기 항목(IS_PENDING=1, 다른 앱에 보이지 않음)이고 그 content URI를 장부에 적는다 —
  * 프로세스가 바뀌어도 만든 앱(owner)은 openFileDescriptor(uri, "rw")로 다시 열 수 있다. 시스템은 오래된 대기 항목을
  * 약 7일 뒤 지우지만 장부는 24시간이면 먼저 지운다. API 26–28은 Download/TailHop의 `.part` 파일 경로를 적는다.
+ * relDir은 Download/TailHop 아래 폴더(1.8.0 클라우드: "Cloud/…"). 클라우드 경로는 부른 쪽이 CloudPath로 검사했다.
  */
 object PartFiles {
     private val MEDIA_DIR = Environment.DIRECTORY_DOWNLOADS + "/TailHop"
+
+    /** 공용 저장소(Download가 있는 곳)의 남은 바이트. 알 수 없으면 Long.MAX_VALUE(막지 않음). */
+    @Suppress("DEPRECATION")
+    fun freeBytes(): Long = try {
+        android.os.StatFs(Environment.getExternalStorageDirectory().path).availableBytes
+    } catch (e: Exception) { Long.MAX_VALUE }
 
     fun mime(name: String): String = MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
 
     @Suppress("DEPRECATION")
-    private fun legacyDir(): File = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "TailHop")
+    fun legacyDir(): File = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "TailHop")
+
+    /** MediaStore RELATIVE_PATH(API 29+). 끝에 `/`. */
+    fun mediaDir(relDir: String): String = if (relDir.isEmpty()) "$MEDIA_DIR/" else "$MEDIA_DIR/$relDir/"
 
     /** 장부의 위치가 이 앱이 만든 조각 자리인지(장부는 앱 전용 저장소에 있지만 그래도 엉뚱한 곳을 지우지 않게). */
     private fun mediaUri(loc: String): Uri? =
         Uri.parse(loc).takeIf { it.scheme == "content" && it.authority == MediaStore.AUTHORITY }
 
+    /** API 26–28 조각: `.part`이고 Download/TailHop 바로 안이나 그 Cloud 폴더 아래이며, 중간에 링크가 없어야 한다. */
     private fun partFile(loc: String): File? {
         val f = File(loc)
-        return f.takeIf { it.name.endsWith(".part") && it.parentFile?.absolutePath == legacyDir().absolutePath }
+        val parent = f.parentFile ?: return null
+        if (!f.name.endsWith(".part")) return null
+        val base = legacyDir().absolutePath
+        val a = parent.absolutePath
+        if (a != base && a != "$base/Cloud" && !a.startsWith("$base/Cloud/")) return null
+        return try {
+            f.takeIf { parent.canonicalPath == legacyDir().canonicalPath + a.substring(base.length) }
+        } catch (e: IOException) { null }
     }
 
     /** 새 조각을 만들고 위치를 돌려준다. */
-    fun create(ctx: Context, name: String): String {
+    fun create(ctx: Context, name: String, relDir: String = ""): String {
         if (Build.VERSION.SDK_INT >= 29) {
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime(name))
-                put(MediaStore.MediaColumns.RELATIVE_PATH, MEDIA_DIR)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, mediaDir(relDir))
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: throw ProtocolException("storage")
@@ -127,7 +153,7 @@ object PartFiles {
         }
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
             throw ProtocolException("storage_permission")
-        val dir = legacyDir()
+        val dir = if (relDir.isEmpty()) legacyDir() else File(legacyDir(), relDir)
         if (!dir.isDirectory && !dir.mkdirs()) throw ProtocolException("storage_folder")
         synchronized(LegacyNames.LOCK) {
             val target = LegacyNames.unique(dir, name)
@@ -153,10 +179,12 @@ object PartFiles {
     /**
      * 이어 쓰기: 조각의 앞 offset 바이트를 md에 넣고(받는 쪽도 파일 전체를 다시 확인한다), 조각을 offset 길이로 자른 뒤
      * 그 끝에 쓰는 스트림을 돌려준다. 조각이 offset보다 짧거나 열 수 없으면 resume_lost.
+     * md가 null이면(클라우드에서 가져오기, 해시 없음) 읽지 않고 길이만 확인한다 — 짧은 조각을 0으로 늘려 쓰지 않게.
      */
-    fun openAt(ctx: Context, loc: String, offset: Long, md: MessageDigest): OutputStream {
+    fun openAt(ctx: Context, loc: String, offset: Long, md: MessageDigest?): OutputStream {
         try {
-            if (offset > 0) openRead(ctx, loc).use { src ->
+            if (md == null && offset > 0 && (length(ctx, loc) ?: -1L) < offset) throw ProtocolException("resume_lost")
+            if (offset > 0 && md != null) openRead(ctx, loc).use { src ->
                 val buf = ByteArray(256 * 1024)
                 var left = offset
                 while (left > 0) {

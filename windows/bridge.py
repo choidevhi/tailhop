@@ -20,6 +20,7 @@ import secrets
 import socket
 import subprocess
 import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ import store
 BRIDGE_FILE = "bridge.json"
 MAX_REQUEST = 4 * 1024 * 1024  # 텍스트 1 MiB(UTF-8 최대 4바이트/글자)와 경로 목록을 넉넉히 담는다
 CONNECT_TIMEOUT = 5.0
+MAX_CLIENTS = 8  # 인증 전에도 스레드·버퍼를 무한히 잡지 못하게
 DEFAULT_WAIT = 60.0
 MAX_WAIT = 24 * 3600.0
 SENDTO_NAME = "TailHop.lnk"
@@ -167,9 +169,15 @@ def _bridge_path(app_dir: Path | None) -> Path:
     return (app_dir or store.APP_DIR) / BRIDGE_FILE
 
 
-def _read_line(conn: socket.socket) -> bytes:
+def _read_line(conn: socket.socket, deadline: float | None = None) -> bytes:
+    """한 줄을 읽는다. deadline(time.monotonic 기준)을 주면 줄 전체를 그때까지 받아야 한다(조금씩 보내 붙잡지 못하게)."""
     buf = bytearray()
     while not buf.endswith(b"\n"):
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ArgError("slow")
+            conn.settimeout(left)
         chunk = conn.recv(65536)
         if not chunk:
             break
@@ -191,6 +199,7 @@ class Server:
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(4)
         self.port = self.sock.getsockname()[1]
+        self.clients = threading.BoundedSemaphore(MAX_CLIENTS)
         store._write_private(self.path, json.dumps({"port": self.port, "token": self.token, "pid": os.getpid()}))
         threading.Thread(target=self._serve, daemon=True).start()
 
@@ -200,15 +209,26 @@ class Server:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
+            if not self.clients.acquire(blocking=False):
+                conn.close()
+                continue
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: socket.socket) -> None:
+        try:
+            self._serve_one(conn)
+        finally:
+            self.clients.release()
+
+    def _serve_one(self, conn: socket.socket) -> None:
         with conn:
             conn.settimeout(CONNECT_TIMEOUT)
             try:
-                data = json.loads(_read_line(conn).decode("utf-8"))
+                data = json.loads(_read_line(conn, time.monotonic() + CONNECT_TIMEOUT).decode("utf-8"))
                 token = data.get("token") if isinstance(data, dict) else None
-                if not isinstance(token, str) or not hmac.compare_digest(token, self.token):
+                # 바이트로 비교한다(문자열 compare_digest는 한글 등 비ASCII 토큰에서 TypeError)
+                if not isinstance(token, str) or not hmac.compare_digest(token.encode("utf-8"),
+                                                                         self.token.encode("utf-8")):
                     return  # 토큰이 틀리면 답도 하지 않는다
                 reply = self.handler(data)
             except (OSError, ValueError, UnicodeDecodeError):

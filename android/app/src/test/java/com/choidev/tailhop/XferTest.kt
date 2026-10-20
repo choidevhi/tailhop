@@ -119,8 +119,10 @@ class XferTest {
         val r = Xfer.helloReply(1234, false)
         assertEquals(setOf("ok", "caps", "cloud", "have", "done"), r.keys().asSequence().toSet())
         assertEquals(true, r.get("ok"))
-        assertEquals(1, r.getJSONArray("caps").length())
+        // 1.8.0: 클라우드(§12)도 안다. 켜졌는지는 "cloud"
+        assertEquals(2, r.getJSONArray("caps").length())
         assertEquals("xfer", r.getJSONArray("caps").getString(0))
+        assertEquals("cloud", r.getJSONArray("caps").getString(1))
         assertEquals(false, r.get("cloud"))
         assertEquals(1234L, r.getLong("have"))
         assertEquals(false, r.get("done"))

@@ -54,12 +54,16 @@ object Notifs {
         return b.build()
     }
 
-    /** 끝내 보내지 못한 건(다시 시도하지 않는 실패·24시간 포기). 탭하면 그 PC의 대화방에서 다시 보낼 수 있다. */
-    fun sendFailed(ctx: Context, dev: String, pcName: String, what: String, reason: String) {
+    /**
+     * 끝내 보내지 못한 건(다시 시도하지 않는 실패·24시간 포기). 탭하면 그 PC의 대화방에서 다시 보낼 수 있다.
+     * 클라우드 올리기·가져오기(1.8.0)는 그 PC의 클라우드 화면을 연다(전송 목록에서 다시 시도한다).
+     */
+    fun sendFailed(ctx: Context, dev: String, pcName: String, what: String, reason: String, cloud: Boolean = false) {
         if (!canPost(ctx)) return
         ensureChannels(ctx)
         val nid = nextId.incrementAndGet()
-        val chat = Intent(ctx, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_IP, dev).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val chat = (if (cloud) Intent(ctx, CloudActivity::class.java).putExtra(CloudActivity.EXTRA_IP, dev)
+        else Intent(ctx, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_IP, dev)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val pi = PendingIntent.getActivity(ctx, nid, chat, flags())
         val body = ctx.getString(R.string.send_failed_text, what, reason)
         val n = NotificationCompat.Builder(ctx, CH_SEND_FAILED)
@@ -127,7 +131,8 @@ object Notifs {
         try { ctx.getSystemService(NotificationManager::class.java).notify(ID_RESUME, n) } catch (e: SecurityException) { }
     }
 
-    fun file(ctx: Context, historyId: String, from: String, name: String, uri: Uri, mime: String) {
+    /** 받은 파일. cloud면 클라우드 맨 위에 모은 파일(설정 "받은 파일도 클라우드에 모으기")이라 저장 위치 문장이 다르다. */
+    fun file(ctx: Context, historyId: String, from: String, name: String, uri: Uri, mime: String, cloud: Boolean = false) {
         if (!canPost(ctx)) return
         val nid = nextId.incrementAndGet()
         val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
@@ -136,6 +141,25 @@ object Notifs {
         val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(ctx.getString(R.string.notif_file_title, from))
+            .setContentText(ctx.getString(if (cloud) R.string.notif_file_text_cloud else R.string.notif_file_text, name))
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        try { ctx.getSystemService(NotificationManager::class.java).notify(nid, n) } catch (e: SecurityException) { }
+    }
+
+    /** PC 클라우드에서 가져오기를 끝냄(1.8.0). 탭하면 연다. 대화 기록에는 넣지 않는다(대화가 아니다). */
+    fun cloudDownloaded(ctx: Context, pcName: String, name: String, uri: Uri, mime: String) {
+        if (!canPost(ctx)) return
+        ensureChannels(ctx)
+        val nid = nextId.incrementAndGet()
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val pi = PendingIntent.getActivity(ctx, nid, view, flags())
+        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle(ctx.getString(R.string.notif_cloud_got_title, pcName))
             .setContentText(ctx.getString(R.string.notif_file_text, name))
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(pi)

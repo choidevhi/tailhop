@@ -57,6 +57,13 @@ object Errors {
         "bad_xfer" to R.string.err_bad_xfer,
         "file_gone" to R.string.err_file_gone,
         "unpaired" to R.string.err_unpaired,
+        // 1.8.0 클라우드 모드(§12.3)와 이 폰 안에서만 쓰는 cloud_unsupported(상대가 클라우드를 모르는 예전 버전)
+        "cloud_off" to R.string.err_cloud_off,
+        "bad_path" to R.string.err_bad_path,
+        "not_found" to R.string.err_not_found,
+        "cloud_changed" to R.string.err_cloud_changed,
+        "cloud_denied" to R.string.err_cloud_denied,
+        "cloud_unsupported" to R.string.err_cloud_unsupported,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

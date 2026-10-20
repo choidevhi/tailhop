@@ -11,6 +11,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -53,14 +54,16 @@ object Net {
         val reply = try { JSONObject(String(raw, Charsets.UTF_8)) } catch (e: Exception) {
             throw ProtocolException("unreadable_reply")
         }
-        if (reply.opt("ok") != true) {
-            // PC 1.5+는 고정 코드를 함께 보낸다 → 이 폰의 언어로. 예전 PC는 한국어 문장만 → 그대로 보여 준다.
-            val code = reply.opt("code") as? String
-            if (Errors.knows(code)) throw ProtocolException(code!!)
-            val err = reply.optString("error", "").take(200)
-            throw if (err.isNotEmpty()) ProtocolException("pc_refused_reason", err) else ProtocolException("pc_refused")
-        }
+        if (reply.opt("ok") != true) throw refusal(reply)
         return reply
+    }
+
+    /** 거부 응답 → 예외. PC 1.5+는 고정 코드를 함께 보낸다 → 이 폰의 언어로. 예전 PC는 한국어 문장만 → 그대로 보여 준다. */
+    private fun refusal(reply: JSONObject): ProtocolException {
+        val code = reply.opt("code") as? String
+        if (Errors.knows(code)) return ProtocolException(code!!)
+        val err = reply.optString("error", "").take(200)
+        return if (err.isNotEmpty()) ProtocolException("pc_refused_reason", err) else ProtocolException("pc_refused")
     }
 
     private fun header(type: String): JSONObject = JSONObject()
@@ -121,6 +124,69 @@ object Net {
             throw e
         }
         return Xfer.parseHello(reply)
+    }
+
+    /** 본문 없는 요청(헤더 + 빈 last=1 프레임) 하나를 보내고 응답을 읽는다. */
+    private fun request(p: Pairing, h: JSONObject, token: SendToken? = null): JSONObject =
+        connect(p.pcIp, p.pcPort, token).use { s ->
+            val ch = msgChannel(p, s)
+            ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
+            ch.send(ByteArray(0), last = true)
+            token?.tick()
+            readReply(ch)
+        }
+
+    /**
+     * 클라우드 요청(§12)의 공통 거부 해석: 1.5–1.7 PC는 클라우드 요청을 unsupported로 거부한다 →
+     * "이 PC는 클라우드를 지원하지 않음"(이 폰 안에서만 쓰는 코드)으로 바꾼다. 1.4 이하는 코드 없이 한국어 문장으로 거부해 그대로 보인다.
+     */
+    private inline fun <T> cloudCall(block: () -> T): T = try { block() } catch (e: ProtocolException) {
+        throw if (e.code == "unsupported") ProtocolException("cloud_unsupported") else e
+    }
+
+    /** §12.2 cloud_list: 폴더 path의 한 쪽(cursor부터). */
+    fun cloudList(p: Pairing, path: String, cursor: Int, token: SendToken? = null): CloudPage = cloudCall {
+        val h = header("cloud_list").put("path", path)
+        if (cursor > 0) h.put("cursor", cursor)
+        CloudListing.parse(request(p, h, token))
+    }
+
+    fun cloudMkdir(p: Pairing, path: String) { cloudCall { request(p, header("cloud_mkdir").put("path", path)) } }
+
+    fun cloudDel(p: Pairing, path: String) { cloudCall { request(p, header("cloud_del").put("path", path)) } }
+
+    /**
+     * §12.2 cloud_get: offset부터 받는다. 이어받을 때(조각이 있을 때)는 조각을 만들 때의 size·mtime을 함께 보내 허브가
+     * 그 사이 바뀌었는지 보게 한다(바뀌면 cloud_changed). open은 허브가 알린 머리(크기·수정 시각)를 받고 쓸 곳을 돌려준다 —
+     * 조각을 만들거나 이어 쓸 위치로 연다. 다 받으면 머리를 돌려준다. 끊기면 쓴 데까지 남는다(부른 쪽이 다시 시도).
+     */
+    fun cloudGet(p: Pairing, path: String, offset: Long, size: Long?, mtime: Long?, token: SendToken? = null,
+                 open: (CloudWire.Head) -> OutputStream, onProgress: ((Long, Long) -> Unit)? = null): CloudWire.Head = cloudCall {
+        val h = header("cloud_get").put("path", path).put("offset", offset)
+        if (size != null) h.put("size", size)
+        if (mtime != null) h.put("mtime", mtime)
+        connect(p.pcIp, p.pcPort, token).use { s ->
+            val ch = msgChannel(p, s)
+            ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
+            ch.send(ByteArray(0), last = true)
+            token?.tick()
+            val (raw, last) = try { ch.recv() } catch (e: ProtocolException) { throw e } catch (e: IOException) {
+                throw ProtocolException("pc_forgot") // readReply와 같은 이유(연결은 됐는데 말없이 끊음)
+            }
+            val head = when (val first = CloudWire.parseFirst(raw, last)) {
+                is CloudWire.First.Refused -> throw refusal(first.reply)
+                is CloudWire.First.Ok -> first.head
+            }
+            // 허브가 알린 크기가 이어 받을 위치보다 작다 = 그 사이 바뀌었다(size를 주지 않은 첫 요청에서만 생길 수 있다).
+            if (head.size < offset) throw ProtocolException("cloud_changed")
+            open(head).use { out ->
+                CloudWire.readData(ch, offset, head.size, out) { got ->
+                    token?.tick()
+                    onProgress?.invoke(got, head.size)
+                }
+            }
+            head
+        }
     }
 
     /** 텍스트 한 건. xfer는 상대가 hello에서 "xfer"를 알렸을 때만(상대가 중복을 무시한다). 기록은 부른 쪽이 남긴다. */
@@ -233,9 +299,10 @@ object Net {
      * §11.2: offset부터 데이터 프레임(모두 last=0, 빈 프레임 없음)을 보내고 끝에 파일 전체의 SHA-256 트레일러를 last=1로 붙인다.
      * 상대가 이미 가진 앞부분(offset 바이트)은 이 폰에서 읽어 해시만 이어 간다 — 연결하기 전에 해서 상대가 기다리다 끊지 않게.
      * 보내는 중 파일이 바뀌면 트레일러 없이 끊는다(상대는 조각만 남긴다).
+     * cloudDir가 있으면 클라우드 올리기(§12.2 cloud_put, 같은 형식에 `dir`만 더함)다. 상대의 응답을 돌려준다(cloud_put은 저장된 name).
      */
     fun sendFileXfer(ctx: Context, uri: Uri, meta: FileMeta, p: Pairing, xfer: String, offset: Long,
-                     token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null) {
+                     token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null, cloudDir: String? = null): JSONObject {
         if (meta.size > Protocol.MAX_FILE) throw ProtocolException("file_too_large")
         if (offset < 0 || offset > meta.size) throw ProtocolException("bad_xfer")
         val md = Xfer.sha256()
@@ -252,8 +319,9 @@ object Net {
             }
             connect(p.pcIp, p.pcPort, token).use { s ->
                 val ch = msgChannel(p, s)
-                val h = header("file").put("name", meta.name.take(255)).put("size", meta.size)
+                val h = header(if (cloudDir != null) "cloud_put" else "file").put("name", meta.name.take(255)).put("size", meta.size)
                     .put("xfer", xfer).put("offset", offset)
+                if (cloudDir != null) h.put("dir", cloudDir)
                 ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
                 var sent = offset
                 while (true) {
@@ -269,7 +337,7 @@ object Net {
                 if (sent != meta.size) throw ProtocolException("file_changed")
                 ch.send(Xfer.trailer(md.digest()), last = true)
                 token?.tick()
-                readReply(ch)
+                return if (cloudDir != null) cloudCall { readReply(ch) } else readReply(ch)
             }
         }
     }

@@ -27,6 +27,7 @@ from PIL import Image, ImageGrab
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import bridge
+import cloud_ui
 import i18n
 import outbox
 import protocol as p
@@ -34,70 +35,19 @@ import store
 import thumbs
 import vicons
 from i18n import t
+from ui import (MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, BUBBLE, INK, INK_TEXT, INK_HOVER,
+                MUTED_BUTTON, GREEN, RED, AMBER, DROP, DROP_ROW, MONO, KIND_ICON, _SCALE, icon, kind_label,
+                resource_path, human_size, font, ghost_button, round_icon, CircleButton, drop_tree, bind_tree)
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
 TEXT_PREVIEW = 400
 THUMB_MEMORY = 120  # 화면에 들고 있는 썸네일 이미지 수(넘으면 오래된 것부터 버린다)
 PAUSE_HOUR = 3600
-
-# 중립 회색 팔레트 (라이트, 다크)
-MAIN_BG = ("#FFFFFF", "#212121")
-SIDEBAR_BG = ("#F9F9F9", "#181818")
-BORDER = ("#E5E5E5", "#383838")
-TEXT = ("#0D0D0D", "#ECECEC")
-SECONDARY = ("#8F8F8F", "#9B9B9B")
-HOVER = ("#EFEFEF", "#2A2A2A")
-SELECTED = ("#E7E7E7", "#303030")
-BUBBLE = ("#F1F1F3", "#303030")
-INK = ("#0D0D0D", "#ECECEC")
-INK_TEXT = ("#FFFFFF", "#0D0D0D")
-INK_HOVER = ("#333333", "#CFCFCF")
-MUTED_BUTTON = ("#D9D9D9", "#4A4A4A")
-GREEN = ("#10A37F", "#19C37D")
-RED = ("#E5484D", "#FF6369")
-AMBER = ("#B7791F", "#F5A524")
-DROP = ("#F4F4F5", "#262626")
-DROP_ROW = ("#DCEBFF", "#22344D")
-MONO = "Consolas"
-KIND_ICON = {"phone": "smartphone", "pc": "laptop"}  # assets/icons/*.svg (Lucide)
-_ICONS: dict[tuple, ctk.CTkImage] = {}
-_SCALE = [1.0]  # 화면 배율(앱 창을 만든 뒤 정함)
-
-
-def icon(name: str, size: int = 16, color=TEXT) -> ctk.CTkImage:
-    """벡터 아이콘. 지금 화면 배율의 실제 픽셀 크기로 그려서(125 %·175 % 등도) 흐리지 않다. 라이트·다크 색을 따로 그린다."""
-    light, dark = color if isinstance(color, tuple) else (color, color)
-    key = (name, size, light, dark, _SCALE[0])
-    cached = _ICONS.get(key)
-    if cached is None:
-        px = max(1, round(size * _SCALE[0]))
-        svg = vicons.load(name, resource_path("assets/icons"))
-        cached = _ICONS[key] = ctk.CTkImage(light_image=vicons.render(svg, px, light),
-                                            dark_image=vicons.render(svg, px, dark), size=(size, size))
-    return cached
-
-
-def kind_label(kind: str) -> str:
-    return t(f"kind.{kind}") if kind in KIND_ICON else kind
-
-
-def resource_path(name: str) -> Path:
-    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / name
-
-
-def human_size(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
-
 
 def exe_parts() -> tuple[str, str]:
     """(실행 파일, 앞에 붙는 인자): 설치본은 TailHop.exe, 개발 중에는 pythonw.exe "app.py"."""
@@ -131,54 +81,6 @@ def set_autostart(enabled: bool) -> None:
                 pass
 
 
-_FONTS: dict[tuple[str, int, str], ctk.CTkFont] = {}
-
-
-def font(size: int, weight: str = "normal", family: str | None = None) -> ctk.CTkFont:
-    """글꼴은 (글꼴, 크기, 굵기)마다 하나만 만들어 같이 쓴다. 말풍선마다 새로 만들면 Tk 글꼴이 수백 개 쌓인다."""
-    key = (family or i18n.ui_font(), size, weight)
-    cached = _FONTS.get(key)
-    if cached is None:
-        cached = _FONTS[key] = ctk.CTkFont(family=key[0], size=size, weight=weight)
-    return cached
-
-
-def ghost_button(parent, name: str, command, size: int = 32, **kw) -> ctk.CTkButton:
-    """투명한 아이콘 버튼(name = assets/icons의 아이콘 이름)."""
-    return ctk.CTkButton(parent, text="", image=icon(name, 18), command=command, width=size, height=size,
-                         corner_radius=8, fg_color="transparent", hover_color=HOVER, **kw)
-
-
-def round_icon(parent, name: str, size: int = 32, fg=SELECTED, color=TEXT) -> ctk.CTkFrame:
-    circle = ctk.CTkFrame(parent, width=size, height=size, corner_radius=size // 2, fg_color=fg)
-    circle.pack_propagate(False)
-    circle.grid_propagate(False)
-    ctk.CTkLabel(circle, text="", image=icon(name, max(14, size // 2 + 1), color),
-                 fg_color="transparent").place(relx=0.5, rely=0.5, anchor="center")
-    return circle
-
-
-class CircleButton(ctk.CTkFrame):
-    """정확한 원형 버튼(CTkButton은 모서리 반경 때문에 알약 모양이 된다)."""
-
-    def __init__(self, parent, name: str, command, size: int = 34, fg="transparent", hover=HOVER,
-                 color=TEXT, border=None, icon_size: int = 18) -> None:
-        super().__init__(parent, width=size, height=size, corner_radius=size // 2, fg_color=fg,
-                         border_width=1 if border else 0, border_color=border or fg, cursor="hand2")
-        self.pack_propagate(False)
-        self._fg, self._hover, self._command = fg, hover, command
-        self.label = ctk.CTkLabel(self, text="", image=icon(name, icon_size, color), fg_color="transparent")
-        self.label.place(relx=0.5, rely=0.5, anchor="center")
-        for w in (self, self.label):
-            w.bind("<Button-1>", lambda _e: self._command())
-            w.bind("<Enter>", lambda _e: self.configure(fg_color=self._hover))
-            w.bind("<Leave>", lambda _e: self.configure(fg_color=self._fg))
-
-    def set_colors(self, fg, hover) -> None:
-        self._fg, self._hover = fg, hover
-        self.configure(fg_color=fg)
-
-
 class TrayIcon(pystray.Icon):
     """트레이 아이콘을 알림 영역 크기(SM_CXSMICON, 화면 배율 반영) 그대로 불러온다.
     pystray 기본은 한 장을 ICO로 저장해 큰 아이콘 크기로 읽은 뒤 셸이 줄이므로 작은 크기에서 흐려진다.
@@ -201,23 +103,6 @@ class TrayIcon(pystray.Icon):
             os.unlink(path)
 
 
-def drop_tree(widget, on_enter, on_leave, on_drop) -> None:
-    """프레임과 모든 자식을 파일 드롭 대상으로 등록한다(어디에 놓아도 같은 기기로)."""
-    widget.drop_target_register(DND_FILES)
-    widget.dnd_bind("<<DropEnter>>", on_enter)
-    widget.dnd_bind("<<DropLeave>>", on_leave)
-    widget.dnd_bind("<<Drop>>", on_drop)
-    for child in widget.winfo_children():
-        drop_tree(child, on_enter, on_leave, on_drop)
-
-
-def bind_tree(widget, sequence: str, handler) -> None:
-    """프레임 안의 모든 자식까지 같은 이벤트를 건다(클릭 영역을 행 전체로)."""
-    widget.bind(sequence, handler)
-    for child in widget.winfo_children():
-        bind_tree(child, sequence, handler)
-
-
 def date_label(when: dt.datetime) -> str:
     weekdays = t("date.weekdays").split(",")
     months = t("date.months").split(",")
@@ -234,7 +119,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.geometry("880x700")
         self.minsize(560, 520)
         icon = resource_path("assets/tailhop.ico")
-        if icon.exists():
+        self.icon_path = icon if icon.exists() else None
+        if self.icon_path is not None:
             self.after(250, lambda: self.iconbitmap(str(icon)))
         self.protocol("WM_DELETE_WINDOW", self.withdraw)
 
@@ -244,7 +130,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         i18n.set_language(self.lang_var.get())
         self.active: dict[str, tuple[int, int, str]] = {}  # 보내는 중인 건: id: (보낸 바이트, 전체, 이름)
         self.pending_labels: dict[str, ctk.CTkLabel] = {}  # 대화방의 대기 말풍선 상태 줄(진행률만 바꿀 때)
+        self._render_pending = False
         self.qr_window: ctk.CTkToplevel | None = None
+        self.cloud_window: cloud_ui.CloudWindow | None = None
+        self.cloud_on_var = tk.BooleanVar(value=self.node.cloud_on)
+        self.cloud_collect_var = tk.BooleanVar(value=self.node.cloud_collect)
         self.join_window: ctk.CTkToplevel | None = None
         self.status: tuple[str, dict] = ("status.checking", {})
         self.status_warn = False
@@ -329,7 +219,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ghost_button(head, "ellipsis", self._open_app_menu).pack(side="right")
         ghost_button(head, "folder", self._open_save_dir).pack(side="right")
 
-        new_row = ctk.CTkFrame(self.sidebar, fg_color="transparent", corner_radius=8, height=36, cursor="hand2")
+        new_row = ctk.CTkFrame(self.sidebar, fg_color="transparent", corner_radius=6, height=36, cursor="hand2")
         new_row.pack(fill="x", padx=8)
         new_row.pack_propagate(False)
         ctk.CTkLabel(new_row, text="", image=icon("plus", 16), width=22).pack(side="left", padx=(10, 6))
@@ -337,6 +227,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         bind_tree(new_row, "<Button-1>", lambda _e: self._open_pair_menu())
         bind_tree(new_row, "<Enter>", lambda _e: new_row.configure(fg_color=HOVER))
         bind_tree(new_row, "<Leave>", lambda _e: new_row.configure(fg_color="transparent"))
+        cloud_row = ctk.CTkFrame(self.sidebar, fg_color="transparent", corner_radius=6, height=36, cursor="hand2")
+        cloud_row.pack(fill="x", padx=8)
+        cloud_row.pack_propagate(False)
+        ctk.CTkLabel(cloud_row, text="", image=icon("cloud", 16), width=22).pack(side="left", padx=(10, 6))
+        ctk.CTkLabel(cloud_row, text=t("sidebar.cloud"), font=font(13), text_color=TEXT).pack(side="left")
+        self.cloud_badge = ctk.CTkLabel(cloud_row, text="", font=font(11), text_color=GREEN)
+        self.cloud_badge.pack(side="right", padx=10)
+        bind_tree(cloud_row, "<Button-1>", lambda _e: self.open_cloud())
+        bind_tree(cloud_row, "<Enter>", lambda _e: cloud_row.configure(fg_color=HOVER))
+        bind_tree(cloud_row, "<Leave>", lambda _e: cloud_row.configure(fg_color="transparent"))
 
         ctk.CTkLabel(self.sidebar, text=t("sidebar.devices"), font=font(12), text_color=SECONDARY,
                      anchor="w").pack(fill="x", padx=18, pady=(16, 4))
@@ -383,7 +283,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.progress.pack(fill="x", padx=16)
         self.progress_label = ctk.CTkLabel(self.progress_row, text="", font=font(11), text_color=SECONDARY, height=18)
         self.progress_label.pack()
-        composer = ctk.CTkFrame(composer_area, fg_color=MAIN_BG, corner_radius=26, border_width=1, border_color=BORDER)
+        composer = ctk.CTkFrame(composer_area, fg_color=MAIN_BG, corner_radius=12, border_width=1, border_color=BORDER)
         composer.pack(side="bottom", fill="x")
         self.text = ctk.CTkTextbox(composer, height=40, fg_color="transparent", border_width=0, font=font(13),
                                    text_color=TEXT, wrap="word", activate_scrollbars=False)
@@ -397,7 +297,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                                         color=INK_TEXT, icon_size=18)
         self.send_button.pack(side="right")
         # 받는 기기 선택(대화방 전환). 여러 기기가 있을 때 어디로 가는지 늘 보이게 한다.
-        self.target_chip = ctk.CTkButton(tools, text="", command=self._open_target_menu, height=30, corner_radius=15,
+        self.target_chip = ctk.CTkButton(tools, text="", command=self._open_target_menu, height=30, corner_radius=6,
                                          fg_color="transparent", hover_color=HOVER, text_color=SECONDARY,
                                          border_width=1, border_color=BORDER, font=font(12),
                                          image=icon("chevron-down", 14, SECONDARY), compound="right")
@@ -515,6 +415,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             menu.add_command(label=t("menu.resume"), command=lambda: self._set_receiving(True))
         menu.add_separator()
+        menu.add_command(label=t("menu.cloud_open"), command=self.open_cloud)
+        menu.add_checkbutton(label=t("menu.cloud_on"), variable=self.cloud_on_var, command=self._on_cloud_switch)
+        menu.add_checkbutton(label=t("menu.cloud_collect"), variable=self.cloud_collect_var,
+                             command=self._on_collect_switch, state="normal" if self.node.cloud_on else "disabled")
+        menu.add_command(label=t("menu.cloud_folder"), command=self._change_cloud_dir)
+        menu.add_separator()
         menu.add_command(label=t("menu.open_folder"), command=self._open_save_dir)
         menu.add_command(label=t("menu.change_folder"), command=self._change_save_dir)
         menu.add_checkbutton(label=t("menu.autostart"), variable=self.autostart_var, command=self._toggle_autostart)
@@ -566,6 +472,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         menu.add_command(label=t("devmenu.kind", kind=kind_label(pairing.kind)), state="disabled")
         menu.add_command(label=t("devmenu.send_clipboard"), command=lambda: self._send_clipboard(stable_id))
         menu.add_command(label=t("devmenu.send_files"), command=lambda: self._pick_files(stable_id))
+        menu.add_command(label=t("devmenu.cloud"), command=lambda: self.open_cloud(stable_id))
         menu.add_separator()
         menu.add_command(label=t("devmenu.clear"), command=lambda: self._clear_history(stable_id))
         menu.add_command(label=t("devmenu.unpair"), command=lambda: self._unpair(stable_id))
@@ -606,6 +513,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             name = pairing.name if len(pairing.name) <= 18 else pairing.name[:17] + "…"
             self.target_chip.configure(text=name)
         self.receiving_var.set(receiving)
+        self.cloud_badge.configure(text=t("sidebar.cloud_on") if self.node.cloud_on else "")
         color = AMBER if not receiving else RED if self.status_warn else SECONDARY
         warn = icon("triangle-alert", 13, color) if self.status_warn and self.status[0] == "status.offline" else None
         self.sidebar_status.configure(text=(" " if warn else "") + self._status_text(), text_color=color,
@@ -627,7 +535,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             else:
                 preview = last["name"][:26]
             selected = stable_id == self.current
-            row = ctk.CTkFrame(self.device_list, fg_color=SELECTED if selected else "transparent", corner_radius=8,
+            row = ctk.CTkFrame(self.device_list, fg_color=SELECTED if selected else "transparent", corner_radius=6,
                                height=52, cursor="hand2")
             row.pack(fill="x", padx=6, pady=1)
             row.pack_propagate(False)
@@ -661,14 +569,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.pending_labels.clear()
         all_items = self._items_for(self.current) if self.current else []
         items = all_items[-self.visible_rows:]
-        pending = self.node.outbox.jobs_for(self.current) if self.current else []
+        pending = [j for j in self.node.outbox.jobs_for(self.current) if j.kind not in cloud_ui.CLOUD_KINDS] \
+            if self.current else []
         if not items and not pending:
             self._render_empty()
             return
         hidden = len(all_items) - len(items)
         if hidden > 0:
             ctk.CTkButton(self.log, text=t("history.more", count=hidden), command=self._show_more, height=28,
-                          corner_radius=14, fg_color="transparent", hover_color=HOVER, text_color=SECONDARY,
+                          corner_radius=6, fg_color="transparent", hover_color=HOVER, text_color=SECONDARY,
                           border_width=1, border_color=BORDER, font=font(11)).pack(pady=(10, 0))
         last_day = None
         for item in items:
@@ -699,7 +608,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         """아직 못 보낸 건(보내는 중·다시 시도 대기·실패): 내 쪽 말풍선을 흐리게, 아래에 상태와 다시·취소."""
         row = ctk.CTkFrame(self.log, fg_color="transparent")
         row.pack(fill="x", padx=12, pady=4)
-        box = ctk.CTkFrame(row, fg_color=BUBBLE, corner_radius=18)
+        box = ctk.CTkFrame(row, fg_color=BUBBLE, corner_radius=8)
         box.pack(anchor="e")
         if job.kind == "text":
             text = job.text or ""
@@ -774,7 +683,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(empty, text=t("empty.connect_sub"), font=font(12), text_color=SECONDARY,
                          wraplength=460).pack()
             ctk.CTkButton(empty, text=t("empty.connect_button"), command=self._open_pair_menu, fg_color=INK,
-                          hover_color=INK_HOVER, text_color=INK_TEXT, corner_radius=18, height=36, width=130,
+                          hover_color=INK_HOVER, text_color=INK_TEXT, corner_radius=6, height=36, width=130,
                           font=font(13, "bold")).pack(pady=18)
 
     def _message(self, item: dict, when: dt.datetime) -> None:
@@ -786,7 +695,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(row, text=f" {item.get('peer', '')} · {when:%H:%M}", font=font(11), text_color=SECONDARY,
                          height=16, image=icon(self._icon_for(item), 12, SECONDARY),
                          compound="left").pack(anchor="w", padx=2)
-        box = ctk.CTkFrame(row, fg_color=BUBBLE if mine else "transparent", corner_radius=18,
+        box = ctk.CTkFrame(row, fg_color=BUBBLE if mine else "transparent", corner_radius=8,
                            border_width=0 if mine or item["kind"] == "text" else 1, border_color=BORDER)
         box.pack(anchor=side)
         if item["kind"] == "text":
@@ -897,6 +806,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.progress.set(fraction)
         self.progress_label.configure(text=text)
 
+    def flash(self, text: str) -> None:
+        """다른 창(클라우드)에서 쓰는 짧은 알림 줄."""
+        self._flash(text)
+
     def _flash(self, text: str) -> None:
         self._show_progress(text, 1.0)
         self.after(2000, self._hide_progress)
@@ -1003,7 +916,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(win, text=t("pair.phone_hint"), font=font(12), text_color=SECONDARY).pack()
         img = qrcode.make(url, box_size=7, border=2).get_image().convert("RGB")
         qr = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        frame = ctk.CTkFrame(win, fg_color="#FFFFFF", corner_radius=16, border_width=1, border_color=BORDER)
+        frame = ctk.CTkFrame(win, fg_color="#FFFFFF", corner_radius=12, border_width=1, border_color=BORDER)
         frame.pack(pady=(12, 10))
         ctk.CTkLabel(frame, image=qr, text="").pack(padx=10, pady=10)
 
@@ -1012,7 +925,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         groups = body.split("-")
         half = (len(groups) + 1) // 2
         shown = f"{where}\n{'-'.join(groups[:half])}\n{'-'.join(groups[half:])}"
-        code_box = ctk.CTkFrame(win, fg_color=BUBBLE, corner_radius=12)
+        code_box = ctk.CTkFrame(win, fg_color=BUBBLE, corner_radius=8)
         code_box.pack(padx=24, pady=(6, 6), fill="x")
         ctk.CTkLabel(code_box, text=shown, font=font(15, "bold", MONO), text_color=TEXT,
                      justify="center").pack(padx=12, pady=10)
@@ -1027,7 +940,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         for label_key, value, done_key in (("pair.copy_code", code, "pair.copied_code"),
                                            ("pair.copy_link", url, "pair.copied_link")):
             ctk.CTkButton(buttons, text=t(label_key), command=lambda v=value, d=done_key: copy(v, d), height=30,
-                          corner_radius=15, fg_color="transparent", hover_color=HOVER, text_color=TEXT,
+                          corner_radius=6, fg_color="transparent", hover_color=HOVER, text_color=TEXT,
                           border_width=1, border_color=BORDER, font=font(12)).pack(side="left", padx=4)
         countdown = ctk.CTkLabel(win, text="", font=font(13, "bold"), text_color=TEXT)
         countdown.pack(pady=(10, 0))
@@ -1067,12 +980,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(win, text=t("join.hint"), font=font(12), text_color=SECONDARY, wraplength=380,
                      justify="center").pack(padx=24)
         box = ctk.CTkTextbox(win, height=84, width=400, font=font(14, family=MONO), fg_color=BUBBLE,
-                             border_width=0, corner_radius=12, text_color=TEXT, wrap="char")
+                             border_width=0, corner_radius=6, text_color=TEXT, wrap="char")
         box.pack(padx=24, pady=12)
         status = ctk.CTkLabel(win, text=t("join.same_account"), font=font(11), text_color=SECONDARY, wraplength=380)
         status.pack()
         button = ctk.CTkButton(win, text=t("join.connect"), fg_color=INK, hover_color=INK_HOVER, text_color=INK_TEXT,
-                               corner_radius=18, height=36, width=130, font=font(13, "bold"))
+                               corner_radius=6, height=36, width=130, font=font(13, "bold"))
         button.pack(pady=(10, 22))
 
         def submit() -> None:
@@ -1346,8 +1259,68 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._notify(message)
         elif job is not None and job.state == outbox.WAITING and job.attempts == 1:
             self._notify(t("notify.waiting", peer=self._target_name(peer)))  # 처음 실패했을 때만 한 번
-        if peer == self.current:
+        if self.cloud_window is not None and self.cloud_window.winfo_exists():
+            self.cloud_window.on_outbox(data)
+        if peer == self.current and data.get("kind") not in cloud_ui.CLOUD_KINDS:
+            self._render_history_soon()
+
+    def _render_history_soon(self) -> None:
+        """여러 건이 한꺼번에 바뀔 때(파일 100개를 넣음 등) 대화방을 한 번만 다시 그린다."""
+        if self._render_pending:
+            return
+        self._render_pending = True
+
+        def run() -> None:
+            self._render_pending = False
             self._render_history()
+
+        self.after(150, run)
+
+    # ---------- 클라우드 ----------
+    def open_cloud(self, source: str | None = None) -> None:
+        if self.cloud_window is not None and self.cloud_window.winfo_exists():
+            if source is not None:
+                self.cloud_window.open_source(source)
+            self.cloud_window.deiconify()
+            self.cloud_window.lift()
+            self.cloud_window.focus_force()
+            return
+        self.cloud_window = cloud_ui.CloudWindow(self, source)
+
+    def toggle_cloud_on(self) -> None:
+        self.cloud_on_var.set(not self.node.cloud_on)
+        self._on_cloud_switch()
+
+    def _on_cloud_switch(self) -> None:
+        on = bool(self.cloud_on_var.get())
+        if on and not self.node.settings.get("cloud_dir"):
+            # 처음 켤 때 폴더를 보여 준다(기본: 사용자 폴더의 'TailHop Cloud')
+            if not messagebox.askyesno(APP_NAME, t("dialog.cloud_on", path=str(self.node.cloud_dir)), parent=self):
+                self.cloud_on_var.set(False)
+                return
+        self.node.set_cloud(on=on)
+        self.cloud_collect_var.set(self.node.cloud_collect)
+        self._refresh_header()
+        self._flash(t("flash.cloud_on") if on else t("flash.cloud_off"))
+        self._refresh_cloud_window(local=True)
+
+    def _on_collect_switch(self) -> None:
+        self.node.set_cloud(collect=bool(self.cloud_collect_var.get()))
+
+    def _change_cloud_dir(self) -> None:
+        chosen = cloud_ui.cloud_folder_dialog(self)
+        if chosen:
+            self.node.set_cloud(folder=chosen)
+            self._flash(t("flash.cloud_dir", path=chosen))
+            self._refresh_cloud_window(local=True)
+
+    def _refresh_cloud_window(self, local: bool = False) -> None:
+        win = self.cloud_window
+        if win is None or not win.winfo_exists():
+            return
+        win.render_sources()
+        if not local or win.source == cloud_ui.LOCAL:
+            win.reload()
 
     def _handle_event(self, kind: str, data: dict) -> None:
         if kind == "listening":
@@ -1396,7 +1369,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             messagebox.showwarning(APP_NAME, t("dialog.peer_unpaired", name=data["name"]), parent=self)
         elif kind == "sent":
             self._render_devices()
-            self._render_history()
+            self._render_history_soon()
         elif kind == "progress":
             if data["dir"] == "out":
                 return  # 보내기 진행은 보낼 곳 목록(outbox_progress)으로 보인다
@@ -1406,7 +1379,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                                 data["done"] / total)
         elif kind == "outbox":
             self._on_outbox(data)
+        elif kind == "ui_call":
+            data["fn"]()
+        elif kind in ("cloud_in", "cloud_changed"):
+            if kind == "cloud_in":
+                self._notify(t("notify.cloud_in", peer=data["peer"], name=data["name"]))
+            self._refresh_cloud_window(local=True)
+        elif kind == "cloud_sent":
+            self._flash(t("flash.cloud_sent", name=data["name"]))
         elif kind == "outbox_progress":
+            if self.cloud_window is not None and self.cloud_window.winfo_exists():
+                self.cloud_window.update_transfers(data)
             self.active[data["id"]] = (data["done"], data["total"], data.get("name") or "")
             self._show_active()
             label = self.pending_labels.get(data["id"])

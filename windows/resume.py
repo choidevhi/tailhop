@@ -18,6 +18,8 @@ import store
 
 KEEP_SEC = 24 * 3600
 MAX_DONE = 5000  # 끝난 xfer 기록 수 상한(오래된 것부터 버린다)
+MAX_PARTIALS_PER_PEER = 32  # 한 상대가 남겨 둘 수 있는 조각 수(넘으면 오래된 것부터 지운다)
+PRUNE_EVERY = 3600  # 실행 중에도 이 간격으로 24시간 지난 것을 지운다
 _XFER = re.compile(r"[0-9a-f]{32}")
 
 
@@ -33,10 +35,11 @@ class Partial:
     part: Path
     final: Path
     ts: float
+    kind: str = "file"  # file(대화방) 또는 cloud_put. 조각은 같은 종류·같은 폴더로만 이어 받는다
 
     def to_json(self) -> dict:
         return {"peer": self.peer, "xfer": self.xfer, "size": self.size, "part": str(self.part),
-                "final": str(self.final), "ts": self.ts}
+                "final": str(self.final), "ts": self.ts, "kind": self.kind}
 
 
 def _key(peer: str, xfer: str) -> str:
@@ -51,6 +54,7 @@ class ResumeBook:
         self.partials: dict[str, Partial] = {}
         self.done: dict[str, float] = {}
         self.busy: set[str] = set()
+        self._pruned = 0.0
         self._load()
         self.prune()
 
@@ -66,7 +70,7 @@ class ResumeBook:
         for raw in data.get("partials") or []:
             try:
                 item = Partial(str(raw["peer"]), str(raw["xfer"]), int(raw["size"]), Path(raw["part"]),
-                               Path(raw["final"]), float(raw["ts"]))
+                               Path(raw["final"]), float(raw["ts"]), str(raw.get("kind") or "file"))
             except (KeyError, TypeError, ValueError):
                 continue
 
@@ -87,6 +91,7 @@ class ResumeBook:
     def prune(self) -> None:
         """24시간 지난 조각(파일까지)과 끝난 기록을 지운다."""
         now = self.clock()
+        self._pruned = now
         with self.lock:
             old = [k for k, x in self.partials.items() if now - x.ts > KEEP_SEC and k not in self.busy]
             for key in old:
@@ -116,24 +121,35 @@ class ResumeBook:
             return _key(peer, xfer) in self.done
 
     # ---------- 받기 ----------
-    def begin(self, peer: str, xfer: str, size: int, part: Path, final: Path) -> None:
-        """처음부터 받는 조각을 적는다. 같은 키의 예전 조각 파일은 지운다."""
+    def begin(self, peer: str, xfer: str, size: int, part: Path, final: Path, kind: str = "file") -> None:
+        """처음부터 받는 조각을 적는다. 같은 키의 예전 조각 파일은 지운다. 한 상대의 조각이 너무 많으면 오래된 것부터 지운다."""
+        if self.clock() - self._pruned > PRUNE_EVERY:
+            self.prune()
         key = _key(peer, xfer)
         with self.lock:
             old = self.partials.get(key)
             if old is not None and old.part != part and key not in self.busy:
                 old.part.unlink(missing_ok=True)
 
-            self.partials[key] = Partial(peer, xfer, size, part, final, self.clock())
+            mine = sorted((x.ts, k) for k, x in self.partials.items()
+                          if x.peer == peer and k != key and k not in self.busy)
+            for _, k in mine[:max(0, len(mine) - MAX_PARTIALS_PER_PEER + 1)]:
+                self.partials.pop(k).part.unlink(missing_ok=True)
+
+            self.partials[key] = Partial(peer, xfer, size, part, final, self.clock(), kind)
             self.busy.add(key)
             self._save()
 
-    def claim(self, peer: str, xfer: str, size: int, offset: int) -> Partial | None:
-        """이어 받을 조각을 잡는다. 없거나, 크기가 다르거나, 짧거나, 다른 연결이 쓰는 중이면 None."""
+    def claim(self, peer: str, xfer: str, size: int, offset: int, kind: str = "file",
+              folder: Path | None = None) -> Partial | None:
+        """이어 받을 조각을 잡는다. 없거나, 크기·종류·받을 폴더가 다르거나, 짧거나, 다른 연결이 쓰는 중이면 None.
+        (클라우드를 끈 뒤 대화방 파일로 이어 보내 클라우드 폴더에 쓰는 일, 바꾸기 전 폴더에 쓰는 일을 막는다.)"""
         key = _key(peer, xfer)
         with self.lock:
             item = self.partials.get(key)
-            if item is None or item.size != size or key in self.busy:
+            if item is None or item.size != size or key in self.busy or item.kind != kind:
+                return None
+            if folder is not None and item.final.parent != Path(folder):
                 return None
 
             try:
@@ -180,6 +196,13 @@ class ResumeBook:
             self.busy.discard(key)
             self.partials.pop(key, None)
             self.done[key] = self.clock()
+            self._save()
+
+    def forget_kind(self, kind: str) -> None:
+        """그 종류의 조각을 모두 지운다(클라우드를 끄거나 폴더를 바꿀 때 cloud_put 조각)."""
+        with self.lock:
+            for key in [k for k, x in self.partials.items() if x.kind == kind and k not in self.busy]:
+                self.partials.pop(key).part.unlink(missing_ok=True)
             self._save()
 
     def forget_peer(self, peer: str) -> None:

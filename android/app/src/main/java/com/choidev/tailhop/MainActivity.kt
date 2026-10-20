@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.addRow).setOnClickListener { startScan() }
         findViewById<View>(R.id.qrBtn).setOnClickListener { startScan() }
         findViewById<View>(R.id.moreBtn).setOnClickListener { showMenu(it) }
+        findViewById<View>(R.id.cloudRow).setOnClickListener { startActivity(Intent(this, CloudActivity::class.java)) }
         receiveRow.setOnClickListener { receiveSwitch.toggle() }
         receiveSwitch.setOnCheckedChangeListener(onSwitch)
         History.addListener(historyListener)
@@ -104,6 +105,10 @@ class MainActivity : AppCompatActivity() {
             if (Receiving.isOn(this)) m.menu.add(0, 2, 1, R.string.menu_pause_hour)
             else m.menu.add(0, 3, 1, R.string.menu_resume)
             if (!batteryExempt(this)) m.menu.add(0, 4, 2, R.string.menu_background)
+            // 클라우드 모드(1.8.0): 켜면 PC가 이 폰의 Download/TailHop/Cloud를 쓴다. 모으기는 켜져 있을 때만 의미가 있어 그때만 보인다.
+            m.menu.add(0, 5, 3, R.string.menu_cloud_host).apply { isCheckable = true; isChecked = CloudMode.isOn(this@MainActivity) }
+            if (CloudMode.isOn(this)) m.menu.add(0, 6, 4, R.string.menu_cloud_collect)
+                .apply { isCheckable = true; isChecked = CloudMode.collectSetting(this@MainActivity) }
         }
         m.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -111,10 +116,26 @@ class MainActivity : AppCompatActivity() {
                 2 -> setReceiving(false, Receiving.HOUR_MS)
                 3 -> setReceiving(true, null)
                 4 -> requestBatteryExemption(this)
+                5 -> setCloud(!CloudMode.isOn(this))
+                6 -> setCollect(!CloudMode.collectSetting(this))
             }
             true
         }
         m.show()
+    }
+
+    /** 이 폰을 클라우드로 쓰기. 받기 서비스가 요청을 받으므로 수신을 멈춘 동안에는 PC가 볼 수 없다고 알린다. */
+    private fun setCloud(on: Boolean) {
+        CloudMode.setOn(this, on)
+        val msg = if (!on) getString(R.string.toast_cloud_off)
+        else if (Receiving.isOn(this)) getString(R.string.toast_cloud_on)
+        else getString(R.string.toast_cloud_on) + "\n" + getString(R.string.cloud_needs_receiving)
+        toast(msg)
+    }
+
+    private fun setCollect(on: Boolean) {
+        CloudMode.setCollect(this, on)
+        toast(getString(if (on) R.string.toast_collect_on else R.string.toast_collect_off))
     }
 
     private fun chooseLanguage() {
@@ -153,6 +174,7 @@ class MainActivity : AppCompatActivity() {
         list.visibility = if (none) View.GONE else View.VISIBLE
         findViewById<View>(R.id.devHeader).visibility = if (none) View.GONE else View.VISIBLE
         receiveRow.visibility = if (none) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.cloudRow).visibility = if (none) View.GONE else View.VISIBLE
         updateService()
     }
 
@@ -238,8 +260,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun deviceMenu(p: Pairing) {
         AlertDialog.Builder(this).setTitle(p.pcName)
-            .setItems(arrayOf(getString(R.string.menu_show_code), getString(R.string.menu_unpair))) { _, which ->
-                if (which == 0) showConfirmCode(this, p) else confirmUnpair(this, p) { reload() }
+            .setItems(arrayOf(getString(R.string.menu_cloud_open), getString(R.string.menu_show_code), getString(R.string.menu_unpair))) { _, which ->
+                when (which) {
+                    0 -> openCloud(this, p.pcIp)
+                    1 -> showConfirmCode(this, p)
+                    else -> confirmUnpair(this, p) { reload() }
+                }
             }.show()
     }
 
@@ -297,6 +323,11 @@ class MainActivity : AppCompatActivity() {
             d.setBounds(0, 0, px, px)
             d.setTint(color)
             return d
+        }
+
+        /** 그 PC의 클라우드를 바로 연다(맨 위 폴더). */
+        fun openCloud(ctx: Context, ip: String) {
+            ctx.startActivity(Intent(ctx, CloudActivity::class.java).putExtra(CloudActivity.EXTRA_IP, ip))
         }
 
         fun showConfirmCode(ctx: Context, p: Pairing) {

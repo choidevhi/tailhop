@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
 import android.view.View
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -100,13 +101,19 @@ class ShareActivity : AppCompatActivity() {
         }
         group.check(ids[devices.indexOfFirst { it.pcIp == current }.coerceAtLeast(0)])
         box.addView(group)
+        // 파일은 대화 대신 고른 PC의 클라우드 맨 위 폴더에 넣을 수도 있다(1.8.0). 클라우드가 꺼진 PC면 보내기 목록에 실패로 보인다.
+        val toCloud = if (uris.isEmpty()) null else CheckBox(this).apply {
+            this.text = getString(R.string.share_to_cloud)
+        }
+        toCloud?.let { box.addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = (10 * d).toInt() }) }
         val scroll = ScrollView(this).apply { addView(box) }
 
         AlertDialog.Builder(this).setTitle(R.string.share_confirm_title)
             .setView(scroll)
             .setPositiveButton(R.string.share_send) { _, _ ->
                 val target = devices[ids.indexOf(group.checkedRadioButtonId).coerceAtLeast(0)]
-                send(target, text, uris)
+                if (toCloud?.isChecked == true) sendToCloud(target, uris) else send(target, text, uris)
             }
             .setNegativeButton(R.string.cancel) { _, _ -> finish() }
             .setOnCancelListener { finish() }
@@ -127,6 +134,15 @@ class ShareActivity : AppCompatActivity() {
         } else Outbox.enqueueFiles(this, target.pcIp, uris.map { it.toString() })
         SendService.start(this, uris)
         toast(getString(R.string.send_queued))
+        finish()
+    }
+
+    /** 클라우드 올리기로 넣는다(맨 위 폴더). 대화 기록에는 남지 않고 클라우드 화면의 전송 목록·알림에 보인다. */
+    private fun sendToCloud(target: Pairing, uris: List<Uri>) {
+        Store.setCurrent(this, target.pcIp)
+        Outbox.enqueueCloudUpload(this, target.pcIp, "", uris.map { it.toString() })
+        SendService.start(this, uris)
+        toast(getString(R.string.cloud_upload_queued))
         finish()
     }
 

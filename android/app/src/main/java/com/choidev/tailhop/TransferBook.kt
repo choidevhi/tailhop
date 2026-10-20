@@ -6,8 +6,10 @@ import org.json.JSONObject
 /**
  * 받다 만 조각 하나(§11.2). loc은 조각이 있는 곳: API 29+는 MediaStore 대기 항목(IS_PENDING=1)의 content URI,
  * API 26–28은 Download/TailHop 안의 `.part` 파일 경로. ts는 마지막으로 쓴 시각(24시간이 지나면 지운다).
+ * dest는 받을 폴더(Download/TailHop 아래 상대 경로, 대화방 파일은 "", 클라우드는 "Cloud/…", 1.8.0) — 이어받을 때 같아야 한다.
  */
-data class PartialRec(val peer: String, val xfer: String, val size: Long, val loc: String, val name: String, val ts: Long)
+data class PartialRec(val peer: String, val xfer: String, val size: Long, val loc: String, val name: String, val ts: Long,
+                      val dest: String = "")
 
 /**
  * 이어받기 장부(docs/PROTOCOL.md §11): 받다 만 조각과 끝까지 받은 xfer를 상대(PC IP)별로 24시간 기억한다.
@@ -50,10 +52,10 @@ class TransferBook(private val clock: () -> Long = System::currentTimeMillis) {
     fun isDone(peer: String, xfer: String): Boolean = done[key(peer, xfer)]?.let { fresh(it, clock()) } == true
 
     /** 처음부터 받는 조각을 적는다. 같은 키의 예전 조각(다른 위치)은 돌려준다(부른 쪽이 지운다). */
-    fun begin(peer: String, xfer: String, size: Long, loc: String, name: String): PartialRec? {
+    fun begin(peer: String, xfer: String, size: Long, loc: String, name: String, dest: String = ""): PartialRec? {
         val k = key(peer, xfer)
         val old = partials[k]?.takeIf { it.loc != loc }
-        partials[k] = PartialRec(peer, xfer, size, loc, name, clock())
+        partials[k] = PartialRec(peer, xfer, size, loc, name, clock(), dest)
         busy += k
         return old
     }
@@ -102,8 +104,10 @@ class TransferBook(private val clock: () -> Long = System::currentTimeMillis) {
     fun encode(): String {
         val arr = JSONArray()
         partials.values.forEach {
-            arr.put(JSONObject().put("peer", it.peer).put("xfer", it.xfer).put("size", it.size)
-                .put("loc", it.loc).put("name", it.name).put("ts", it.ts))
+            val o = JSONObject().put("peer", it.peer).put("xfer", it.xfer).put("size", it.size)
+                .put("loc", it.loc).put("name", it.name).put("ts", it.ts)
+            if (it.dest.isNotEmpty()) o.put("dest", it.dest)
+            arr.put(o)
         }
         val d = JSONObject()
         done.forEach { (k, v) -> d.put(k, v) }
@@ -125,7 +129,7 @@ class TransferBook(private val clock: () -> Long = System::currentTimeMillis) {
                 val p = arr.optJSONObject(i) ?: continue
                 try {
                     val rec = PartialRec(p.getString("peer"), p.getString("xfer"), p.getLong("size"),
-                        p.getString("loc"), p.optString("name", "file"), p.getLong("ts"))
+                        p.getString("loc"), p.optString("name", "file"), p.getLong("ts"), p.optString("dest", ""))
                     if (Xfer.isValid(rec.xfer) && rec.size >= 0) book.partials[key(rec.peer, rec.xfer)] = rec
                 } catch (e: Exception) { }
             }

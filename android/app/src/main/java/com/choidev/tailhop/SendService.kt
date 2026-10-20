@@ -90,35 +90,35 @@ class SendService : Service() {
 
     private fun kick() { synchronized(signal) { signal.notifyAll() } }
 
-    /** 보낼 건이 있는 PC마다 일꾼 하나. */
+    /** 보낼 건이 있는 줄(PC마다 대화 줄·클라우드 줄, OutboxJob.lane)마다 일꾼 하나. */
     private fun ensureWorkers() {
         if (!running) return
         synchronized(workers) {
-            for (dev in Outbox.activeDevices(this)) {
-                if (workers.containsKey(dev)) continue
-                workers[dev] = Thread({ work(dev) }, "tailhop-send").also { it.start() }
+            for (lane in Outbox.activeLanes(this)) {
+                if (workers.containsKey(lane)) continue
+                workers[lane] = Thread({ work(lane) }, "tailhop-send").also { it.start() }
             }
         }
         kick()
     }
 
-    /** 한 PC의 일꾼: 그 PC의 맨 앞 건을 다음 시도 시각에 보낸다. 보낼 건이 없으면 끝난다. */
-    private fun work(dev: String) {
+    /** 한 줄의 일꾼: 그 줄의 맨 앞 건을 다음 시도 시각에 보낸다. 보낼 건이 없으면 끝난다. */
+    private fun work(lane: String) {
         while (running) {
             val job = synchronized(workers) {
-                Outbox.head(this, dev) ?: run { workers.remove(dev); null }
+                Outbox.head(this, lane) ?: run { workers.remove(lane); null }
             } ?: break
             if (job.nextAt > System.currentTimeMillis()) {
                 // 잠금 안에서 다시 읽고 잔다: 그 사이 깨우기(wake·취소·새 건)가 와도 놓치지 않게.
                 synchronized(signal) {
-                    val wait = (Outbox.head(this, dev)?.nextAt ?: 0L) - System.currentTimeMillis()
+                    val wait = (Outbox.head(this, lane)?.nextAt ?: 0L) - System.currentTimeMillis()
                     if (wait > 0 && running) try { signal.wait(wait) } catch (e: InterruptedException) { }
                 }
                 continue
             }
             attempt(job)
         }
-        synchronized(workers) { if (workers[dev] === Thread.currentThread()) workers.remove(dev) }
+        synchronized(workers) { if (workers[lane] === Thread.currentThread()) workers.remove(lane) }
         ui.post { maybeStop() }
     }
 
@@ -135,7 +135,12 @@ class SendService : Service() {
         Outbox.update(this, job.id) { it.copy(state = OutboxJob.SENDING) } ?: run { tokens.remove(job.id); return }
         try {
             val p = Store.get(this, job.dev) ?: throw ProtocolException("unpaired")
-            if (job.isText) sendText(job, p, token) else sendFile(job, p, token)
+            when (job.kind) {
+                OutboxJob.TEXT -> sendText(job, p, token)
+                OutboxJob.CLOUD_UP -> uploadCloud(job, p, token)
+                OutboxJob.CLOUD_DOWN -> downloadCloud(job, p, token)
+                else -> sendFile(job, p, token)
+            }
         } catch (e: Exception) {
             caps.remove(job.dev) // 실패하면 능력을 잊고 다음에 다시 묻는다
             if (!token.cancelled) fail(job.id, if (e is SecurityException) ProtocolException("file_gone") else e)
@@ -148,10 +153,26 @@ class SendService : Service() {
     private fun fail(id: String, e: Exception) {
         val code = (e as? ProtocolException)?.code ?: if (e is java.io.IOException) "disconnected" else "unknown"
         val detail = (e as? ProtocolException)?.detail ?: if (e !is ProtocolException && e !is java.io.IOException) e.message else null
-        val j = Outbox.update(this, id) { Retry.afterFailure(it, System.currentTimeMillis(), Retry.isRetryable(e), code, detail) } ?: return
+        val now = System.currentTimeMillis()
+        var dropPart: String? = null
+        val j = Outbox.update(this, id) {
+            when {
+                it.kind == OutboxJob.CLOUD_DOWN && code == "cloud_changed" -> {
+                    dropPart = it.part // 허브의 파일이 바뀌었다: 조각을 버리고 처음부터(한 번만)
+                    Retry.afterChanged(it, now)
+                }
+                // 허브가 알린 크기와 맞지 않게 왔다: 그 조각은 믿을 수 없으니 버린다(다시 받으면 처음부터).
+                it.kind == OutboxJob.CLOUD_DOWN && code in BROKEN_DOWNLOAD -> {
+                    dropPart = it.part
+                    Retry.afterFailure(it.copy(part = null, size = -1, mtime = null), now, Retry.isRetryable(e), code, detail)
+                }
+                else -> Retry.afterFailure(it, now, Retry.isRetryable(e), code, detail)
+            }
+        } ?: return
+        dropPart?.let { PartFiles.delete(this, it) }
         if (j.failed) {
             val pc = Store.get(this, j.dev)?.pcName ?: j.dev
-            Notifs.sendFailed(this, j.dev, pc, what(j), reason(this, j))
+            Notifs.sendFailed(this, j.dev, pc, what(j), reason(this, j), j.isCloud)
         }
     }
 
@@ -197,6 +218,74 @@ class SendService : Service() {
         done(job) {
             HistoryItem(Protocol.newId(), System.currentTimeMillis(), false, false, null, meta.name, meta.size, uri.toString(), p.pcIp)
         }
+    }
+
+    /**
+     * 클라우드 올리기(§12.2 cloud_put): 파일 보내기와 같은 이어 보내기·트레일러에 올릴 폴더(remote)를 더한다.
+     * 상대가 클라우드를 모르면 cloud_unsupported, 꺼져 있으면 cloud_off(둘 다 다시 시도하지 않는다). 대화 기록에는 넣지 않는다.
+     */
+    private fun uploadCloud(job: OutboxJob, p: Pairing, token: SendToken) {
+        val uri = Uri.parse(job.uri ?: throw ProtocolException("file_gone"))
+        Net.openSource(this, uri).close()
+        val meta = Net.fileMeta(this, uri)
+        if (meta.size > Protocol.MAX_FILE) throw ProtocolException("file_too_large")
+        val mtime = Net.lastModified(this, uri)
+        val changed = job.size >= 0 && (job.size != meta.size || (job.mtime != null && mtime != null && job.mtime != mtime))
+        val cur = Outbox.update(this, job.id) {
+            it.copy(name = meta.name, size = meta.size, mtime = mtime, xfer = if (changed) Xfer.newXfer() else it.xfer)
+        } ?: return
+        val hello = Net.hello(p, cur.xfer, meta.size, token) ?: throw ProtocolException("cloud_unsupported")
+        caps[p.pcIp] = hello.caps
+        if ("cloud" !in hello.caps || !hello.xfer) throw ProtocolException("cloud_unsupported")
+        if (!hello.cloud) throw ProtocolException("cloud_off")
+        if (!hello.done) {
+            Net.sendFileXfer(this, uri, meta, p, cur.xfer, Xfer.resumeAt(hello, meta.size), token,
+                { sent, total -> Outbox.setProgress(job.id, sent, total) }, cloudDir = job.remote ?: "")
+        }
+        Outbox.remove(this, job.id)
+    }
+
+    /**
+     * 클라우드 가져오기(§12.2 cloud_get) → Download/TailHop. 받다 만 조각(job.part)이 있으면 그 길이부터, 조각을 만들 때의
+     * size·mtime을 함께 보내 이어 받는다. 허브의 파일이 바뀌었으면 cloud_changed → fail()이 조각을 버리고 한 번만 처음부터.
+     * 조각이 사라졌거나(사용자·시스템이 지움) 알린 크기보다 길면 처음부터 받는다.
+     */
+    private fun downloadCloud(job: OutboxJob, p: Pairing, token: SendToken) {
+        val remote = job.remote ?: throw ProtocolException("bad_path")
+        val name = Protocol.sanitizeFilename(job.name ?: CloudPath.name(remote))
+        var part = job.part
+        var offset = part?.let { PartFiles.length(this, it) } ?: 0L
+        if (part != null && (PartFiles.length(this, part) == null || offset > job.size || job.mtime == null)) {
+            PartFiles.delete(this, part)
+            part = null
+            offset = 0L
+            Outbox.update(this, job.id) { it.copy(part = null) } ?: return
+        }
+        val resuming = part != null
+        Net.cloudGet(p, remote, offset, if (resuming) job.size else null, if (resuming) job.mtime else null, token, open = { head ->
+            if (PartFiles.freeBytes() < head.size - offset + ReceiverService.DISK_RESERVE) throw ProtocolException("disk_full")
+            val loc = part ?: PartFiles.create(this, name).also { created ->
+                part = created
+                // 조각을 만들 때의 허브 크기·시각을 적어 둔다(다음 이어받기에 보낸다). 그 사이 취소됐으면 조각을 지운다.
+                Outbox.update(this, job.id) { it.copy(part = created, size = head.size, mtime = head.mtime) }
+                    ?: run { PartFiles.delete(this, created); throw ProtocolException("disconnected") }
+            }
+            try { PartFiles.openAt(this, loc, offset, null) } catch (e: ProtocolException) {
+                // 조각이 이어 받을 위치보다 짧아졌다: 버리고 다음 시도에 처음부터
+                PartFiles.delete(this, loc)
+                Outbox.update(this, job.id) { it.copy(part = null) }
+                throw ProtocolException("resume_lost")
+            }
+        }, onProgress = { got, total -> Outbox.setProgress(job.id, got, total) })
+        val loc = part ?: throw ProtocolException("storage")
+        // 공개하기 전에 조각을 이 건에서 떼어 낸다: 그 사이 취소했으면(null) 취소 쪽이 조각을 지우고, 떼어 낸 뒤의 취소는
+        // 공개한 파일을 지우지 않는다. 공개에 실패하면 조각을 지우고 실패로 보인다(다시 받기는 처음부터).
+        Outbox.update(this, job.id) { it.copy(part = null) } ?: return
+        val (uri, finalName) = try { PartFiles.commit(this, loc, name) } catch (e: Exception) {
+            PartFiles.delete(this, loc); throw e
+        }
+        Outbox.remove(this, job.id)
+        Notifs.cloudDownloaded(this, p.pcName, finalName, uri, PartFiles.mime(finalName))
     }
 
     /** 보냈다: 기록에 넣고(대화방에 보인다) 목록에서 뺀다. 그 사이 취소했어도 상대는 받았으므로 기록한다. */
@@ -248,12 +337,18 @@ class SendService : Service() {
         val others = active.size - (if (sending != null) 1 else 0)
         if (sending == null) return resources.getQuantityString(R.plurals.send_notif_waiting, active.size, active.size)
         val pct = if (sending.size > 0) (Outbox.progressOf(sending.id) * 100 / sending.size).toInt().coerceIn(0, 100) else 0
-        val head = getString(R.string.send_notif_sending, what(sending), pct)
+        val head = getString(when (sending.kind) {
+            OutboxJob.CLOUD_UP -> R.string.send_notif_uploading
+            OutboxJob.CLOUD_DOWN -> R.string.send_notif_downloading
+            else -> R.string.send_notif_sending
+        }, what(sending), pct)
         return if (others > 0) head + " · " + resources.getQuantityString(R.plurals.send_notif_more, others, others) else head
     }
 
     companion object {
         private const val STALL_MS = 60_000L
+        /** 클라우드에서 받은 조각을 버릴 실패(허브의 응답이 형식·크기 규칙과 맞지 않음). */
+        private val BROKEN_DOWNLOAD = setOf("file_too_big", "file_incomplete", "bad_reply", "unreadable_reply")
         @Volatile private var instance: SendService? = null
 
         /**
@@ -287,23 +382,38 @@ class SendService : Service() {
             } catch (e: Exception) { }
         }
 
-        /** 화면·알림에서 취소한 건: 보내는 중이면 연결을 끊는다. */
+        /** 화면·알림에서 취소한 건: 보내는 중이면 연결을 끊는다. 클라우드에서 받다 만 조각도 지운다. */
         fun cancel(ctx: Context, id: String) {
-            Outbox.remove(ctx, id)
+            val gone = Outbox.remove(ctx, id)
             instance?.tokens?.get(id)?.cancel()
+            gone?.let { discard(ctx, listOf(it)) }
         }
 
         fun cancelAll(ctx: Context) {
             val gone = Outbox.cancelActive(ctx)
-            val s = instance ?: return
-            gone.forEach { s.tokens[it.id]?.cancel() }
+            instance?.let { s -> gone.forEach { s.tokens[it.id]?.cancel() } }
+            discard(ctx, gone)
         }
 
         /** 연결 해제: 그 PC로 보낼 건을 지우고 보내는 중이면 끊는다. */
         fun forgetDevice(ctx: Context, dev: String) {
             val gone = Outbox.removeDevice(ctx, dev)
-            val s = instance ?: return
-            gone.forEach { s.tokens[it.id]?.cancel() }
+            instance?.let { s -> gone.forEach { s.tokens[it.id]?.cancel() } }
+            discard(ctx, gone)
+        }
+
+        /**
+         * 지운 클라우드 가져오기의 조각을 지운다. 보내는 중이던 연결은 위에서 끊었고, 그 일꾼이 끝난 뒤에 지우도록 따로 스레드에서 잠시 기다린다
+         * (쓰는 중인 조각을 지우면 MediaStore가 실패를 돌려줄 수 있다).
+         */
+        private fun discard(ctx: Context, jobs: List<OutboxJob>) {
+            val parts = jobs.mapNotNull { j -> j.part?.takeIf { j.kind == OutboxJob.CLOUD_DOWN } }
+            if (parts.isEmpty()) return
+            val app = ctx.applicationContext
+            Thread {
+                try { Thread.sleep(1500) } catch (e: InterruptedException) { }
+                parts.forEach { PartFiles.delete(app, it) }
+            }.start()
         }
 
         fun retry(ctx: Context, id: String) {

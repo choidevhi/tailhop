@@ -47,16 +47,20 @@ object Outbox {
 
     @Synchronized fun get(ctx: Context, id: String): OutboxJob? = list(ctx).firstOrNull { it.id == id }
 
-    /** 이 PC로 보낼 건(넣은 순서). */
-    @Synchronized fun forDevice(ctx: Context, dev: String): List<OutboxJob> = list(ctx).filter { it.dev == dev }
+    /** 이 PC의 대화방에 보일 건(텍스트·파일, 넣은 순서). 클라우드 건은 클라우드 화면에 따로 보인다. */
+    @Synchronized fun forDevice(ctx: Context, dev: String): List<OutboxJob> = list(ctx).filter { it.dev == dev && !it.isCloud }
+
+    /** 이 PC의 클라우드 올리기·가져오기(넣은 순서). */
+    @Synchronized fun cloudJobs(ctx: Context, dev: String): List<OutboxJob> = list(ctx).filter { it.dev == dev && it.isCloud }
 
     /** 아직 보낼 건(대기·보내는 중)이 있는지. 없으면 서비스가 멈춘다. */
     @Synchronized fun hasActive(ctx: Context): Boolean = list(ctx).any { !it.failed }
 
-    @Synchronized fun activeDevices(ctx: Context): Set<String> = list(ctx).filter { !it.failed }.map { it.dev }.toSet()
+    /** 보낼 건이 있는 줄(OutboxJob.lane: PC마다 대화 줄·클라우드 줄). */
+    @Synchronized fun activeLanes(ctx: Context): Set<String> = list(ctx).filter { !it.failed }.map { it.lane }.toSet()
 
-    /** 이 PC의 다음 건: 실패하지 않은 건 중 가장 먼저 넣은 것(기기마다 차례로 보낸다). */
-    @Synchronized fun head(ctx: Context, dev: String): OutboxJob? = list(ctx).firstOrNull { it.dev == dev && !it.failed }
+    /** 이 줄의 다음 건: 실패하지 않은 건 중 가장 먼저 넣은 것(줄마다 차례로 보낸다). */
+    @Synchronized fun head(ctx: Context, lane: String): OutboxJob? = list(ctx).firstOrNull { it.lane == lane && !it.failed }
 
     @Synchronized
     private fun add(ctx: Context, jobs: List<OutboxJob>) {
@@ -79,6 +83,22 @@ object Outbox {
     fun enqueueFiles(ctx: Context, dev: String, uris: List<String>) {
         val now = System.currentTimeMillis()
         add(ctx, uris.map { OutboxJob(id = Protocol.newId(), dev = dev, isText = false, uri = it, xfer = Xfer.newXfer(), created = now) })
+    }
+
+    /** 클라우드 올리기: 파일들을 PC 클라우드의 dir 폴더에. 이름·크기는 SendService가 채운다. */
+    fun enqueueCloudUpload(ctx: Context, dev: String, dir: String, uris: List<String>) {
+        val now = System.currentTimeMillis()
+        add(ctx, uris.map {
+            OutboxJob(id = Protocol.newId(), dev = dev, isText = false, uri = it, xfer = Xfer.newXfer(), created = now,
+                kind = OutboxJob.CLOUD_UP, remote = dir)
+        })
+    }
+
+    /** 클라우드 가져오기: PC 클라우드의 path 파일을 Download/TailHop에. size는 목록에서 본 크기(진행률용, 받으면 허브 값으로 바뀐다). */
+    fun enqueueCloudDownload(ctx: Context, dev: String, path: String, size: Long) {
+        val now = System.currentTimeMillis()
+        add(ctx, listOf(OutboxJob(id = Protocol.newId(), dev = dev, isText = false, name = CloudPath.name(path), size = size,
+            xfer = Xfer.newXfer(), created = now, kind = OutboxJob.CLOUD_DOWN, remote = path)))
     }
 
     /** 한 건을 바꾼다(없으면 null — 그 사이 취소됨). */

@@ -16,7 +16,6 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.IBinder
 import android.provider.MediaStore
 import androidx.core.app.ServiceCompat
@@ -227,7 +226,8 @@ class ReceiverService : Service() {
             val reply = when (type) {
                 "hello" -> hello(ch, header, pairing.pcIp)
                 "text" -> { receiveText(ch, header, from, pairing.pcIp); OK }
-                else -> { receiveFile(ch, header, from, pairing.pcIp, sock); OK }
+                "file" -> { receiveFile(ch, header, from, pairing.pcIp, sock); OK }
+                else -> cloud(ch, header, type as String, pairing.pcIp, sock) ?: return // cloud_get은 데이터까지 직접 보냈다
             }
             ch.send(reply.toString().toByteArray(), last = true)
         } catch (e: AuthException) {
@@ -255,9 +255,90 @@ class ReceiverService : Service() {
         // xfer·size는 선택이다. 형식이 틀리면 거부하지 않고 조각이 없는 것으로 답한다(PC와 같다).
         val xfer = Xfer.field(header, "xfer")
         val size = Xfer.jsonLong(Xfer.field(header, "size"))?.takeIf { it in 0..Protocol.MAX_FILE }
-        if (!Xfer.isValid(xfer) || size == null) return Xfer.helloReply(0, false)
+        val cloud = CloudMode.isOn(this)
+        if (!Xfer.isValid(xfer) || size == null) return Xfer.helloReply(0, false, cloud)
         val (have, done) = Transfers.helloState(this, dev, xfer as String, size)
-        return Xfer.helloReply(have, done)
+        return Xfer.helloReply(have, done, cloud)
+    }
+
+    /** 헤더 뒤에 본문 없이 빈 last=1 프레임 하나만 오는 요청(hello와 같은 규칙). */
+    private fun emptyBody(ch: Channel) {
+        val (body, last) = ch.recv()
+        if (body.isNotEmpty() || !last) throw ProtocolException("bad_header")
+    }
+
+    /**
+     * §12 클라우드 요청(이 폰이 허브). 꺼져 있으면 cloud_off. cloud_get은 머리·데이터 프레임을 직접 보내고 null을 돌려준다.
+     * 폴더 안 위치·이름 검사는 CloudPath(§12.1), 저장소는 CloudStore가 한다.
+     */
+    private fun cloud(ch: Channel, header: JSONObject, type: String, dev: String, sock: Socket): JSONObject? {
+        if (!CloudMode.isOn(this)) throw ProtocolException("cloud_off")
+        if (type == "cloud_put") return cloudPut(ch, header, dev, sock)
+        emptyBody(ch)
+        return when (type) {
+            "cloud_list" -> {
+                val dir = CloudPath.field(header)
+                val cursor = CloudListing.cursor(header)
+                CloudListing.reply(CloudListing.page(CloudStore.list(this, dir), cursor))
+            }
+            "cloud_get" -> { cloudGet(ch, header); null }
+            "cloud_del" -> { CloudStore.delete(this, CloudPath.field(header)); OK }
+            else -> { CloudStore.mkdir(this, CloudPath.field(header)); OK } // cloud_mkdir
+        }
+    }
+
+    /**
+     * cloud_get: 먼저 `{"ok","size","mtime"}`(last=0), 이어서 offset부터 끝까지(마지막 데이터 프레임 last=1).
+     * 머리를 보낸 뒤에는 거부 응답을 보낼 수 없다(상대는 데이터로 읽는다) — 실패하면 IOException으로 그냥 끊는다.
+     * 보내는 사이 파일이 줄었을 때도 last 없이 끊는다. 상대는 size·mtime을 주고 다시 물어 cloud_changed를 받는다.
+     */
+    private fun cloudGet(ch: Channel, header: JSONObject) {
+        val req = CloudWire.parseGet(header)
+        val f = CloudStore.file(this, req.path)
+        CloudWire.checkGet(req, f.head)
+        val src = try { f.streamAt(req.offset) } catch (e: Exception) { throw ProtocolException("not_found") }
+        src.use { s ->
+            ch.send(CloudWire.head(f.head.size, f.head.mtime), last = false)
+            try {
+                var left = f.head.size - req.offset
+                if (left == 0L) { ch.send(ByteArray(0), last = true); return }
+                val buf = ByteArray(Protocol.CHUNK)
+                while (left > 0) {
+                    val want = minOf(left, buf.size.toLong()).toInt()
+                    var n = 0
+                    while (n < want) {
+                        val r = s.read(buf, n, want - n)
+                        if (r < 0) throw IOException("shrank")
+                        n += r
+                    }
+                    left -= n
+                    ch.send(buf, last = left == 0L, len = n)
+                }
+            } catch (e: Exception) { throw IOException("cloud_get aborted", e) }
+        }
+    }
+
+    /** cloud_put: §11.2 file과 같고 dir(없으면 맨 위)에 넣는다. xfer·트레일러는 필수. 응답에 실제 저장된 이름. */
+    private fun cloudPut(ch: Channel, header: JSONObject, dev: String, sock: Socket): JSONObject {
+        val (size, rawName) = fileInfo(header)
+        val xfer = Xfer.field(header, "xfer")
+        if (!Xfer.isValid(xfer)) throw ProtocolException("bad_xfer")
+        val dir = CloudPath.field(header, "dir")
+        val offset = Xfer.offset(header, size)
+        if (freeBytes() < size - offset + DISK_RESERVE) throw ProtocolException("disk_full")
+        CloudStore.ensureDir(this, dir)
+        val name = CloudPath.storableName(Protocol.sanitizeFilename(rawName))
+        val (_, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, CloudStore.partDir(dir))
+        return JSONObject().put("ok", true).put("name", finalName)
+    }
+
+    /** file·cloud_put 헤더의 size(0..4 GiB 정수)와 name(문자열). 어기면 bad_file_info. */
+    private fun fileInfo(header: JSONObject): Pair<Long, String> {
+        val sizeAny = header.opt("size")
+        val size = (sizeAny as? Number)?.takeIf { sizeAny is Int || sizeAny is Long }?.toLong()
+        val rawName = header.opt("name") as? String
+        if (size == null || size < 0 || size > Protocol.MAX_FILE || rawName == null) throw ProtocolException("bad_file_info")
+        return size to rawName
     }
 
     private fun receiveText(ch: Channel, header: JSONObject, from: String, dev: String) {
@@ -278,21 +359,24 @@ class ReceiverService : Service() {
         Notifs.text(this, id, from, text)
     }
 
+    /** 대화방 파일. "받은 파일도 클라우드에 모으기"(1.8.0)가 켜져 있으면 클라우드 맨 위에 둔다(기록·알림은 그대로). */
     private fun receiveFile(ch: Channel, header: JSONObject, from: String, dev: String, sock: Socket) {
-        val sizeAny = header.opt("size")
-        val size = (sizeAny as? Number)?.takeIf { sizeAny is Int || sizeAny is Long }?.toLong()
-        val rawName = header.opt("name") as? String
-        if (size == null || size < 0 || size > Protocol.MAX_FILE || rawName == null) throw ProtocolException("bad_file_info")
-        val name = Protocol.sanitizeFilename(rawName)
+        val (size, rawName) = fileInfo(header)
+        val dest = if (CloudMode.collects(this)) CloudStore.partDir("") else ""
+        val cloud = dest.isNotEmpty()
+        val name = Protocol.sanitizeFilename(rawName).let { if (cloud) CloudPath.storableName(it) else it }
         val xfer = Xfer.field(header, "xfer")
         if (xfer != null) {
             if (!Xfer.isValid(xfer)) throw ProtocolException("bad_xfer")
-            receiveXferFile(ch, header, from, dev, sock, xfer as String, size, name)
+            val (uri, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, dest)
+            val id = Protocol.newId()
+            History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, finalName, size, uri.toString(), dev))
+            Notifs.file(this, id, from, finalName, uri, PartFiles.mime(finalName), cloud)
             return
         }
         // xfer 없는 예전 방식(§4): 실패하면 지운다.
         if (freeBytes() < size + DISK_RESERVE) throw ProtocolException("disk_full")
-        val sink = if (Build.VERSION.SDK_INT >= 29) MediaStoreSink(this, name) else LegacySink(this, name)
+        val sink = if (Build.VERSION.SDK_INT >= 29) MediaStoreSink(this, name, dest) else LegacySink(this, name, dest)
         var ok = false
         try {
             var got = 0L
@@ -310,7 +394,7 @@ class ReceiverService : Service() {
             ok = true
             val id = Protocol.newId()
             History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, sink.finalName, size, uri.toString(), dev))
-            Notifs.file(this, id, from, sink.finalName, uri, sink.mime)
+            Notifs.file(this, id, from, sink.finalName, uri, sink.mime, cloud)
         } finally {
             if (!ok) sink.abort()
         }
@@ -320,24 +404,25 @@ class ReceiverService : Service() {
      * §11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 조각 전체를 확인한다.
      * 끊기거나 시간 초과면 조각을 남기고(24시간), 규칙 위반·해시 불일치·저장 실패면 지운다.
      * 같은 조각은 한 연결만 쓴다: 같은 PC가 같은 xfer로 새로 연결하면(앞 연결이 끊긴 걸 상대가 먼저 알았다) 앞 연결을 닫고 이어받는다.
+     * dest는 받을 폴더(Download/TailHop 아래, 대화방 ""·클라우드 "Cloud/…"). 공개한 (URI, 실제 이름)을 돌려준다 — 기록·알림은 부른 쪽이.
      */
-    private fun receiveXferFile(ch: Channel, header: JSONObject, from: String, dev: String, sock: Socket,
-                                xfer: String, size: Long, name: String) {
+    private fun receiveXferPart(ch: Channel, header: JSONObject, dev: String, sock: Socket,
+                                xfer: String, size: Long, name: String, dest: String): Pair<Uri, String> {
         val offset = Xfer.offset(header, size)
         if (freeBytes() < size - offset + DISK_RESERVE) throw ProtocolException("disk_full")
-        XferLocks.exclusive(TransferBook.key(dev, xfer), sock) {
+        return XferLocks.exclusive(TransferBook.key(dev, xfer), sock) {
             val md = Xfer.sha256()
             val loc: String
             val out: OutputStream
             if (offset > 0) {
-                val rec = Transfers.claim(this, dev, xfer, size) ?: throw ProtocolException("resume_lost")
+                val rec = Transfers.claim(this, dev, xfer, size, dest) ?: throw ProtocolException("resume_lost")
                 loc = rec.loc
                 out = try { PartFiles.openAt(this, loc, offset, md) } catch (e: ProtocolException) {
                     Transfers.drop(this, dev, xfer, loc); throw e
                 }
             } else {
-                loc = PartFiles.create(this, name)
-                Transfers.begin(this, dev, xfer, size, loc, name)
+                loc = PartFiles.create(this, name, dest)
+                Transfers.begin(this, dev, xfer, size, loc, name, dest)
                 out = try { PartFiles.openAt(this, loc, 0, md) } catch (e: ProtocolException) {
                     Transfers.drop(this, dev, xfer, loc); throw ProtocolException("storage")
                 }
@@ -350,10 +435,7 @@ class ReceiverService : Service() {
                 throw e
             }
             Transfers.finish(this, dev, xfer)
-            val (uri, finalName) = committed
-            val id = Protocol.newId()
-            History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, finalName, size, uri.toString(), dev))
-            Notifs.file(this, id, from, finalName, uri, PartFiles.mime(finalName))
+            committed
         }
     }
 
@@ -396,8 +478,8 @@ class ReceiverService : Service() {
         abstract fun abort()
     }
 
-    /** API 29+: MediaStore.Downloads, IS_PENDING=1 로 받고 검증 후 공개. 실패하면 삭제. */
-    private class MediaStoreSink(val ctx: Context, name: String) : Sink(name) {
+    /** API 29+: MediaStore.Downloads, IS_PENDING=1 로 받고 검증 후 공개. 실패하면 삭제. relDir은 Download/TailHop 아래 폴더. */
+    private class MediaStoreSink(val ctx: Context, name: String, relDir: String) : Sink(name) {
         private val uri: Uri
         override val out: OutputStream
         override var finalName = name
@@ -407,7 +489,7 @@ class ReceiverService : Service() {
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/TailHop")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, PartFiles.mediaDir(relDir))
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
@@ -432,8 +514,8 @@ class ReceiverService : Service() {
         override fun abort() { try { ctx.contentResolver.delete(uri, null, null) } catch (e: Exception) { } }
     }
 
-    /** API 26–28: 공용 Download/TailHop, `.part`로 받고 검증 후 이름 변경. */
-    private class LegacySink(val ctx: Context, name: String) : Sink(name) {
+    /** API 26–28: 공용 Download/TailHop(또는 그 아래 relDir), `.part`로 받고 검증 후 이름 변경. */
+    private class LegacySink(val ctx: Context, name: String, relDir: String) : Sink(name) {
         private val dir: File
         private var target: File
         private val part: File
@@ -443,8 +525,7 @@ class ReceiverService : Service() {
         init {
             if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
                 throw ProtocolException("storage_permission")
-            @Suppress("DEPRECATION")
-            dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "TailHop")
+            dir = if (relDir.isEmpty()) PartFiles.legacyDir() else File(PartFiles.legacyDir(), relDir)
             if (!dir.isDirectory && !dir.mkdirs()) throw ProtocolException("storage_folder")
             synchronized(LegacyNames.LOCK) {
                 target = LegacyNames.unique(dir, name)
@@ -474,7 +555,7 @@ class ReceiverService : Service() {
         private class Entry { val lock = ReentrantLock(); var sock: Socket? = null; var users = 0 }
         private val map = HashMap<String, Entry>()
 
-        fun exclusive(key: String, sock: Socket, block: () -> Unit) {
+        fun <T> exclusive(key: String, sock: Socket, block: () -> T): T {
             val (e, old) = synchronized(map) {
                 val e = map.getOrPut(key) { Entry() }
                 e.users++
@@ -485,7 +566,7 @@ class ReceiverService : Service() {
             try {
                 if (old != null) closeQuietly(old)
                 if (!e.lock.tryLock(15, TimeUnit.SECONDS)) throw IOException("busy") // 응답 없이 끊음 → 상대가 다시 시도
-                try { block() } finally { e.lock.unlock() }
+                try { return block() } finally { e.lock.unlock() }
             } finally {
                 synchronized(map) {
                     if (e.sock === sock) e.sock = null
@@ -497,11 +578,7 @@ class ReceiverService : Service() {
 
     enum class State { OFF, LISTENING, TAILSCALE_OFF, BIND_FAILED }
 
-    /** 공용 저장소(Download가 있는 곳)의 남은 바이트. 알 수 없으면 Long.MAX_VALUE(막지 않음). */
-    @Suppress("DEPRECATION")
-    private fun freeBytes(): Long = try {
-        android.os.StatFs(Environment.getExternalStorageDirectory().path).availableBytes
-    } catch (e: Exception) { Long.MAX_VALUE }
+    private fun freeBytes(): Long = PartFiles.freeBytes()
 
     companion object {
         const val MAX_CONN = 4
@@ -509,7 +586,7 @@ class ReceiverService : Service() {
         const val DISK_RESERVE = 64L * 1024 * 1024
         /** 네트워크 콜백을 놓쳤을 때를 위한 안전용 주소 확인 간격. */
         private const val SAFETY_RECHECK_MS = 5 * 60_000L
-        private val TYPES = setOf("text", "file", "hello")
+        private val TYPES = setOf("text", "file", "hello", "cloud_list", "cloud_get", "cloud_put", "cloud_del", "cloud_mkdir")
         private val OK = JSONObject().put("ok", true)
         /** 같은 xfer의 글이 동시에 두 번 와도 한 번만 기록한다. */
         private val TEXT_LOCK = Any()

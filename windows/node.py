@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import cloud
 import outbox
 import protocol as p
 import resume
@@ -31,6 +32,7 @@ PAUSED_POLL_SEC = 30
 CAPS_TTL_SEC = 600  # 상대 능력(hello) 기억 시간. 실패하면 바로 잊는다
 IP_REFRESH_SEC = 30  # 모르는 주소가 들어올 때 tailscale status로 주소표를 다시 읽는 최소 간격
 SOCK_BUF = 4 * 1024 * 1024  # 먼 경로(DERP 중계)에서도 창이 막히지 않게 소켓 버퍼를 넉넉히
+DEFAULT_CLOUD_DIR = Path.home() / "TailHop Cloud"
 
 
 def _close_gently(conn: socket.socket, limit: int = p.MAX_FRAME + 64) -> None:
@@ -86,6 +88,36 @@ class Node:
     def set_save_dir(self, path: str) -> None:
         self.settings["save_dir"] = path
         self.save_settings()
+
+    # ---------- 클라우드 모드(§12) ----------
+    @property
+    def cloud_on(self) -> bool:
+        return self.settings.get("cloud") is True
+
+    @property
+    def cloud_dir(self) -> Path:
+        return Path(self.settings.get("cloud_dir") or DEFAULT_CLOUD_DIR)
+
+    @property
+    def cloud_collect(self) -> bool:
+        """대화방으로 받은 파일도 클라우드 폴더 맨 위에 모은다(켰을 때만)."""
+        return self.cloud_on and self.settings.get("cloud_collect") is True
+
+    def cloud_folder(self) -> cloud.CloudFolder | None:
+        return cloud.CloudFolder(self.cloud_dir) if self.cloud_on else None
+
+    def set_cloud(self, on: bool | None = None, folder: str | None = None, collect: bool | None = None) -> None:
+        if on is not None:
+            self.settings["cloud"] = bool(on)
+        if folder is not None:
+            self.settings["cloud_dir"] = folder
+        if collect is not None:
+            self.settings["cloud_collect"] = bool(collect)
+        self.save_settings()
+        if on is False or folder is not None:
+            self.book.forget_kind("cloud_put")  # 끈 클라우드·예전 폴더에 이어 쓰지 않게
+        if self.cloud_on:
+            self.cloud_folder().ensure()
 
     def save_settings(self) -> None:
         with self._settings_lock:
@@ -215,8 +247,13 @@ class Node:
         with self._lock:
             if self._pair_key is not None and time.monotonic() < self._pair_deadline:
                 return True
-        # 페어링된 기기의 Tailscale 주소가 바뀌었을 수 있다(다시 로그인 등). 주소표는 가끔만 다시 읽는다.
-        return self._refresh_ips(IP_REFRESH_SEC) and any(x.ip == ip for x in list(self.pairings.values()))
+        # 페어링된 기기의 Tailscale 주소가 바뀌었을 수 있다(다시 로그인 등). 주소표는 가끔만, 받기 루프를 막지 않게
+        # 따로 스레드에서 다시 읽는다. 이번 연결은 닫고, 주소가 고쳐지면 상대의 다음 시도부터 받는다.
+        now = time.monotonic()
+        if not self._ip_refreshed or now - self._ip_refreshed >= IP_REFRESH_SEC:
+            self._ip_refreshed = now
+            threading.Thread(target=self._refresh_ips, daemon=True).start()
+        return False
 
     def _refresh_ips(self, min_interval: float = 0.0) -> bool:
         """tailscale status의 주소표로 페어링된 기기의 주소를 고친다. 하나라도 바뀌면 True."""
@@ -328,8 +365,14 @@ class Node:
             self.on_event("progress", {"dir": "in", "done": done, "total": total})
 
         self.outbox.wake(pairing.stable_id)  # 상대가 켜져 있다: 그 기기로 갈 대기를 깨운다
+        hub = self.cloud_folder()
+        save_dir = self.save_dir
+        if hub is not None and self.cloud_collect:
+            hub.ensure()
+            save_dir = hub.root
         try:
-            got = p.receive_message(ch, self.guard, self.save_dir, progress, peer=pairing.stable_id, book=self.book)
+            got = p.receive_message(ch, self.guard, save_dir, progress, peer=pairing.stable_id, book=self.book,
+                                    cloud=hub)
         except p.ProtocolError as exc:
             # 인증된 상대에게는 이유를 알려 준다(태그 실패면 전송 자체가 안 됨).
             if exc.code != "auth_failed":
@@ -348,6 +391,13 @@ class Node:
             return
         if kind == "hello":
             p.send_reply(ch, True, **self._hello_reply(pairing.stable_id, got.header))
+            return
+        if kind in p.CLOUD_REQUESTS:
+            self._serve_cloud(conn, ch, hub, got.header, pairing)
+            return
+        if kind == "cloud_put":
+            p.send_reply(ch, True, name=got.path.name)
+            self.on_event("cloud_in", {"peer": pairing.name, "peer_id": pairing.stable_id, "name": got.path.name})
             return
         if got.dup:  # 이미 받은 글(응답이 사라져 다시 옴): 기록·알림 없이 받았다고만 답한다
             p.send_reply(ch, True)
@@ -368,12 +418,83 @@ class Node:
 
     def _hello_reply(self, peer: str, header: dict) -> dict:
         """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
-        reply = {"caps": ["xfer"], "cloud": False, "have": 0, "done": False}
+        reply = {"caps": ["xfer", "cloud"], "cloud": self.cloud_on, "have": 0, "done": False}
         xfer, size = header.get("xfer"), header.get("size")
         if resume.valid_xfer(xfer) and isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             reply["done"] = self.book.is_done(peer, xfer)
             reply["have"] = 0 if reply["done"] else self.book.have(peer, xfer, size)
         return reply
+
+    def _serve_cloud(self, conn: socket.socket, ch: p.Channel, hub: cloud.CloudFolder, header: dict,
+                     pairing: store.Pairing) -> None:
+        """클라우드 요청에 답한다(목록·가져오기·지우기·폴더 만들기). 거부는 이유 코드와 함께."""
+        kind = header["type"]
+        try:
+            parts = cloud.parse_path(header.get("path", ""))
+            if kind == "cloud_list":
+                cursor = header.get("cursor", 0)
+                if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+                    raise p.ProtocolError("bad_header")
+                items, nxt = hub.list(parts, cursor)
+                p.send_reply(ch, True, items=[x.to_json() for x in items], next=nxt)
+                return
+            if kind == "cloud_get":
+                self._serve_cloud_get(ch, hub, parts, header)
+                return
+            if kind == "cloud_mkdir":
+                hub.mkdir(parts)
+            else:
+                hub.delete(parts)
+            p.send_reply(ch, True)
+            self.on_event("cloud_changed", {"peer": pairing.name, "path": cloud.join_path(parts)})
+        except p.ProtocolError as exc:
+            self._refuse(conn, ch, exc)
+        except OSError:
+            self._refuse(conn, ch, p.ProtocolError("cloud_denied"))
+
+    @staticmethod
+    def _refuse(conn: socket.socket, ch: p.Channel, exc: p.ProtocolError) -> None:
+        try:
+            p.send_reply(ch, False, exc)
+            _close_gently(conn)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _serve_cloud_get(ch: p.Channel, hub: cloud.CloudFolder, parts: list[str], header: dict) -> None:
+        """§12.2 cloud_get: 먼저 {"ok","size","mtime"}(last=0), 이어서 offset부터 데이터(마지막 데이터 프레임 last=1)."""
+        path, size, mtime = hub.stat_file(parts)
+        # 바뀌었는지 먼저 본다: 파일이 줄어 offset이 넘친 경우도 cloud_changed(처음부터 다시)로 답한다.
+        want_size, want_mtime = header.get("size"), header.get("mtime")
+        if (want_size is not None and want_size != size) or (want_mtime is not None and want_mtime != mtime):
+            raise p.ProtocolError("cloud_changed")
+        offset = header.get("offset", 0)
+        if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= size:
+            raise p.ProtocolError("bad_header")
+        src = open(path, "rb")  # 열기 실패(사용 중 등)는 ok를 보내기 전에 거부로
+        with src:
+            src.seek(offset)
+            ch.send(json.dumps({"ok": True, "size": size, "mtime": mtime}).encode("utf-8"), last=False)
+            try:
+                Node._stream_file(ch, src, size - offset)
+            except OSError:
+                # ok를 보낸 뒤에는 거부 응답을 보내지 않는다(받는 쪽이 데이터로 읽어 파일에 섞는다). 끊기만 한다.
+                return
+
+    @staticmethod
+    def _stream_file(ch: p.Channel, src, left: int) -> None:
+        """left 바이트를 1 MiB씩 보내고 마지막 데이터 프레임에 last를 붙인다(빈 평문 가능)."""
+        chunk = src.read(min(p.CHUNK, left))
+        left -= len(chunk)
+        while True:
+            nxt = src.read(min(p.CHUNK, left)) if left > 0 else b""
+            left -= len(nxt)
+            if left > 0 and not nxt:
+                return  # 보내는 사이 파일이 줄었다: last 없이 끊는다(상대는 다시 묻고 cloud_changed를 받는다)
+            ch.send(chunk, last=not nxt)
+            if not nxt:
+                return
+            chunk = nxt
 
     # ---------- 페어링 ----------
     def begin_pairing(self) -> str:
@@ -513,6 +634,10 @@ class Node:
         try:
             if job.kind == "text":
                 self._deliver_text(job)
+            elif job.kind == "cloud_put":
+                self._deliver_cloud_put(job, on_progress)
+            elif job.kind == "cloud_get":
+                self._deliver_cloud_get(job, on_progress)
             else:
                 self._deliver_file(job, on_progress)
         except Exception:
@@ -580,6 +705,129 @@ class Node:
         self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(record), size=size,
                                                peer=pairing.name, peer_id=job.peer_id, peer_kind=pairing.kind))
 
+    # ---------- 클라우드 쓰기(§12, 상대가 허브) ----------
+    def cloud_info(self, stable_id: str) -> bool:
+        """상대가 클라우드 모드를 켰는지(예전 기기면 False)."""
+        info = self._hello(stable_id)
+        return "cloud" in info["caps"] and info.get("cloud") is True
+
+    def _cloud_request(self, stable_id: str, kind: str, **fields) -> dict:
+        sock, pairing = self._connect(stable_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            ch.send(json.dumps(p.new_header(kind, self.me.name, **fields)).encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            return p.read_reply(ch)
+
+    def cloud_list(self, stable_id: str, path: str = "", cursor: int = 0) -> tuple[list[cloud.Item], int | None]:
+        """허브의 폴더 목록 한 쪽. 상대가 보낸 항목도 이름·형식을 다시 검사한다."""
+        reply = self._cloud_request(stable_id, "cloud_list", path=path, cursor=cursor)
+        items = []
+        for raw in reply.get("items") if isinstance(reply.get("items"), list) else []:
+            if not isinstance(raw, dict):
+                continue
+            name, is_dir, size, mtime = raw.get("name"), raw.get("dir"), raw.get("size"), raw.get("mtime")
+            if not isinstance(name, str) or not isinstance(is_dir, bool) or not _uint(size) or not _uint(mtime):
+                continue
+            try:
+                cloud.parse_path(name)
+            except p.ProtocolError:
+                continue
+            if "/" not in name:
+                items.append(cloud.Item(name, is_dir, size, mtime))
+        nxt = reply.get("next")
+        return items, nxt if _uint(nxt) and nxt > cursor else None
+
+    def cloud_mkdir(self, stable_id: str, path: str) -> None:
+        cloud.parse_path(path)
+        self._cloud_request(stable_id, "cloud_mkdir", path=path)
+
+    def cloud_delete(self, stable_id: str, path: str) -> None:
+        if not cloud.parse_path(path):
+            raise p.ProtocolError("bad_path")
+        self._cloud_request(stable_id, "cloud_del", path=path)
+
+    def _deliver_cloud_put(self, job: outbox.Job, on_progress) -> None:
+        path, _ = self._source(job)
+        info = self._hello(job.peer_id, job.xfer, job.size)
+        if "cloud" not in info["caps"] or info.get("cloud") is not True:
+            raise p.ProtocolError("cloud_off")
+        if info.get("done") is True:
+            return
+        have = info.get("have")
+        offset = have if _uint(have) and have <= job.size else 0
+        sock, pairing = self._connect(job.peer_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            p.send_file_xfer(ch, self.me.name, path, job.xfer, offset, on_progress, kind="cloud_put",
+                             dir=job.remote or "")
+            reply = p.read_reply(ch)
+        self.on_event("cloud_sent", {"peer_id": job.peer_id, "name": str(reply.get("name") or path.name),
+                                     "dir": job.remote or ""})
+
+    def _deliver_cloud_get(self, job: outbox.Job, on_progress) -> None:
+        """허브의 파일을 받아 저장 폴더에 둔다. 끊기면 작업 폴더의 조각을 두었다가 size·mtime이 같을 때 이어 받는다."""
+        name = p.sanitize_filename(job.name)
+        work = self.outbox.work_dir / job.id
+        work.mkdir(parents=True, exist_ok=True)
+        part = work / (name + ".part")
+        offset = part.stat().st_size if part.exists() and job.size and job.remote_mtime else 0
+        if offset > job.size:
+            offset = 0
+        fields = {"path": job.remote or "", "offset": offset}
+        if offset:
+            fields.update(size=job.size, mtime=job.remote_mtime)
+        sock, pairing = self._connect(job.peer_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            ch.send(json.dumps(p.new_header("cloud_get", self.me.name, **fields)).encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            raw, last = ch.recv()
+            empty = 0
+            try:
+                head = p.parse_reply(raw, last_ok=False) if not last else p.parse_reply(raw)
+            except p.ProtocolError as exc:
+                if exc.code == "cloud_changed":  # 이어 받는 사이 허브의 파일이 바뀌었다: 처음부터
+                    part.unlink(missing_ok=True)
+                    job.remote_mtime = 0
+                raise
+            if last:
+                raise p.ProtocolError("bad_reply")
+            size, mtime = head.get("size"), head.get("mtime")
+            if not _uint(size) or not _uint(mtime) or size < offset or size > p.MAX_FILE:
+                raise p.ProtocolError("bad_reply")
+            job.size, job.remote_mtime = size, mtime
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            if p.free_bytes(self.save_dir) < size - offset + p.DISK_RESERVE:
+                raise p.ProtocolError("disk_full")
+            got = offset
+            with open(part, "r+b" if offset else "wb") as out:
+                out.truncate(offset)
+                out.seek(offset)
+                while True:
+                    data, last = ch.recv()
+                    empty = empty + 1 if not data and not last else 0
+                    if empty > 16:  # 진척 없이 빈 프레임만 온다
+                        raise p.ProtocolError("bad_reply")
+                    got += len(data)
+                    if got > size:
+                        raise p.ProtocolError("file_too_big")
+                    out.write(data)
+                    if on_progress:
+                        on_progress(got, size)
+                    if last:
+                        break
+        if got != size:
+            part.unlink(missing_ok=True)  # 끝(last)까지 왔는데 모자라다: 이 조각으로 이어 받지 않는다
+            job.remote_mtime = 0
+            raise p.ProtocolError("file_incomplete")
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        final = p.unique_path(self.save_dir, name)
+        part.replace(final)
+        item = self.history.add("in", "file", name=final.name, path=str(final), size=size, peer=pairing.name,
+                                peer_id=job.peer_id, peer_kind=pairing.kind, cloud=job.remote)
+        self.on_event("received", {**item, "from_cloud": True})
+
     # 한 번만 보내는 길(테스트·명령 없이 바로 보낼 때). 화면은 보낼 곳 목록(self.outbox)을 쓴다.
     def send_text(self, stable_id: str, text: str) -> None:
         self.deliver(outbox.Job(id="direct", peer_id=stable_id, kind="text", text=text, xfer=p.new_xfer()))
@@ -590,6 +838,10 @@ class Node:
         self.deliver(outbox.Job(id="direct", peer_id=stable_id, kind="file", path=str(path), xfer=p.new_xfer(),
                                 record=str(record_path) if record_path else None, size=st.st_size,
                                 mtime_ns=st.st_mtime_ns))
+
+
+def _uint(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _pack_folder(folder: Path, out_dir: Path) -> Path:

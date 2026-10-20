@@ -428,8 +428,9 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
     if free_bytes(save_dir) < size - offset + DISK_RESERVE:
         raise ProtocolError("disk_full")
 
+    kind = header["type"]
     if offset > 0:
-        entry = book.claim(peer, xfer, size, offset)
+        entry = book.claim(peer, xfer, size, offset, kind, save_dir)
         if entry is None:
             raise ProtocolError("resume_lost")
         final, part = entry.final, entry.part
@@ -442,8 +443,11 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
             book.drop(peer, xfer, part)
             raise ProtocolError("resume_lost") from exc
     else:
-        final, part, out = _open_part(save_dir, sanitize_filename(header["name"]))
-        book.begin(peer, xfer, size, part, final)
+        name = sanitize_filename(header["name"])
+        if kind == "cloud_put" and name.casefold().endswith(".part"):
+            name += "_"  # 클라우드 목록은 .part(받는 중인 조각)를 숨기므로 올린 파일이 사라져 보이지 않게(§12.2)
+        final, part, out = _open_part(save_dir, name)
+        book.begin(peer, xfer, size, part, final, kind)
         digest = hashlib.sha256()
 
     got = offset
@@ -492,8 +496,10 @@ class Received:
     dup: bool = False  # 이미 받은 xfer를 다시 받음(응답이 사라져 상대가 다시 보냄). 기록·알림하지 않는다
 
 
-# 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello)
-_EMPTY_BODY = ("unpair", "hello")
+# 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
+CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir")
+CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
+_EMPTY_BODY = ("unpair", "hello") + CLOUD_REQUESTS
 
 
 def _is_int(value: object) -> bool:
@@ -513,10 +519,13 @@ def receive_message(
     on_progress: Callable[[int, int], None] | None = None,
     peer: str = "",
     book=None,
+    cloud=None,
 ) -> Received:
     """헤더와 본문을 받아 검증한다. 파일은 .part로 받은 뒤 검증되면 이름을 바꾼다.
 
-    peer·book(resume.ResumeBook): §11 확장(hello, xfer 이어받기·중복 무시)을 쓸 때. book이 없으면 예전 v1만 받는다."""
+    peer·book(resume.ResumeBook): §11 확장(hello, xfer 이어받기·중복 무시)을 쓸 때. book이 없으면 예전 v1만 받는다.
+    cloud(cloud.CloudFolder): 클라우드 모드가 켜져 있을 때(§12). 없으면 클라우드 요청은 cloud_off로 거부한다.
+    클라우드 요청(목록·가져오기·지우기·폴더)은 헤더만 검사해 돌려주고, 답은 부른 쪽이 만든다."""
     raw, last = ch.recv()
     if last:
         raise ProtocolError("no_body")
@@ -524,10 +533,12 @@ def receive_message(
         header = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError("bad_header") from exc
-    known = ("text", "file", "unpair") + (("hello",) if book is not None else ())
+    known = ("text", "file", "unpair") + (("hello",) + CLOUD_TYPES if book is not None else ())
     if not isinstance(header, dict) or header.get("v") != 1 or header.get("type") not in known:
         raise ProtocolError("unsupported")
     guard.check_and_add(header.get("id"), header.get("ts"))
+    if header["type"] in CLOUD_TYPES and cloud is None:
+        raise ProtocolError("cloud_off")
 
     if header["type"] in _EMPTY_BODY:
         # unpair: 상대가 페어링을 취소했다(§6). hello: 능력·이어받기 위치 확인(§11.1). 응답은 부른 쪽이 만든다.
@@ -548,6 +559,10 @@ def receive_message(
     size = header.get("size")
     if not _is_int(size) or not 0 <= size <= MAX_FILE or not isinstance(header.get("name"), str):
         raise ProtocolError("bad_file_info")
+    if header["type"] == "cloud_put":
+        if xfer is None:
+            raise ProtocolError("bad_xfer")  # 클라우드에 올리기는 이어받기·트레일러가 필수다(§12.2)
+        save_dir = cloud.put_target(header.get("dir", ""))
     save_dir.mkdir(parents=True, exist_ok=True)
     if xfer is not None:
         return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book))
@@ -655,18 +670,34 @@ def read_reply(ch: Channel) -> dict:
     raw, last = ch.recv()
     if not last:
         raise ProtocolError("bad_reply")
-    try:
-        reply = json.loads(bytes(raw).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ProtocolError("bad_reply") from exc
-    if not isinstance(reply, dict):
-        raise ProtocolError("bad_reply")
+    return parse_reply(raw)
+
+
+def parse_reply(raw: bytes, last_ok: bool = True) -> dict:
+    """응답 프레임 하나를 읽는다. last_ok=False면 응답 뒤에 데이터가 이어지는 경우(§12.2 cloud_get의 첫 프레임)로,
+    성공 응답만 받아들인다(거부는 늘 last=1 한 프레임)."""
+    if not last_ok:
+        reply = _reply_json(raw)
+        if not reply.get("ok"):
+            raise ProtocolError("bad_reply")
+        return reply
+    reply = _reply_json(raw)
     if not reply.get("ok"):
         code = reply.get("code")
         if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,40}", code) and i18n.has("err." + code):
             raise ProtocolError(code)
         reason = str(reply.get("error") or "")[:200]
         raise ProtocolError("peer_refused_reason", reason=reason) if reason else ProtocolError("peer_refused")
+    return reply
+
+
+def _reply_json(raw: bytes) -> dict:
+    try:
+        reply = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ProtocolError("bad_reply") from exc
+    if not isinstance(reply, dict):
+        raise ProtocolError("bad_reply")
     return reply
 
 

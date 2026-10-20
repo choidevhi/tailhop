@@ -35,6 +35,14 @@ ANDROID = {
     "ic_plus": "plus",
     "ic_qr": "qr-code",
     "ic_stat": "arrow-right-left",  # 알림 작은 아이콘(단색)
+    "ic_cloud": "cloud",
+    "ic_cloud_upload": "cloud-upload",
+    "ic_download": "download",
+    "ic_folder": "folder",
+    "ic_folder_plus": "folder-plus",
+    "ic_refresh": "refresh-cw",
+    "ic_retry": "rotate-ccw",
+    "ic_chevron_right": "chevron-right",
 }
 HEAD = '<?xml version="1.0" encoding="utf-8"?>\n<!-- build_icons.py가 만든 파일(원본: windows/assets/icons/{src}.svg, Lucide ISC). 직접 고치지 않는다. -->\n'
 

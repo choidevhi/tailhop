@@ -126,11 +126,13 @@ class ChatActivity : AppCompatActivity() {
         val red = ContextCompat.getColor(this, R.color.red)
         fun redTitle(s: String) = SpannableString(s).apply { setSpan(ForegroundColorSpan(red), 0, s.length, 0) }
         val m = PopupMenu(this, anchor)
-        m.menu.add(0, 1, 0, getString(R.string.menu_show_code))
-        m.menu.add(0, 2, 1, redTitle(getString(R.string.menu_clear)))
-        m.menu.add(0, 3, 2, redTitle(getString(R.string.menu_unpair)))
+        m.menu.add(0, 4, 0, getString(R.string.menu_cloud_open))
+        m.menu.add(0, 1, 1, getString(R.string.menu_show_code))
+        m.menu.add(0, 2, 2, redTitle(getString(R.string.menu_clear)))
+        m.menu.add(0, 3, 3, redTitle(getString(R.string.menu_unpair)))
         m.setOnMenuItemClickListener { item ->
             when (item.itemId) {
+                4 -> MainActivity.openCloud(this, p.pcIp)
                 1 -> MainActivity.showConfirmCode(this, p)
                 2 -> AlertDialog.Builder(this).setMessage(R.string.clear_message)
                     .setPositiveButton(R.string.clear_confirm) { _, _ -> History.clearDevice(this, ip) }

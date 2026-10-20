@@ -43,6 +43,9 @@
         <activity android:name=".ChatActivity" android:exported="false"
             android:parentActivityName=".MainActivity" android:windowSoftInputMode="adjustResize" />
 
+        <activity android:name=".CloudActivity" android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
         <activity
             android:name=".ShareActivity"
             android:exported="true"

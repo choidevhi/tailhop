@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 클라우드(1.8.0): PC 고르기 → 폴더 보기. 머리는 대화방과 같은 모양, 아래에 경로(빵 부스러기)와 목록. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="4dp" android:paddingEnd="8dp">
+        <ImageButton android:id="@+id/backBtn" android:layout_width="48dp" android:layout_height="48dp"
+            android:background="@drawable/bg_row_press" android:src="@drawable/ic_back" android:tint="@color/label"
+            android:contentDescription="@string/chat_back" />
+        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:orientation="vertical" android:layout_marginStart="4dp">
+            <TextView android:id="@+id/title" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textSize="16sp" android:textStyle="bold" android:textColor="@color/label"
+                android:maxLines="1" android:ellipsize="end" android:accessibilityHeading="true" />
+            <TextView android:id="@+id/subtitle" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textSize="12sp" android:textColor="@color/secondary" android:maxLines="1" android:ellipsize="end" />
+        </LinearLayout>
+        <ImageButton android:id="@+id/newFolderBtn" android:layout_width="44dp" android:layout_height="44dp"
+            android:background="@drawable/bg_row_press" android:src="@drawable/ic_folder_plus" android:tint="@color/label"
+            android:padding="11dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_new_folder" />
+        <ImageButton android:id="@+id/uploadBtn" android:layout_width="44dp" android:layout_height="44dp"
+            android:background="@drawable/bg_row_press" android:src="@drawable/ic_cloud_upload" android:tint="@color/label"
+            android:padding="11dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_upload" />
+        <ImageButton android:id="@+id/refreshBtn" android:layout_width="44dp" android:layout_height="44dp"
+            android:background="@drawable/bg_row_press" android:src="@drawable/ic_refresh" android:tint="@color/label"
+            android:padding="12dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_refresh" />
+    </LinearLayout>
+
+    <!-- 지금 폴더까지의 경로. 조각을 누르면 그 폴더로 간다. 구분은 벡터 아이콘(ic_chevron_right) -->
+    <HorizontalScrollView android:id="@+id/crumbsScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:scrollbars="none" android:fillViewport="false">
+        <LinearLayout android:id="@+id/crumbs" android:layout_width="wrap_content" android:layout_height="40dp"
+            android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="16dp" />
+    </HorizontalScrollView>
+
+    <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+        <androidx.recyclerview.widget.RecyclerView android:id="@+id/list"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+        <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="center" android:orientation="vertical" android:gravity="center" android:padding="32dp"
+            android:visibility="gone">
+            <ImageView android:id="@+id/emptyIcon" android:layout_width="64dp" android:layout_height="64dp"
+                android:padding="18dp" android:background="@drawable/circle_outline_lg" android:src="@drawable/ic_cloud"
+                android:tint="@color/label" android:importantForAccessibility="no" />
+            <TextView android:id="@+id/emptyTitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="18dp" android:textSize="22sp" android:textStyle="bold"
+                android:textColor="@color/label" android:gravity="center" />
+            <TextView android:id="@+id/emptySub" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:textSize="15sp" android:textColor="@color/secondary" android:gravity="center" />
+            <Button android:id="@+id/emptyBtn" style="@style/Btn.Tinted" android:layout_width="wrap_content"
+                android:layout_weight="0" android:layout_marginTop="20dp" android:paddingStart="28dp"
+                android:paddingEnd="28dp" android:text="@string/cloud_retry" android:visibility="gone" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

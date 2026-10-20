@@ -7,6 +7,8 @@ import java.io.IOException
 /**
  * 보낼 곳 목록(outbox)의 한 건(docs/PROTOCOL.md §11.3). 텍스트 또는 파일(content URI) 하나를 PC 한 대(IP)에 보낸다.
  * xfer는 이 건을 다시 보낼 때도 같은 값을 쓴다(상대가 중복을 무시하고 조각을 이어 받게). 파일이 바뀌면 새 xfer.
+ * 1.8.0: 클라우드 올리기(kind cloud_up, 파일 → PC 클라우드의 remote 폴더)와 가져오기(cloud_down, PC 클라우드의 remote 파일 →
+ * Download/TailHop)도 같은 목록·재시도 규칙으로 돈다. 대화방에는 보이지 않고 클라우드 화면의 전송 목록에 보인다.
  * 안드로이드 의존성 없음(JVM 단위 테스트).
  */
 data class OutboxJob(
@@ -30,13 +32,35 @@ data class OutboxJob(
     val detail: String? = null,
     /** 24시간 동안 못 보내 포기했는지(실패 이유 문장이 달라진다). */
     val gaveUp: Boolean = false,
+    /** 무엇을 하는 건인지(TEXT·FILE·CLOUD_UP·CLOUD_DOWN). */
+    val kind: String = if (isText) TEXT else FILE,
+    /** 클라우드: 올릴 폴더(cloud_up, ""=맨 위) 또는 가져올 파일 경로(cloud_down). */
+    val remote: String? = null,
+    /**
+     * cloud_down: 받다 만 조각 위치(PartFiles). 있으면 size·mtime은 그 조각을 만들 때 허브가 알린 값이고, 이어 받을 때 함께 보낸다.
+     */
+    val part: String? = null,
+    /** cloud_down: cloud_changed로 처음부터 다시 받은 적이 있는지(한 번만 다시 받는다). */
+    val restarted: Boolean = false,
 ) {
     val failed: Boolean get() = state == FAILED
+    val isCloud: Boolean get() = kind == CLOUD_UP || kind == CLOUD_DOWN
+
+    /**
+     * 보내는 줄: PC마다 대화(텍스트·파일) 줄과 클라우드 줄을 따로 돌린다. 큰 클라우드 가져오기가 대화방 보내기를 막지 않게
+     * (한 줄 안에서는 넣은 순서대로, §11.3).
+     */
+    val lane: String get() = if (isCloud) "$dev|cloud" else dev
 
     companion object {
         const val WAITING = "waiting"
         const val SENDING = "sending"
         const val FAILED = "failed"
+
+        const val TEXT = "text"
+        const val FILE = "file"
+        const val CLOUD_UP = "cloud_up"
+        const val CLOUD_DOWN = "cloud_down"
     }
 }
 
@@ -57,6 +81,11 @@ object OutboxCodec {
                 j.error?.let { put("error", it) }
                 j.detail?.let { put("detail", it) }
                 if (j.gaveUp) put("gaveUp", true)
+                // 1.7.0 목록과 같게 읽히도록 대화 건에는 kind를 적지 않는다.
+                if (j.isCloud) put("kind", j.kind)
+                j.remote?.let { put("remote", it) }
+                j.part?.let { put("part", it) }
+                if (j.restarted) put("restarted", true)
             })
         }
         return arr.toString()
@@ -72,6 +101,7 @@ object OutboxCodec {
             val o = arr.optJSONObject(i) ?: continue
             try {
                 val isText = o.getBoolean("t")
+                val kind = o.optString("kind", if (isText) OutboxJob.TEXT else OutboxJob.FILE)
                 val j = OutboxJob(
                     id = o.getString("id"), dev = o.getString("dev"), isText = isText,
                     text = if (o.has("text")) o.getString("text") else null,
@@ -85,8 +115,12 @@ object OutboxCodec {
                     error = if (o.has("error")) o.getString("error") else null,
                     detail = if (o.has("detail")) o.getString("detail") else null,
                     gaveUp = o.optBoolean("gaveUp", false),
+                    kind = kind,
+                    remote = if (o.has("remote")) o.getString("remote") else null,
+                    part = if (o.has("part")) o.getString("part") else null,
+                    restarted = o.optBoolean("restarted", false),
                 )
-                if (!Xfer.isValid(j.xfer) || (isText && j.text == null) || (!isText && j.uri == null)) continue
+                if (!Xfer.isValid(j.xfer) || !wellFormed(j)) continue
                 out += if (j.state == OutboxJob.SENDING || j.state !in STATES) j.copy(state = OutboxJob.WAITING, nextAt = now) else j
             } catch (e: Exception) { }
         }
@@ -94,6 +128,15 @@ object OutboxCodec {
     }
 
     private val STATES = setOf(OutboxJob.WAITING, OutboxJob.SENDING, OutboxJob.FAILED)
+
+    /** kind마다 꼭 있어야 하는 값. 클라우드 경로는 §12.1 규칙에 맞아야 한다(가져올 파일은 맨 위가 아니어야). */
+    private fun wellFormed(j: OutboxJob): Boolean = when (j.kind) {
+        OutboxJob.TEXT -> j.isText && j.text != null
+        OutboxJob.FILE -> !j.isText && j.uri != null
+        OutboxJob.CLOUD_UP -> !j.isText && j.uri != null && j.remote != null && CloudPath.isValid(j.remote)
+        OutboxJob.CLOUD_DOWN -> !j.isText && j.remote != null && j.remote.isNotEmpty() && CloudPath.isValid(j.remote)
+        else -> false
+    }
 }
 
 /** 재시도 규칙(§11.3). */
@@ -131,7 +174,20 @@ object Retry {
         }
     }
 
+    /**
+     * cloud_down이 cloud_changed를 받음(이어 받는 사이 허브의 파일이 바뀜, §12.2): 처음 한 번은 조각을 버리고 바로 처음부터
+     * (조각 정보·크기·시각을 지운다 — 다음 요청은 size·mtime 없이 offset 0), 두 번째면 실패로 둔다(계속 바뀌는 파일).
+     * 버릴 조각 파일은 부른 쪽이 지운다.
+     */
+    fun afterChanged(job: OutboxJob, now: Long): OutboxJob {
+        val n = job.attempts + 1
+        return if (!job.restarted) job.copy(state = OutboxJob.WAITING, attempts = n, nextAt = now, part = null, size = -1,
+            mtime = null, restarted = true, error = "cloud_changed", detail = null)
+        else job.copy(state = OutboxJob.FAILED, attempts = n, part = null, size = -1, mtime = null, error = "cloud_changed",
+            detail = null, gaveUp = false)
+    }
+
     /** 사용자가 다시 보내기: 처음 넣은 것처럼(24시간을 새로 센다). 같은 xfer를 써서 상대에 남은 조각을 이어 쓴다. */
     fun restart(job: OutboxJob, now: Long): OutboxJob = job.copy(state = OutboxJob.WAITING, attempts = 0, nextAt = now,
-        created = now, error = null, detail = null, gaveUp = false)
+        created = now, error = null, detail = null, gaveUp = false, restarted = false)
 }
