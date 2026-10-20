@@ -1,6 +1,8 @@
 package com.choidev.tailhop
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
@@ -29,7 +31,23 @@ object Outbox {
     private fun list(ctx: Context): MutableList<OutboxJob> {
         cache?.let { return it }
         val raw = try { file(ctx).readText() } catch (e: Exception) { null }
-        return OutboxCodec.parse(raw, System.currentTimeMillis()).toMutableList().also { cache = it }
+        return OutboxCodec.parse(raw, System.currentTimeMillis(), listOf(ctx.packageName + ".files")).toMutableList()
+            .also { cache = it }
+    }
+
+    /**
+     * 빠진 건이 영구로 받아 둔 읽기 권한(대화방·클라우드 화면에서 고른 파일, takePersistableUriPermission)을 돌려준다(H4).
+     * 남은 건이 같은 URI를 쓰면 둔다. 받아 둔 적이 없는 URI(공유로 받은 임시 권한)는 건너뛴다.
+     */
+    private fun releaseUris(ctx: Context, gone: List<OutboxJob>) {
+        val free = OutboxCodec.urisToRelease(gone, list(ctx))
+        if (free.isEmpty()) return
+        val cr = ctx.contentResolver
+        val held = try { cr.persistedUriPermissions.map { it.uri.toString() }.toSet() } catch (e: Exception) { return }
+        for (u in free) {
+            if (u !in held) continue
+            try { cr.releasePersistableUriPermission(Uri.parse(u), Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { }
+        }
     }
 
     private fun persist(ctx: Context) {
@@ -69,7 +87,7 @@ object Outbox {
         while (l.size > MAX) {
             val i = l.indexOfFirst { it.failed }
             if (i < 0) break
-            l.removeAt(i)
+            releaseUris(ctx, listOf(l.removeAt(i)))
         }
         commit(ctx)
     }
@@ -120,7 +138,7 @@ object Outbox {
         val i = l.indexOfFirst { it.id == id }
         if (i < 0) return null
         progress.remove(id)
-        return l.removeAt(i).also { commit(ctx) }
+        return l.removeAt(i).also { commit(ctx); releaseUris(ctx, listOf(it)) }
     }
 
     /** 알림의 "모두 취소": 아직 보낼 건을 모두 지운다(실패한 건은 화면에 남긴다). */
@@ -132,6 +150,7 @@ object Outbox {
         l.removeAll(gone.toSet())
         gone.forEach { progress.remove(it.id) }
         commit(ctx)
+        releaseUris(ctx, gone)
         return gone
     }
 
@@ -143,6 +162,7 @@ object Outbox {
         if (gone.isEmpty()) return gone
         l.removeAll(gone.toSet())
         commit(ctx)
+        releaseUris(ctx, gone)
         return gone
     }
 

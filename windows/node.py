@@ -372,7 +372,7 @@ class Node:
             save_dir = hub.root
         try:
             got = p.receive_message(ch, self.guard, save_dir, progress, peer=pairing.stable_id, book=self.book,
-                                    cloud=hub)
+                                    cloud=hub, cloud_names=save_dir != self.save_dir)
         except p.ProtocolError as exc:
             # 인증된 상대에게는 이유를 알려 준다(태그 실패면 전송 자체가 안 됨).
             if exc.code != "auth_failed":

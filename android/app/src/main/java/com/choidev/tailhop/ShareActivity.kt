@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.text.TextUtils
 import android.view.View
 import android.widget.CheckBox
@@ -54,7 +56,29 @@ class ShareActivity : AppCompatActivity() {
             @Suppress("DEPRECATION")
             packageManager.resolveContentProvider(authority!!.substringAfterLast('@'), 0)?.packageName
         } catch (e: Exception) { null }
-        return owner != packageName
+        if (owner == packageName) return false
+        // H1: MediaStore 항목인데 이 앱이 만든 것(클라우드 파일·받는 중인 대기 항목 등)이면 막는다 — 다른 앱이 그 URI를 건네
+        // TailHop이 자기 권한으로 읽어 PC로 보내게 하지 못하게.
+        return !ownMediaItem(uri)
+    }
+
+    /** API 29+: 그 URI(문서 URI면 대응하는 MediaStore URI도)의 OWNER_PACKAGE_NAME이 이 앱인지. 알 수 없으면 false. */
+    private fun ownMediaItem(uri: Uri): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        val candidates = arrayListOf(uri)
+        try {
+            if (DocumentsContract.isDocumentUri(this, uri)) MediaStore.getMediaUri(this, uri)?.let { candidates += it }
+        } catch (e: Exception) { }
+        for (u in candidates) {
+            val owner = try {
+                contentResolver.query(u, arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME).takeIf { it >= 0 }
+                        ?.let { c.getString(it) } else null
+                }
+            } catch (e: Exception) { null } // 그 열이 없는 provider는 예외를 던지기도 한다
+            if (owner == packageName) return true
+        }
+        return false
     }
 
     private fun clean(s: String): String {

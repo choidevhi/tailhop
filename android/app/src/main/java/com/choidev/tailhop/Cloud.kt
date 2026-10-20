@@ -52,10 +52,36 @@ object CloudPath {
      */
     fun isListable(name: String): Boolean = isSegment(name) && !isPartName(name)
 
+    /** 클라우드에 둔 이름 뒤에 더 붙을 수 있는 글자 수: 같은 이름이 있을 때의 번호 " (n)"(n ≤ 99면 5자)와 여유 1자. */
+    const val NAME_ROOM = 6
+    private const val NAME_MAX = 150
+
     /**
-     * 클라우드에 저장할 이름. `.part`로 끝나면 목록에 보이지 않으므로(§12.1) 뒤에 `_`를 붙인다. 들어오는 이름은 이미 §5 정리를 거쳤다.
+     * 클라우드에 저장할 이름. 들어오는 이름은 이미 §5 정리를 거쳤다.
+     * - `.part`로 끝나면 목록에 보이지 않으므로(§12.1) 뒤에 `_`를 붙인다.
+     * - 같은 이름이 있으면 저장소가 " (1)"을 붙인다. 150자 이름에 그것이 붙으면 §5 규칙(150자)을 넘어 어느 PC에서도 보이지도 지워지지도
+     *   않으므로, 처음부터 150 - NAME_ROOM자 안으로 줄인다(확장자는 남기고 앞부분을 자른다, PC와 같은 규칙).
      */
-    fun storableName(sanitized: String): String = if (isPartName(sanitized)) sanitized + "_" else sanitized
+    fun storableName(sanitized: String): String {
+        var n = if (isPartName(sanitized)) sanitized + "_" else sanitized
+        val max = NAME_MAX - NAME_ROOM
+        if (n.codePointCount(0, n.length) <= max) return n
+        val dot = n.lastIndexOf('.')
+        val ext = if (dot > 0) n.substring(dot) else ""
+        val extLen = ext.codePointCount(0, ext.length)
+        n = if (extLen in 2..17) cpTake(n.substring(0, dot), max - extLen).trimEnd(' ', '.') + ext
+        else cpTake(n, max).trimEnd(' ', '.')
+        return n
+    }
+
+    private fun cpTake(s: String, n: Int): String =
+        if (s.codePointCount(0, s.length) <= n) s else s.substring(0, s.offsetByCodePoints(0, maxOf(n, 0)))
+
+    /**
+     * 허브가 요청을 받아들일 경로: 규칙에 맞고(isValid) 모든 조각이 목록에 보이는 이름이다(A6: `.part`로 끝나는 중간 폴더도 막는다).
+     * 보이지 않는 이름이 낀 경로는 PC처럼 not_found로 답한다.
+     */
+    fun isVisiblePath(path: String): Boolean = isValid(path) && (path.isEmpty() || path.split('/').all { isListable(it) })
 
     /** 받는 중인 조각 이름인지. 공용 저장소는 대소문자를 가리지 않으므로 `.PART`도 같다(PC와 같은 규칙). */
     fun isPartName(name: String): Boolean = name.lowercase(java.util.Locale.ROOT).endsWith(".part")
@@ -284,13 +310,55 @@ object CloudTree {
         return items
     }
 
-    /** dir 아래(자신 포함 깊이 무관) 파일들 — 폴더 지우기. */
+    /** dir 아래(자신 포함 깊이 무관) 파일들. */
     fun under(files: List<CloudEntry>, dir: String): List<CloudEntry> =
         files.filter { it.dir == dir || it.dir.startsWith("$dir/") }
+
+    /**
+     * 폴더 지우기(A1): 지울 파일 = dir 아래에서 목록에 보이는 것(이름과 dir 아래 모든 폴더 조각이 보이는 이름)만.
+     * 보이지 않는 것(`.part` 이름, `.part` 폴더 안 등)이 하나라도 남으면 left = true — 폴더는 지우지 않고 cloud_denied.
+     */
+    data class Removal(val delete: List<CloudEntry>, val left: Boolean)
+
+    fun removal(files: List<CloudEntry>, dir: String): Removal {
+        val del = ArrayList<CloudEntry>()
+        var left = false
+        for (f in under(files, dir)) {
+            val below = f.dir.removePrefix(dir).removePrefix("/")
+            val visible = CloudPath.isListable(f.name) && (below.isEmpty() || below.split('/').all { CloudPath.isListable(it) })
+            if (visible) del += f else left = true
+        }
+        return Removal(del, left)
+    }
 
     fun find(files: List<CloudEntry>, path: String): CloudEntry? {
         val dir = CloudPath.parent(path)
         val name = CloudPath.name(path)
         return files.firstOrNull { it.dir == dir && it.name == name && CloudPath.isListable(it.name) }
+    }
+}
+
+/**
+ * API 26–28 허브의 폴더 지우기(A1, java.nio만 써서 JVM 단위 테스트). 목록에 보이는 이름만 지운다 — 다른 PC가 받는 중인 `.part`,
+ * `.nomedia` 같은 숨은 파일, 링크(따라가지도 지우지도 않음)는 남긴다. 다 비면 폴더도 지우고 true, 남은 게 있으면 폴더는 두고 false.
+ */
+object CloudFiles {
+    fun deleteVisible(dir: java.nio.file.Path): Boolean {
+        var left = false
+        java.nio.file.Files.newDirectoryStream(dir).use { ds ->
+            for (c in ds) {
+                val a = try {
+                    java.nio.file.Files.readAttributes(c, java.nio.file.attribute.BasicFileAttributes::class.java,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                } catch (e: java.io.IOException) { left = true; continue }
+                when {
+                    !CloudPath.isListable(c.fileName.toString()) || a.isSymbolicLink || a.isOther -> left = true
+                    a.isDirectory -> if (!deleteVisible(c)) left = true
+                    else -> try { java.nio.file.Files.delete(c) } catch (e: java.io.IOException) { left = true }
+                }
+            }
+        }
+        if (left) return false
+        return try { java.nio.file.Files.delete(dir); true } catch (e: java.io.IOException) { false }
     }
 }

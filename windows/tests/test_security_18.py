@@ -216,6 +216,34 @@ class TwoNodeSecurityTests(unittest.TestCase):
         self.assertEqual([x.name for x in self.b.cloud_list("nodeA", "")[0]], ["a.part_"])
 
 
+    def test_long_names_stay_visible_after_numbering(self):
+        """A5: 150자 이름을 두 번 올려 번호가 붙어도, .part로 끝나는 긴 이름도 목록에 보이고 지울 수 있다."""
+        long_name = "가" * 146 + ".txt"
+        part_name = "나" * 145 + ".part"
+        srcs = []
+        for i, name in enumerate((long_name, long_name, part_name)):
+            folder = self.root / f"src{i}"
+            folder.mkdir()
+            (folder / name).write_bytes(str(i).encode())
+            srcs.append(folder / name)
+        jobs = self.b.outbox.add_cloud_upload("nodeA", srcs, "")
+        self.assertTrue(wait_for(lambda: all(self.b.outbox.get(j.id) is None for j in jobs), 10))
+        names = [x.name for x in self.b.cloud_list("nodeA", "")[0]]
+        self.assertEqual(len(names), 3, names)
+        for name in names:
+            self.assertLessEqual(len(name), 150)
+            self.b.cloud_delete("nodeA", name)  # 모두 이름으로 지울 수 있다
+        self.assertEqual(self.b.cloud_list("nodeA", "")[0], [])
+
+    def test_collected_chat_file_with_long_name_is_visible(self):
+        self.a.set_cloud(collect=True)
+        src = self.root / ("다" * 148 + ".md")
+        src.write_bytes(b"x")
+        self.b.send_file("nodeA", src)
+        self.b.send_file("nodeA", src)
+        self.assertEqual(len(self.b.cloud_list("nodeA", "")[0]), 2)
+
+
 class OutboxFileTests(unittest.TestCase):
     """F7: 손상되거나 고친 outbox.json이 다른 폴더를 지우거나 보내기를 멈추게 하지 못한다."""
 

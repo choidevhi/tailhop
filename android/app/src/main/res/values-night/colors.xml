@@ -1,24 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#212121</color>
-    <color name="card">#2A2A2A</color>
-    <color name="label">#ECECEC</color>
-    <color name="secondary">#9B9B9B</color>
-    <color name="header">#9B9B9B</color>
-    <color name="separator">#333333</color>
-    <color name="accent">#ECECEC</color>
-    <color name="accentTint">#303030</color>
-    <color name="onAccent">#0D0D0D</color>
-    <color name="green">#30D158</color>
-    <color name="red">#FF6B6B</color>
-    <color name="orange">#F5A524</color>
-    <color name="gray">#5A5A5A</color>
-    <color name="field">#303030</color>
+    <color name="bg">#09090B</color>
+    <color name="card">#09090B</color>
+    <color name="label">#FAFAFA</color>
+    <color name="secondary">#A1A1AA</color>
+    <color name="header">#A1A1AA</color>
+    <color name="separator">#27272A</color>
+    <color name="accent">#FAFAFA</color>
+    <color name="accentTint">#27272A</color>
+    <color name="onAccent">#18181B</color>
+    <color name="green">#22C55E</color>
+    <color name="red">#F87171</color>
+    <color name="orange">#FBBF24</color>
+    <color name="gray">#52525B</color>
+    <color name="field">#27272A</color>
     <color name="pressed">#1FFFFFFF</color>
-    <color name="bubbleOut">#303030</color>
+    <color name="bubbleOut">#27272A</color>
     <color name="bubbleIn">#00000000</color>
-    <color name="composerBg">#2A2A2A</color>
-    <color name="composerBorder">#3A3A3A</color>
-    <color name="sendDisabled">#4A4A4A</color>
-    <color name="iconCircle">#303030</color>
+    <color name="composerBg">#09090B</color>
+    <color name="composerBorder">#27272A</color>
+    <color name="sendDisabled">#828283</color>
+    <color name="iconCircle">#27272A</color>
 </resources>

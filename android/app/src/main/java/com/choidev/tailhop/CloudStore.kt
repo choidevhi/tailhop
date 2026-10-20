@@ -13,11 +13,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
-import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
-import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 
 /**
@@ -34,12 +31,34 @@ object CloudMode {
 
     fun isOn(ctx: Context): Boolean = prefs(ctx).getBoolean(K_ON, false)
 
-    fun setOn(ctx: Context, on: Boolean) { prefs(ctx).edit().putBoolean(K_ON, on).apply() }
+    /**
+     * 켜기/끄기. 끄면 지금 이어지던 클라우드 올리기·가져오기 연결을 끊고(H6), 클라우드 쪽 조각(올리기 조각과 클라우드에 모으던
+     * 대화방 파일 조각)을 버린다(A4, PC와 같다) — 다시 켰을 때 예전 조각을 이어 쓰지 않게.
+     */
+    fun setOn(ctx: Context, on: Boolean) {
+        val was = isOn(ctx)
+        prefs(ctx).edit().putBoolean(K_ON, on).apply()
+        if (was && !on) {
+            ReceiverService.closeCloudConnections()
+            forget(ctx, puts = true)
+        }
+    }
 
     /** 설정 값(화면의 체크 표시). 실제로 모으는지는 collects. */
     fun collectSetting(ctx: Context): Boolean = prefs(ctx).getBoolean(K_COLLECT, false)
 
-    fun setCollect(ctx: Context, on: Boolean) { prefs(ctx).edit().putBoolean(K_COLLECT, on).apply() }
+    /** 모으기 설정이 바뀌면 클라우드에 받던 대화방 파일 조각을 버린다(A4: 받을 폴더가 바뀌었다). */
+    fun setCollect(ctx: Context, on: Boolean) {
+        val was = collectSetting(ctx)
+        prefs(ctx).edit().putBoolean(K_COLLECT, on).apply()
+        if (was != on) forget(ctx, puts = false)
+    }
+
+    /** 조각 파일 지우기는 저장소를 건드리므로 따로 스레드에서. */
+    private fun forget(ctx: Context, puts: Boolean) {
+        val app = ctx.applicationContext
+        Thread({ Transfers.forgetCloud(app, puts = puts, chatInCloud = true) }, "tailhop-cloud-forget").start()
+    }
 
     /** 대화방으로 받은 파일을 클라우드 맨 위에 둘지. */
     fun collects(ctx: Context): Boolean = isOn(ctx) && collectSetting(ctx)
@@ -69,7 +88,7 @@ object CloudStore {
 
     /** cloud_list: 그 폴더의 항목(정렬 전). 폴더가 없으면 not_found. */
     fun list(ctx: Context, dir: String): List<CloudItem> {
-        CloudPath.segments(dir)
+        visible(dir)
         if (Build.VERSION.SDK_INT >= 29) synchronized(LOCK) {
             val files = scan(ctx)
             val d = dirs(ctx)
@@ -97,7 +116,7 @@ object CloudStore {
 
     /** cloud_get: 파일이어야 한다(폴더·없는 것·숨은 이름은 not_found). 맨 위는 bad_path. */
     fun file(ctx: Context, path: String): Opened {
-        if (CloudPath.segments(path).isEmpty()) throw ProtocolException("bad_path")
+        if (visible(path).isEmpty()) throw ProtocolException("bad_path")
         if (Build.VERSION.SDK_INT >= 29) {
             val e = synchronized(LOCK) { CloudTree.find(scan(ctx), path) } ?: throw ProtocolException("not_found")
             val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, e.id.toLong())
@@ -124,7 +143,7 @@ object CloudStore {
      * API 29+는 기록만 하고(첫 파일이 들어갈 때 MediaStore가 실제 폴더를 만든다), 26–28은 진짜 폴더를 만든다.
      */
     fun ensureDir(ctx: Context, dir: String) {
-        val parts = CloudPath.segments(dir)
+        val parts = visible(dir)
         if (parts.isEmpty()) return
         if (Build.VERSION.SDK_INT >= 29) synchronized(LOCK) {
             val files = scan(ctx)
@@ -157,33 +176,43 @@ object CloudStore {
      * API 29+는 이 앱이 만든 파일만 지운다(다른 것은 MediaStore가 보여 주지도, 지우게 하지도 않는다).
      */
     fun delete(ctx: Context, path: String) {
-        if (CloudPath.segments(path).isEmpty()) throw ProtocolException("bad_path")
+        if (visible(path).isEmpty()) throw ProtocolException("bad_path")
         if (Build.VERSION.SDK_INT >= 29) synchronized(LOCK) {
             val files = scan(ctx)
             val d = dirs(ctx)
             val single = CloudTree.find(files, path)
-            val targets = when {
-                single != null -> listOf(single)
-                CloudTree.dirExists(files, d, path) -> CloudTree.under(files, path)
+            // 폴더는 목록에 보이는 것만 지운다(A1). 보이지 않는 것이 남으면 폴더 기록은 두고 cloud_denied.
+            val removal = when {
+                single != null -> CloudTree.Removal(listOf(single), false)
+                CloudTree.dirExists(files, d, path) -> CloudTree.removal(files, path)
                 else -> throw ProtocolException("not_found")
             }
-            var denied = false
-            for (e in targets) {
+            var denied = removal.left
+            for (e in removal.delete) {
                 val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, e.id.toLong())
                 val n = try { ctx.contentResolver.delete(uri, null, null) } catch (x: Exception) { 0 }
                 if (n <= 0) denied = true
             }
-            if (single == null && d.removeTree(path)) saveDirs(ctx)
+            if (single == null && !denied && d.removeTree(path)) saveDirs(ctx)
             if (denied) throw ProtocolException("cloud_denied")
             return
         }
         needLegacyPermission(ctx)
         val f = legacyResolve(path)
         val a = attrs(f)
-        if (a == null || !CloudPath.isListable(f.name) || a.isOther) throw ProtocolException("not_found")
-        try {
-            if (a.isDirectory && !a.isSymbolicLink) deleteTree(f.toPath()) else Files.delete(f.toPath())
-        } catch (e: Exception) { throw ProtocolException("cloud_denied") }
+        if (a == null || !CloudPath.isListable(f.name) || a.isOther || a.isSymbolicLink) throw ProtocolException("not_found")
+        // 폴더는 목록에 보이는 것만 지운다(A1): 다른 PC가 받는 중인 `.part`, `.nomedia` 같은 숨은 파일은 남기고, 남으면 폴더도 둔다.
+        val ok = try {
+            if (a.isDirectory) CloudFiles.deleteVisible(f.toPath()) else { Files.delete(f.toPath()); true }
+        } catch (e: Exception) { false }
+        if (!ok) throw ProtocolException("cloud_denied")
+    }
+
+    /** 요청 경로 검사: 규칙 위반은 bad_path, 보이지 않는 이름(`.part` 등)이 낀 경로는 not_found(A6, PC와 같다). 조각을 돌려준다. */
+    private fun visible(path: String): List<String> {
+        val parts = CloudPath.segments(path)
+        if (!CloudPath.isVisiblePath(path)) throw ProtocolException("not_found")
+        return parts
     }
 
     /** cloud_mkdir: 이미 있으면 그대로 성공. 맨 위("")도 성공(PC와 같다). */
@@ -270,17 +299,4 @@ object CloudStore {
     } catch (e: Exception) { null }
 
     private fun isRealDir(f: File): Boolean = attrs(f)?.let { it.isDirectory && !it.isSymbolicLink } == true
-
-    /** 폴더를 안의 것까지 지운다. 링크는 따라가지 않고 링크 자체만 지운다(walkFileTree의 기본). */
-    private fun deleteTree(root: Path) {
-        Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
-            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                Files.delete(file); return FileVisitResult.CONTINUE
-            }
-            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
-                if (exc != null) throw exc
-                Files.delete(dir); return FileVisitResult.CONTINUE
-            }
-        })
-    }
 }

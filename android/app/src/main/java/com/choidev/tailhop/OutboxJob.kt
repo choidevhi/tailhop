@@ -94,7 +94,7 @@ object OutboxCodec {
     /**
      * 목록을 읽는다. 보내는 중(SENDING)으로 남은 건은 프로세스가 끝나며 멈춘 것이므로 바로 다시 보낼 대기로 돌린다.
      */
-    fun parse(json: String?, now: Long): List<OutboxJob> {
+    fun parse(json: String?, now: Long, own: Collection<String> = OWN_AUTHORITIES): List<OutboxJob> {
         val arr = try { JSONArray(json ?: return emptyList()) } catch (e: Exception) { return emptyList() }
         val out = ArrayList<OutboxJob>()
         for (i in 0 until arr.length()) {
@@ -120,7 +120,7 @@ object OutboxCodec {
                     part = if (o.has("part")) o.getString("part") else null,
                     restarted = o.optBoolean("restarted", false),
                 )
-                if (!Xfer.isValid(j.xfer) || !wellFormed(j)) continue
+                if (!Xfer.isValid(j.xfer) || !wellFormed(j, own)) continue
                 out += if (j.state == OutboxJob.SENDING || j.state !in STATES) j.copy(state = OutboxJob.WAITING, nextAt = now) else j
             } catch (e: Exception) { }
         }
@@ -130,12 +130,44 @@ object OutboxCodec {
     private val STATES = setOf(OutboxJob.WAITING, OutboxJob.SENDING, OutboxJob.FAILED)
 
     /** kind마다 꼭 있어야 하는 값. 클라우드 경로는 §12.1 규칙에 맞아야 한다(가져올 파일은 맨 위가 아니어야). */
-    private fun wellFormed(j: OutboxJob): Boolean = when (j.kind) {
+    private fun wellFormed(j: OutboxJob, own: Collection<String>): Boolean = when (j.kind) {
         OutboxJob.TEXT -> j.isText && j.text != null
-        OutboxJob.FILE -> !j.isText && j.uri != null
-        OutboxJob.CLOUD_UP -> !j.isText && j.uri != null && j.remote != null && CloudPath.isValid(j.remote)
-        OutboxJob.CLOUD_DOWN -> !j.isText && j.remote != null && j.remote.isNotEmpty() && CloudPath.isValid(j.remote)
+        OutboxJob.FILE -> !j.isText && isSourceUri(j.uri, own)
+        OutboxJob.CLOUD_UP -> !j.isText && isSourceUri(j.uri, own) && j.remote != null && CloudPath.isValid(j.remote)
+        OutboxJob.CLOUD_DOWN -> !j.isText && j.remote != null && j.remote.isNotEmpty() && CloudPath.isValid(j.remote) &&
+            (j.part == null || isPartLoc(j.part))
         else -> false
+    }
+
+    /** 빠진 건들의 파일 URI 중 남은 건이 쓰지 않는 것(영구 읽기 권한을 돌려줄 것, H4). */
+    fun urisToRelease(gone: List<OutboxJob>, remaining: List<OutboxJob>): Set<String> {
+        val inUse = remaining.mapNotNull { it.uri }.toSet()
+        return gone.mapNotNull { it.uri }.filter { it !in inUse }.toSet()
+    }
+
+    /** 이 앱의 provider(FileProvider 등) authority. 보낼 파일이 이 앱 내부 파일을 가리키지 못하게. */
+    val OWN_AUTHORITIES: List<String> = listOf(BuildConfig.APPLICATION_ID + ".files")
+
+    private val CONTENT_RE = Regex("content://([^/?#]+)(?:[/?#].*)?")
+    private val MEDIA_PART_RE = Regex("content://media/[a-z0-9_]+/downloads/[0-9]+")
+
+    /**
+     * 보낼 파일(H2): content URI이고 이 앱 자신의 provider가 아니어야 한다(`0@<authority>` 같은 사용자 번호 접두도 떼고 비교 —
+     * Protocol.isOwnAuthority). 목록 파일이 손상·변조돼도 내부 파일을 PC로 보내지 않게.
+     */
+    fun isSourceUri(uri: String?, own: Collection<String> = OWN_AUTHORITIES): Boolean {
+        val m = CONTENT_RE.matchEntire(uri ?: return false) ?: return false
+        return !Protocol.isOwnAuthority(m.groupValues[1], own)
+    }
+
+    /**
+     * 클라우드 가져오기의 조각 위치(H2): MediaStore Downloads 항목 URI(API 29+) 또는 Download/TailHop 아래의 `.part` 절대 경로(26–28).
+     * 실제로 지우고 열 때는 PartFiles가 한 번 더 확인한다.
+     */
+    fun isPartLoc(loc: String): Boolean {
+        if (MEDIA_PART_RE.matches(loc)) return true
+        if (!loc.startsWith("/") || !loc.endsWith(".part") || !loc.contains("/Download/TailHop/")) return false
+        return loc.split('/').none { it == "." || it == ".." }
     }
 }
 

@@ -419,7 +419,25 @@ def _recv_data(ch: Channel) -> tuple[bytes, bool]:
         raise _NetDrop() from exc
 
 
-def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, peer: str, book) -> Path:
+CLOUD_NAME_MAX = 140  # 클라우드에 둘 이름의 길이. 뒤에 `_`나 ` (12)`가 붙어도 150자를 넘지 않게(넘으면 목록에서 사라진다)
+
+
+def cloud_name(name: str) -> str:
+    """클라우드 폴더에 저장할 이름(§12.2): `.part`로 끝나면 `_`를 붙이고, 140자로 미리 줄인다(확장자는 남긴다).
+    그래야 같은 이름이 있어 번호가 붙어도 §12.1 규칙(정리해도 그대로인 이름)을 지켜 모든 기기에서 보이고 지울 수 있다."""
+    if name.casefold().endswith(".part"):
+        name += "_"
+    if len(name) > CLOUD_NAME_MAX:
+        stem, dot, ext = name.rpartition(".")
+        if dot and 0 < len(ext) <= 16:
+            name = stem[: CLOUD_NAME_MAX - len(ext) - 1].rstrip(" .") + "." + ext
+        else:
+            name = name[:CLOUD_NAME_MAX].rstrip(" .")
+    return name or "file"
+
+
+def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, peer: str, book,
+                       cloud_names: bool = False) -> Path:
     """§11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 파일 전체를 확인한다.
     끊기면 조각을 남기고(book.keep), 규칙 위반·해시 불일치면 지운다(book.drop)."""
     size, xfer, offset = header["size"], header["xfer"], header.get("offset", 0)
@@ -444,8 +462,8 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
             raise ProtocolError("resume_lost") from exc
     else:
         name = sanitize_filename(header["name"])
-        if kind == "cloud_put" and name.casefold().endswith(".part"):
-            name += "_"  # 클라우드 목록은 .part(받는 중인 조각)를 숨기므로 올린 파일이 사라져 보이지 않게(§12.2)
+        if cloud_names or kind == "cloud_put":
+            name = cloud_name(name)  # 클라우드 목록에서 사라지지 않을 이름으로
         final, part, out = _open_part(save_dir, name)
         book.begin(peer, xfer, size, part, final, kind)
         digest = hashlib.sha256()
@@ -520,6 +538,7 @@ def receive_message(
     peer: str = "",
     book=None,
     cloud=None,
+    cloud_names: bool = False,
 ) -> Received:
     """헤더와 본문을 받아 검증한다. 파일은 .part로 받은 뒤 검증되면 이름을 바꾼다.
 
@@ -565,11 +584,13 @@ def receive_message(
         save_dir = cloud.put_target(header.get("dir", ""))
     save_dir.mkdir(parents=True, exist_ok=True)
     if xfer is not None:
-        return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book))
+        return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book,
+                                                   cloud_names or header["type"] == "cloud_put"))
 
     if free_bytes(save_dir) < size + DISK_RESERVE:
         raise ProtocolError("disk_full")
-    final, part, out = _open_part(save_dir, sanitize_filename(header["name"]))
+    name = sanitize_filename(header["name"])
+    final, part, out = _open_part(save_dir, cloud_name(name) if cloud_names else name)
     got = 0
     try:
         with out:

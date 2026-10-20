@@ -59,6 +59,8 @@ class ReceiverService : Service() {
     private var timer: ScheduledExecutorService? = null
     private var thread: Thread? = null
     private val slots = Semaphore(MAX_CONN)
+    /** PC IP별 지금 연결 수(H5). */
+    private val perPeer = HashMap<String, Int>()
     private lateinit var guard: ReplayGuard
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -197,10 +199,26 @@ class ReceiverService : Service() {
         if (pairing == null) {
             closeQuietly(sock); return
         }
-        if (!slots.tryAcquire()) { closeQuietly(sock); return }
+        // 전체 4개에 더해 PC 하나는 동시에 2개까지(H5) — 한 PC가 연결을 잡아 다른 PC의 보내기를 막지 않게.
+        if (!perPeerAcquire(pairing.pcIp)) { closeQuietly(sock); return }
+        if (!slots.tryAcquire()) { perPeerRelease(pairing.pcIp); closeQuietly(sock); return }
         Thread({
-            try { handle(sock, pairing) } catch (e: Exception) { } finally { closeQuietly(sock); slots.release() }
+            try { handle(sock, pairing) } catch (e: Exception) { } finally {
+                closeQuietly(sock); slots.release(); perPeerRelease(pairing.pcIp)
+            }
         }, "tailhop-conn").start()
+    }
+
+    private fun perPeerAcquire(ip: String): Boolean = synchronized(perPeer) {
+        val n = perPeer[ip] ?: 0
+        if (n >= MAX_CONN_PER_PEER) false else { perPeer[ip] = n + 1; true }
+    }
+
+    private fun perPeerRelease(ip: String) {
+        synchronized(perPeer) {
+            val n = (perPeer[ip] ?: 1) - 1
+            if (n <= 0) perPeer.remove(ip) else perPeer[ip] = n
+        }
     }
 
     private fun handle(sock: Socket, pairing: Pairing) {
@@ -272,7 +290,18 @@ class ReceiverService : Service() {
      * 폴더 안 위치·이름 검사는 CloudPath(§12.1), 저장소는 CloudStore가 한다.
      */
     private fun cloud(ch: Channel, header: JSONObject, type: String, dev: String, sock: Socket): JSONObject? {
-        if (!CloudMode.isOn(this)) throw ProtocolException("cloud_off")
+        // 올리기·가져오기는 클라우드 모드를 끄면 바로 끊는다(H6). 먼저 적고 나서 켜져 있는지 본다 — 그 사이에 꺼도 놓치지 않게.
+        val long = type == "cloud_put" || type == "cloud_get"
+        if (long) CLOUD_SOCKS += sock
+        try {
+            if (!CloudMode.isOn(this)) throw ProtocolException("cloud_off")
+            return cloudRequest(ch, header, type, dev, sock)
+        } finally {
+            if (long) CLOUD_SOCKS -= sock
+        }
+    }
+
+    private fun cloudRequest(ch: Channel, header: JSONObject, type: String, dev: String, sock: Socket): JSONObject? {
         if (type == "cloud_put") return cloudPut(ch, header, dev, sock)
         emptyBody(ch)
         return when (type) {
@@ -328,7 +357,8 @@ class ReceiverService : Service() {
         if (freeBytes() < size - offset + DISK_RESERVE) throw ProtocolException("disk_full")
         CloudStore.ensureDir(this, dir)
         val name = CloudPath.storableName(Protocol.sanitizeFilename(rawName))
-        val (_, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, CloudStore.partDir(dir))
+        val (_, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, CloudStore.partDir(dir),
+            PartialRec.CLOUD_PUT)
         return JSONObject().put("ok", true).put("name", finalName)
     }
 
@@ -368,7 +398,7 @@ class ReceiverService : Service() {
         val xfer = Xfer.field(header, "xfer")
         if (xfer != null) {
             if (!Xfer.isValid(xfer)) throw ProtocolException("bad_xfer")
-            val (uri, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, dest)
+            val (uri, finalName) = receiveXferPart(ch, header, dev, sock, xfer as String, size, name, dest, PartialRec.FILE)
             val id = Protocol.newId()
             History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, finalName, size, uri.toString(), dev))
             Notifs.file(this, id, from, finalName, uri, PartFiles.mime(finalName), cloud)
@@ -392,6 +422,8 @@ class ReceiverService : Service() {
             if (got != size) throw ProtocolException("file_incomplete")
             val uri = sink.commit()
             ok = true
+            // A5: 클라우드에 모은 파일의 실제 이름이 목록 규칙에 맞지 않으면(어느 PC에서도 보이지 않음) 지우고 거부한다.
+            if (cloud && !CloudPath.isListable(sink.finalName)) { sink.discard(); throw ProtocolException("storage") }
             val id = Protocol.newId()
             History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, sink.finalName, size, uri.toString(), dev))
             Notifs.file(this, id, from, sink.finalName, uri, sink.mime, cloud)
@@ -404,10 +436,11 @@ class ReceiverService : Service() {
      * §11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 조각 전체를 확인한다.
      * 끊기거나 시간 초과면 조각을 남기고(24시간), 규칙 위반·해시 불일치·저장 실패면 지운다.
      * 같은 조각은 한 연결만 쓴다: 같은 PC가 같은 xfer로 새로 연결하면(앞 연결이 끊긴 걸 상대가 먼저 알았다) 앞 연결을 닫고 이어받는다.
-     * dest는 받을 폴더(Download/TailHop 아래, 대화방 ""·클라우드 "Cloud/…"). 공개한 (URI, 실제 이름)을 돌려준다 — 기록·알림은 부른 쪽이.
+     * dest는 받을 폴더(Download/TailHop 아래, 대화방 ""·클라우드 "Cloud/…"), kind는 메시지 종류(PartialRec.FILE·CLOUD_PUT) —
+     * 이어받을 때 둘 다 같아야 한다(A3). 공개한 (URI, 실제 이름)을 돌려준다 — 기록·알림은 부른 쪽이.
      */
     private fun receiveXferPart(ch: Channel, header: JSONObject, dev: String, sock: Socket,
-                                xfer: String, size: Long, name: String, dest: String): Pair<Uri, String> {
+                                xfer: String, size: Long, name: String, dest: String, kind: String): Pair<Uri, String> {
         val offset = Xfer.offset(header, size)
         if (freeBytes() < size - offset + DISK_RESERVE) throw ProtocolException("disk_full")
         return XferLocks.exclusive(TransferBook.key(dev, xfer), sock) {
@@ -415,24 +448,36 @@ class ReceiverService : Service() {
             val loc: String
             val out: OutputStream
             if (offset > 0) {
-                val rec = Transfers.claim(this, dev, xfer, size, dest) ?: throw ProtocolException("resume_lost")
+                val rec = Transfers.claim(this, dev, xfer, size, dest, kind) ?: throw ProtocolException("resume_lost")
                 loc = rec.loc
                 out = try { PartFiles.openAt(this, loc, offset, md) } catch (e: ProtocolException) {
                     Transfers.drop(this, dev, xfer, loc); throw e
                 }
             } else {
                 loc = PartFiles.create(this, name, dest)
-                Transfers.begin(this, dev, xfer, size, loc, name, dest)
+                Transfers.begin(this, dev, xfer, size, loc, name, dest, kind)
                 out = try { PartFiles.openAt(this, loc, 0, md) } catch (e: ProtocolException) {
                     Transfers.drop(this, dev, xfer, loc); throw ProtocolException("storage")
                 }
             }
-            val committed = try {
+            try {
                 receiveParts(ch, out, md, offset, size)
-                PartFiles.commit(this, loc, name)
             } catch (e: Exception) {
                 if (isNetDrop(e)) Transfers.keep(this, dev, xfer, loc) else Transfers.drop(this, dev, xfer, loc)
                 throw e
+            }
+            // H3: 공개하기 전에 장부에서 조각을 뗀다. 공개와 finish 사이에 죽어도 장부가 공개된 파일을 가리켜 prune이 지우지 않게.
+            Transfers.release(this, dev, xfer, loc)
+            val committed = try { PartFiles.commit(this, loc, name) } catch (e: Exception) {
+                Transfers.drop(this, dev, xfer, loc) // 아직 대기 중인 조각만 지운다(PartFiles.delete)
+                throw if (e is ProtocolException) e else ProtocolException("storage")
+            }
+            // A5: 클라우드에 둔 파일의 실제 이름(저장소가 번호를 붙였을 수 있다)이 목록 규칙에 맞지 않으면 어느 PC에서도
+            // 보이지도 지워지지도 않는다 — 지우고 storage로 거부한다.
+            if (dest.isNotEmpty() && !CloudPath.isListable(committed.second)) {
+                PartFiles.unpublish(this, committed.first, committed.second, dest)
+                Transfers.drop(this, dev, xfer, loc)
+                throw ProtocolException("storage")
             }
             Transfers.finish(this, dev, xfer)
             committed
@@ -476,6 +521,8 @@ class ReceiverService : Service() {
         abstract var finalName: String
         abstract fun commit(): Uri
         abstract fun abort()
+        /** 공개한 뒤 지운다(A5: 이름이 목록 규칙에 맞지 않는 클라우드 파일). */
+        abstract fun discard()
     }
 
     /** API 29+: MediaStore.Downloads, IS_PENDING=1 로 받고 검증 후 공개. 실패하면 삭제. relDir은 Download/TailHop 아래 폴더. */
@@ -512,6 +559,7 @@ class ReceiverService : Service() {
         }
 
         override fun abort() { try { ctx.contentResolver.delete(uri, null, null) } catch (e: Exception) { } }
+        override fun discard() = abort()
     }
 
     /** API 26–28: 공용 Download/TailHop(또는 그 아래 relDir), `.part`로 받고 검증 후 이름 변경. */
@@ -545,6 +593,7 @@ class ReceiverService : Service() {
         }
 
         override fun abort() { part.delete() }
+        override fun discard() { target.delete() }
     }
 
     /**
@@ -582,6 +631,16 @@ class ReceiverService : Service() {
 
     companion object {
         const val MAX_CONN = 4
+        /**
+         * PC 하나의 동시 연결 상한(H5). PC는 대화방 줄·클라우드 줄을 함께 보내고 클라우드 화면이 목록도 물으므로 3개까지 둔다.
+         * 한 PC가 전체 슬롯(4개)을 다 잡지 못하게 한다.
+         */
+        const val MAX_CONN_PER_PEER = 3
+        /** 지금 이어지는 클라우드 올리기·가져오기 연결(H6, 클라우드 모드를 끄면 닫는다). */
+        private val CLOUD_SOCKS: MutableSet<Socket> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        /** 클라우드 모드를 껐다: 이어지던 cloud_put·cloud_get 연결을 끊는다(받던 조각은 CloudMode가 버린다). */
+        fun closeCloudConnections() { CLOUD_SOCKS.toList().forEach { closeQuietly(it) } }
         /** 파일을 받은 뒤에도 남겨 둘 여유(PC와 같은 64 MiB). */
         const val DISK_RESERVE = 64L * 1024 * 1024
         /** 네트워크 콜백을 놓쳤을 때를 위한 안전용 주소 확인 간격. */

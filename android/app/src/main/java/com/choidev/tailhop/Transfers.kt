@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
@@ -63,19 +64,43 @@ object Transfers {
     @Synchronized fun isDone(ctx: Context, peer: String, xfer: String): Boolean = book(ctx).isDone(peer, xfer)
 
     /**
-     * 이어 받을 조각을 잡는다. 받을 폴더(dest)가 다르면(대화방 파일 ↔ 클라우드, 다른 클라우드 폴더, 설정이 바뀜) 그 조각을 지우고 null —
-     * 보내는 쪽은 resume_lost를 받고 hello를 다시 하면 have 0을 받아 처음부터 보낸다(같은 조각으로 계속 맴돌지 않게).
+     * 이어 받을 조각을 잡는다. 메시지 종류(kind)나 받을 폴더(dest)가 다르면(대화방 파일 ↔ 클라우드 올리기, 다른 클라우드 폴더,
+     * 설정이 바뀜) 그 조각을 지우고 null — 보내는 쪽은 resume_lost를 받고 hello를 다시 하면 have 0을 받아 처음부터 보낸다
+     * (같은 조각으로 계속 맴돌지 않게).
      */
-    fun claim(ctx: Context, peer: String, xfer: String, size: Long, dest: String = ""): PartialRec? {
+    fun claim(ctx: Context, peer: String, xfer: String, size: Long, dest: String = "", kind: String = PartialRec.FILE): PartialRec? {
         val rec = synchronized(this) { book(ctx).claim(peer, xfer, size)?.also { save(ctx) } } ?: return null
-        if (rec.dest == dest) return rec
+        if (rec.fits(dest, kind)) return rec
         drop(ctx, peer, xfer, rec.loc)
         return null
     }
 
-    fun begin(ctx: Context, peer: String, xfer: String, size: Long, loc: String, name: String, dest: String = "") {
-        val old = synchronized(this) { book(ctx).begin(peer, xfer, size, loc, name, dest).also { save(ctx) } }
-        old?.let { PartFiles.delete(ctx, it.loc) }
+    /** 새 조각을 적는다. 같은 키의 예전 조각과, 이 PC의 조각이 상한(32)을 넘어 밀려난 것은 지운다. */
+    fun begin(ctx: Context, peer: String, xfer: String, size: Long, loc: String, name: String, dest: String = "",
+              kind: String = PartialRec.FILE) {
+        val gone = synchronized(this) {
+            val b = book(ctx)
+            (listOfNotNull(b.begin(peer, xfer, size, loc, name, dest, kind)) + b.overflow(peer)).also { save(ctx) }
+        }
+        gone.forEach { PartFiles.delete(ctx, it.loc) }
+    }
+
+    /** 다 받아 공개하기 직전에 조각 기록을 지운다(H3: 공개 뒤에 죽어도 장부가 공개된 파일을 가리키지 않게). */
+    fun release(ctx: Context, peer: String, xfer: String, loc: String) {
+        synchronized(this) { book(ctx).release(peer, xfer, loc); save(ctx) }
+    }
+
+    /**
+     * 클라우드 쪽 조각을 버린다(1.8.0). puts면 클라우드 올리기(cloud_put)의 조각 전부(클라우드 모드를 끔),
+     * chatInCloud면 클라우드에 모으던 대화방 파일의 조각(모으기 설정이 바뀜·클라우드 모드를 끔). 파일 지우기가 있어 메인 스레드에서 부르지 않는다.
+     */
+    fun forgetCloud(ctx: Context, puts: Boolean, chatInCloud: Boolean) {
+        val gone = synchronized(this) {
+            book(ctx).forgetWhere { r ->
+                (puts && r.kind == PartialRec.CLOUD_PUT) || (chatInCloud && r.kind == PartialRec.FILE && r.dest.isNotEmpty())
+            }.also { save(ctx) }
+        }
+        gone.forEach { PartFiles.delete(ctx, it.loc) }
     }
 
     /** 끊김: 조각을 남긴다. 그 사이 다른 조각이 같은 키를 차지했으면 내 조각을 지운다. */
@@ -195,6 +220,8 @@ object PartFiles {
                 }
             }
             mediaUri(loc)?.let { u ->
+                // 이미 공개된 항목(장부가 잘못 가리킴)은 자르지 않는다.
+                if (!isPending(ctx, u)) throw ProtocolException("resume_lost")
                 val pfd = ctx.contentResolver.openFileDescriptor(u, "rw") ?: throw IOException("no part")
                 val out = ParcelFileDescriptor.AutoCloseOutputStream(pfd)
                 try {
@@ -236,9 +263,43 @@ object PartFiles {
         return FileProvider.getUriForFile(ctx, ctx.packageName + ".files", target) to target.name
     }
 
+    /**
+     * 조각을 지운다. MediaStore 항목은 아직 대기 중(IS_PENDING=1)일 때만 지운다 — 장부가 어떤 이유로 이미 공개된 파일을
+     * 가리켜도(공개와 장부 쓰기 사이에 죽음 등) 사용자의 파일을 지우지 않게(H3).
+     */
     fun delete(ctx: Context, loc: String) {
         try {
-            mediaUri(loc)?.let { ctx.contentResolver.delete(it, null, null) } ?: partFile(loc)?.delete()
+            val u = mediaUri(loc)
+            if (u != null) { if (isPending(ctx, u)) ctx.contentResolver.delete(u, null, null) } else partFile(loc)?.delete()
+        } catch (e: Exception) { }
+    }
+
+    /** MediaStore 항목이 아직 대기 중인지. 알 수 없으면(없어짐·조회 실패) false — 지우거나 자르지 않는 쪽으로. */
+    private fun isPending(ctx: Context, u: Uri): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        val cols = arrayOf(MediaStore.MediaColumns.IS_PENDING)
+        return try {
+            val c = if (Build.VERSION.SDK_INT >= 30) {
+                ctx.contentResolver.query(u, cols,
+                    Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE) }, null)
+            } else {
+                @Suppress("DEPRECATION")
+                ctx.contentResolver.query(MediaStore.setIncludePending(u), cols, null, null, null)
+            }
+            c?.use { it.moveToFirst() && it.getInt(0) == 1 } == true
+        } catch (e: Exception) { false }
+    }
+
+    /**
+     * 공개한 파일을 지운다(A5: 클라우드에 둔 파일의 실제 이름이 목록 규칙에 맞지 않아 어느 PC에서도 보이지도 지워지지도 않을 때).
+     * API 29+는 MediaStore URI, 26–28은 Download/TailHop/<relDir>/<name>.
+     */
+    fun unpublish(ctx: Context, uri: Uri, name: String, relDir: String) {
+        try {
+            if (uri.authority == MediaStore.AUTHORITY) ctx.contentResolver.delete(uri, null, null)
+            else if (!name.contains('/') && name != "." && name != "..") {
+                File(if (relDir.isEmpty()) legacyDir() else File(legacyDir(), relDir), name).delete()
+            }
         } catch (e: Exception) { }
     }
 }
