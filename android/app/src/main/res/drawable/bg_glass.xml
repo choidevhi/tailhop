@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 유리 면(카드·목록·위 막대): 반투명 면 + 1dp 머리카락 테두리 + 아래로 2dp 두 겹 흐린 그림자, rounded-xl 12dp -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:top="2dp">
+        <shape android:shape="rectangle"><solid android:color="@color/glassShadow" /><corners android:radius="12dp" /></shape>
+    </item>
+    <item android:top="1dp" android:bottom="1dp">
+        <shape android:shape="rectangle"><solid android:color="@color/glassShadow" /><corners android:radius="12dp" /></shape>
+    </item>
+    <item android:bottom="2dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/glass" />
+            <stroke android:width="1dp" android:color="@color/glassBorder" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+</layer-list>

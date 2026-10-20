@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 대화방(1.9.0 유리 디자인): 떠 있는 유리 위 막대, 대화, 덜 비치는 유리 입력창 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:orientation="vertical" android:background="@color/bg">
-    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp"
-        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="4dp" android:paddingEnd="8dp">
-        <ImageButton android:id="@+id/backBtn" android:layout_width="48dp" android:layout_height="48dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_back" android:tint="@color/label"
+    android:orientation="vertical">
+    <com.choidev.tailhop.GlassCard android:layout_width="match_parent" android:layout_height="56dp"
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="6dp">
+        <ImageButton android:id="@+id/backBtn" style="@style/IconBtn" android:src="@drawable/ic_back"
             android:contentDescription="@string/chat_back" />
         <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:orientation="vertical" android:layout_marginStart="4dp">
+            android:orientation="vertical" android:layout_marginStart="6dp">
             <TextView android:id="@+id/pcName" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:textSize="16sp" android:textStyle="bold" android:textColor="@color/label"
+                android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="@color/label"
                 android:maxLines="1" android:ellipsize="end" />
             <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:orientation="horizontal" android:gravity="center_vertical">
@@ -20,43 +21,45 @@
                     android:textSize="12sp" android:textColor="@color/secondary" android:maxLines="1" android:ellipsize="end" />
             </LinearLayout>
         </LinearLayout>
-        <ImageButton android:id="@+id/moreBtn" android:layout_width="44dp" android:layout_height="44dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_more" android:tint="@color/label"
+        <ImageButton android:id="@+id/moreBtn" style="@style/IconBtn" android:src="@drawable/ic_more"
             android:contentDescription="@string/more" />
-    </LinearLayout>
+    </com.choidev.tailhop.GlassCard>
 
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
         <androidx.recyclerview.widget.RecyclerView android:id="@+id/chat"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:clipToPadding="false" android:paddingTop="4dp" android:paddingBottom="8dp" />
-        <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="match_parent"
-            android:orientation="vertical" android:gravity="center" android:padding="32dp" android:visibility="gone">
-            <ImageView android:layout_width="64dp" android:layout_height="64dp"
-                android:padding="18dp" android:background="@drawable/circle_outline_lg" android:src="@drawable/ic_bubble"
+        <com.choidev.tailhop.GlassCard android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="center" android:layout_marginStart="24dp" android:layout_marginEnd="24dp"
+            android:orientation="vertical" android:gravity="center_horizontal"
+            android:paddingStart="24dp" android:paddingEnd="24dp" android:paddingTop="28dp" android:paddingBottom="28dp"
+            android:visibility="gone">
+            <ImageView android:layout_width="56dp" android:layout_height="56dp"
+                android:padding="15dp" android:background="@drawable/bg_icon_tile" android:src="@drawable/ic_bubble"
                 android:tint="@color/label" android:importantForAccessibility="no" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="18dp" android:textSize="26sp" android:textStyle="bold"
+                android:layout_marginTop="18dp" android:textSize="22sp" android:textStyle="bold" android:letterSpacing="-0.01"
                 android:textColor="@color/label" android:text="@string/chat_empty_title" android:gravity="center" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:textSize="15sp" android:textColor="@color/secondary"
+                android:layout_marginTop="8dp" android:textSize="14sp" android:textColor="@color/secondary"
                 android:text="@string/chat_empty_sub" android:gravity="center" />
-        </LinearLayout>
+        </com.choidev.tailhop.GlassCard>
     </FrameLayout>
 
     <LinearLayout android:id="@+id/composer" android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="4dp"
-        android:layout_marginBottom="10dp" android:background="@drawable/bg_composer" android:elevation="3dp"
+        android:layout_marginBottom="10dp" android:background="@drawable/bg_composer"
         android:orientation="horizontal" android:gravity="bottom" android:padding="7dp">
-        <ImageButton android:id="@+id/plusBtn" android:layout_width="38dp" android:layout_height="38dp"
-            android:background="@drawable/circle_outline" android:src="@drawable/ic_plus" android:tint="@color/label"
-            android:padding="8dp" android:scaleType="fitCenter" android:contentDescription="@string/chat_send_file" />
+        <ImageButton android:id="@+id/plusBtn" android:layout_width="36dp" android:layout_height="36dp"
+            android:background="@drawable/bg_btn_tinted" android:src="@drawable/ic_plus" android:tint="@color/label"
+            android:padding="9dp" android:scaleType="fitCenter" android:contentDescription="@string/chat_send_file" />
         <EditText android:id="@+id/textBox" android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" android:minHeight="38dp" android:background="@null"
-            android:paddingStart="12dp" android:paddingEnd="10dp" android:paddingTop="8dp" android:paddingBottom="8dp"
-            android:hint="@string/chat_hint" android:maxLines="5" android:textSize="16sp" android:textColor="@color/label"
+            android:layout_height="wrap_content" android:minHeight="36dp" android:background="@null"
+            android:paddingStart="12dp" android:paddingEnd="10dp" android:paddingTop="7dp" android:paddingBottom="7dp"
+            android:hint="@string/chat_hint" android:maxLines="5" android:textSize="15sp" android:textColor="@color/label"
             android:inputType="textMultiLine|textCapSentences" android:importantForAutofill="no" />
-        <ImageButton android:id="@+id/sendBtn" android:layout_width="38dp" android:layout_height="38dp"
+        <ImageButton android:id="@+id/sendBtn" android:layout_width="36dp" android:layout_height="36dp"
             android:background="@drawable/circle_send" android:src="@drawable/ic_arrow_up" android:tint="@color/onAccent"
-            android:padding="8dp" android:scaleType="fitCenter" android:contentDescription="@string/chat_send" android:enabled="false" />
+            android:padding="9dp" android:scaleType="fitCenter" android:contentDescription="@string/chat_send" android:enabled="false" />
     </LinearLayout>
 </LinearLayout>

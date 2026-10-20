@@ -1,2 +1,3 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@color/bubbleOut"/><corners android:radius="8dp"/></shape>
+<!-- 내가 보낸 말풍선: shadcn primary(밝은 화면 zinc-900, 어두운 화면 zinc-50), rounded-xl -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@color/accent" /><corners android:radius="12dp" /></shape>

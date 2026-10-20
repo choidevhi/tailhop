@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shadcn Checkbox: 18dp 둥근 네모(4dp), 켜짐은 primary 면에 체크(벡터) -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true">
+        <layer-list>
+            <item android:width="18dp" android:height="18dp" android:gravity="center">
+                <shape android:shape="rectangle"><solid android:color="@color/accent" /><corners android:radius="4dp" /></shape>
+            </item>
+            <item android:width="14dp" android:height="14dp" android:gravity="center" android:drawable="@drawable/check_on_accent" />
+        </layer-list>
+    </item>
+    <item>
+        <layer-list>
+            <item android:width="18dp" android:height="18dp" android:gravity="center">
+                <shape android:shape="rectangle"><solid android:color="@android:color/transparent" /><stroke android:width="1.5dp" android:color="@color/accent" /><corners android:radius="4dp" /></shape>
+            </item>
+        </layer-list>
+    </item>
+</selector>

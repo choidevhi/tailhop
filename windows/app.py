@@ -43,7 +43,7 @@ from ui import (MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, B
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236

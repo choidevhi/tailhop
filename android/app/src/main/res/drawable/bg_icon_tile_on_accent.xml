@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 내 말풍선(primary) 안의 파일 아이콘 칸 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="@color/onAccentCircle" /><corners android:radius="8dp" /></shape>

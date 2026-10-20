@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: 대화 상자 뒤를 실제로 흐린다(창 흐림은 GPU 합성기가 한 번 하므로 앱의 매 프레임 일이 늘지 않는다).
+     기기가 창 흐림을 끈 경우(절전·설정)에는 시스템이 알아서 흐림 없이 같은 유리 면만 그린다. -->
+<resources>
+    <style name="GlassDialog" parent="GlassDialog.Base">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBlurBehindEnabled">true</item>
+        <item name="android:windowBlurBehindRadius">24dp</item>
+        <item name="android:windowBackgroundBlurRadius">40dp</item>
+        <item name="android:backgroundDimAmount">0.18</item>
+    </style>
+</resources>

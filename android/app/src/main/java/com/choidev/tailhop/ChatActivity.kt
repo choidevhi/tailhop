@@ -254,19 +254,23 @@ class ChatActivity : AppCompatActivity() {
             return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) && c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
         }
 
-        /** 보낸 쪽(오른쪽) 말풍선 모양. */
-        private fun outStyle(h: VH, out: Boolean) {
-            val dm = h.itemView.resources.displayMetrics
+        /**
+         * 말풍선 모양(1.9.0 유리 디자인). out이면 오른쪽, primary면 내가 보낸 말풍선(shadcn primary 면·onAccent 글자),
+         * 아니면 유리 말풍선(받은 것·아직 못 보낸 것). 부 글자(크기·상태) 색을 돌려준다.
+         */
+        private fun outStyle(h: VH, out: Boolean, primary: Boolean): Int {
+            val ctx = h.itemView.context
+            val dm = ctx.resources.displayMetrics
             val gravity = if (out) Gravity.END else Gravity.START
             (h.bubble.layoutParams as LinearLayout.LayoutParams).gravity = gravity
             (h.time.layoutParams as LinearLayout.LayoutParams).gravity = gravity
-            if (out) {
-                h.bubble.setBackgroundResource(R.drawable.bg_bubble_out)
-                h.bubble.setPadding((14 * dm.density).toInt(), (9 * dm.density).toInt(), (14 * dm.density).toInt(), (9 * dm.density).toInt())
-            } else {
-                h.bubble.background = null
-                h.bubble.setPadding(0, (2 * dm.density).toInt(), 0, (2 * dm.density).toInt())
-            }
+            h.bubble.setBackgroundResource(if (primary) R.drawable.bg_bubble_out else R.drawable.bg_bubble_in)
+            h.bubble.setPadding((14 * dm.density).toInt(), (9 * dm.density).toInt(), (14 * dm.density).toInt(), (9 * dm.density).toInt())
+            val fg = ContextCompat.getColor(ctx, if (primary) R.color.onAccent else R.color.label)
+            h.body.setTextColor(fg)
+            h.fileIcon.setBackgroundResource(if (primary) R.drawable.bg_icon_tile_on_accent else R.drawable.bg_icon_tile)
+            h.fileIcon.imageTintList = android.content.res.ColorStateList.valueOf(fg)
+            return ContextCompat.getColor(ctx, if (primary) R.color.onAccentSub else R.color.secondary)
         }
 
         override fun onBindViewHolder(h: VH, pos: Int) {
@@ -278,7 +282,6 @@ class ChatActivity : AppCompatActivity() {
             val out = !it.incoming
             val dm = ctx.resources.displayMetrics
             h.bubble.alpha = 1f
-            h.sub.setTextColor(ContextCompat.getColor(ctx, R.color.secondary))
             h.sub.maxLines = Int.MAX_VALUE
 
             val newDay = prev == null || !sameDay(prev.ts, it.ts)
@@ -293,7 +296,7 @@ class ChatActivity : AppCompatActivity() {
             h.time.visibility = if (lastInGroup) View.VISIBLE else View.GONE
             h.time.text = Lang.time(ctx, it.ts)
 
-            outStyle(h, out)
+            h.sub.setTextColor(outStyle(h, out, out))
             val maxW = (dm.widthPixels * (if (out) 0.75f else 0.85f)).toInt()
             h.body.maxWidth = maxW - (if (it.isText) 0 else (76 * dm.density).toInt())
 
@@ -320,15 +323,18 @@ class ChatActivity : AppCompatActivity() {
             }
         }
 
-        /** 아직 못 보낸 건: 흐린 보낸 쪽 말풍선 + 상태 줄(실패면 빨강). */
+        /**
+         * 아직 못 보낸 건: 오른쪽 유리 말풍선(보낸 말풍선의 primary 면과 달라 보이게) + 상태 줄(실패면 빨강).
+         * 예전처럼 흐리게(alpha) 하지 않는다 — 유리 위에서 흐리면 상태 글자 대비가 4.5:1 아래로 떨어진다.
+         */
         private fun bindPending(h: VH, j: OutboxJob) {
             val ctx = h.itemView.context
             val dm = ctx.resources.displayMetrics
             h.date.visibility = View.GONE
             h.who.visibility = View.GONE
             h.time.visibility = View.GONE
-            outStyle(h, true)
-            h.bubble.alpha = if (j.failed) 1f else 0.6f
+            val subColor = outStyle(h, true, false)
+            h.bubble.alpha = 1f
             h.body.maxWidth = (dm.widthPixels * 0.75f).toInt() - (if (j.isText) 0 else (76 * dm.density).toInt())
             h.fileIcon.visibility = if (j.isText) View.GONE else View.VISIBLE
             if (j.isText) {
@@ -343,7 +349,7 @@ class ChatActivity : AppCompatActivity() {
             h.sub.visibility = View.VISIBLE
             h.sub.maxLines = 3
             h.sub.text = pendingStatus(j)
-            h.sub.setTextColor(ContextCompat.getColor(ctx, if (j.failed) R.color.red else R.color.secondary))
+            h.sub.setTextColor(if (j.failed) ContextCompat.getColor(ctx, R.color.red) else subColor)
             h.bubble.setOnClickListener { _ -> pendingMenu(j) }
             h.bubble.setOnLongClickListener { _ -> pendingMenu(j); true }
         }

@@ -277,6 +277,7 @@ class MainActivity : AppCompatActivity() {
         val none = devices.isEmpty()
         empty.visibility = if (none) View.VISIBLE else View.GONE
         list.visibility = if (none) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.devCard).visibility = list.visibility // 빈 유리 카드가 남지 않게
         findViewById<View>(R.id.devHeader).visibility = if (none) View.GONE else View.VISIBLE
         receiveRow.visibility = if (none) View.GONE else View.VISIBLE
         findViewById<View>(R.id.cloudRow).visibility = if (none) View.GONE else View.VISIBLE

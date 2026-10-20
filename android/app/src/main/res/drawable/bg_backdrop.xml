@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 화면 뒤 오로라(1.9.0): 큰 흐린 색 덩어리 넷. 그림 한 장이라 움직이지 않고 매 프레임 하는 일이 없다(배터리).
+     덩어리가 이미 흐린 방사형 그라데이션이라 그 위 유리 면 뒤를 실시간으로 흐리게 해도 달라 보이지 않는다(그래서 하지 않는다). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item><color android:color="@color/backdropBase" /></item>
+    <item>
+        <shape android:shape="rectangle" android:dither="true">
+            <gradient android:type="radial" android:centerX="0.0" android:centerY="0.05" android:gradientRadius="95%p"
+                android:startColor="@color/blob1" android:endColor="@color/blob1Clear" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle" android:dither="true">
+            <gradient android:type="radial" android:centerX="1.0" android:centerY="0.35" android:gradientRadius="90%p"
+                android:startColor="@color/blob2" android:endColor="@color/blob2Clear" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle" android:dither="true">
+            <gradient android:type="radial" android:centerX="0.1" android:centerY="0.82" android:gradientRadius="95%p"
+                android:startColor="@color/blob3" android:endColor="@color/blob3Clear" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle" android:dither="true">
+            <gradient android:type="radial" android:centerX="1.0" android:centerY="1.0" android:gradientRadius="85%p"
+                android:startColor="@color/blob4" android:endColor="@color/blob4Clear" />
+        </shape>
+    </item>
+</layer-list>

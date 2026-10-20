@@ -1,113 +1,121 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 홈(1.9.0 유리 디자인): 창 배경 오로라 위에 유리 카드들. 줄 사이 선은 카드의 divider(숨긴 줄은 선도 같이 빠진다) -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:orientation="vertical" android:background="@color/bg">
+    android:orientation="vertical">
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:gravity="center_vertical"
-        android:paddingStart="20dp" android:paddingEnd="8dp" android:paddingTop="12dp" android:paddingBottom="4dp">
+        android:paddingStart="24dp" android:paddingEnd="12dp" android:paddingTop="14dp" android:paddingBottom="10dp">
         <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:text="@string/app_name" android:textSize="30sp" android:textStyle="bold" android:textColor="@color/label"
-            android:accessibilityHeading="true" />
-        <ImageButton android:id="@+id/moreBtn" android:layout_width="44dp" android:layout_height="44dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_more" android:tint="@color/label"
+            android:text="@string/app_name" android:textSize="28sp" android:textStyle="bold" android:textColor="@color/label"
+            android:letterSpacing="-0.02" android:accessibilityHeading="true" />
+        <ImageButton android:id="@+id/moreBtn" style="@style/IconBtn" android:src="@drawable/ic_more"
             android:contentDescription="@string/more" />
     </LinearLayout>
 
     <!-- 업데이트(1.9.0): 페어링한 배포 PC에 새 버전이 있을 때만 보인다. 누르면 받아서 설치 -->
-    <LinearLayout android:id="@+id/updateRow" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:minHeight="60dp" android:orientation="horizontal" android:gravity="center_vertical"
-        android:paddingStart="20dp" android:paddingEnd="20dp" android:paddingTop="6dp" android:paddingBottom="6dp"
-        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true" android:visibility="gone">
-        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="10dp"
-            android:background="@drawable/circle_icon" android:src="@drawable/ic_download" android:tint="@color/label"
-            android:importantForAccessibility="no" />
+    <com.choidev.tailhop.GlassCard android:id="@+id/updateRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginStart="16dp" android:layout_marginEnd="16dp" android:layout_marginBottom="12dp"
+        android:minHeight="64dp" android:orientation="horizontal" android:gravity="center_vertical"
+        android:paddingStart="14dp" android:paddingEnd="14dp" android:paddingTop="10dp" android:paddingBottom="10dp"
+        android:foreground="@drawable/bg_row_press" android:clickable="true" android:focusable="true" android:visibility="gone">
+        <ImageView style="@style/RowTile" android:importantForAccessibility="no" android:background="@drawable/bg_icon_tile_accent" android:src="@drawable/ic_download"
+            android:tint="@color/onAccent" />
         <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
             android:layout_marginStart="14dp" android:orientation="vertical">
             <TextView android:id="@+id/updateTitle" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:textSize="16sp" android:textStyle="bold" android:textColor="@color/label" android:maxLines="1" android:ellipsize="end" />
+                android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="@color/label"
+                android:maxLines="2" android:ellipsize="end" />
             <TextView android:id="@+id/updateSub" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="1dp" android:textSize="12sp" android:textColor="@color/secondary"
+                android:layout_marginTop="1dp" android:textSize="13sp" android:textColor="@color/secondary"
                 android:maxLines="1" android:ellipsize="end" />
         </LinearLayout>
-        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_chevron_right"
+        <ImageView android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/ic_chevron_right"
             android:tint="@color/secondary" android:importantForAccessibility="no" />
-    </LinearLayout>
+    </com.choidev.tailhop.GlassCard>
 
-    <LinearLayout android:id="@+id/addRow" android:layout_width="match_parent" android:layout_height="60dp"
-        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="20dp" android:paddingEnd="20dp"
-        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
-        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="9dp"
-            android:background="@drawable/circle_outline" android:src="@drawable/ic_plus" android:tint="@color/label"
-            android:importantForAccessibility="no" />
-        <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:layout_marginStart="14dp" android:text="@string/main_new_device" android:textSize="16sp" android:textColor="@color/label" />
-        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_qr"
-            android:tint="@color/secondary" android:importantForAccessibility="no" />
-    </LinearLayout>
-
-    <!-- 수신 켜기/끄기: 끄면 수신 서비스(포트·상시 알림)가 멈추고 보내기만 된다 -->
-    <LinearLayout android:id="@+id/receiveRow" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:minHeight="60dp" android:orientation="horizontal" android:gravity="center_vertical"
-        android:paddingStart="20dp" android:paddingEnd="16dp" android:paddingTop="6dp" android:paddingBottom="6dp"
-        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
-        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="10dp"
-            android:background="@drawable/circle_outline" android:src="@drawable/ic_arrow_down" android:tint="@color/label"
-            android:importantForAccessibility="no" />
-        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:layout_marginStart="14dp" android:orientation="vertical">
-            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="@string/main_receive" android:textSize="16sp" android:textColor="@color/label" />
-            <TextView android:id="@+id/svcState" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="1dp" android:textSize="12sp" android:textColor="@color/secondary"
-                android:maxLines="2" android:ellipsize="end" />
+    <com.choidev.tailhop.GlassCard android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginStart="16dp" android:layout_marginEnd="16dp" android:orientation="vertical"
+        android:showDividers="middle" android:divider="@drawable/divider_row">
+        <LinearLayout android:id="@+id/addRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="60dp" android:orientation="horizontal" android:gravity="center_vertical"
+            android:paddingStart="14dp" android:paddingEnd="16dp"
+            android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+            <ImageView style="@style/RowTile" android:importantForAccessibility="no" android:src="@drawable/ic_plus" />
+            <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                android:layout_marginStart="16dp" android:text="@string/main_new_device" android:textSize="15sp"
+                android:fontFamily="sans-serif-medium" android:textColor="@color/label" />
+            <ImageView android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/ic_qr"
+                android:tint="@color/secondary" android:importantForAccessibility="no" />
         </LinearLayout>
-        <androidx.appcompat.widget.SwitchCompat android:id="@+id/receiveSwitch"
-            android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp"
-            android:contentDescription="@string/main_receive" />
-    </LinearLayout>
 
-    <!-- 클라우드(1.8.0): PC의 클라우드 폴더 보기·받기·올리기 -->
-    <LinearLayout android:id="@+id/cloudRow" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:minHeight="60dp" android:orientation="horizontal" android:gravity="center_vertical"
-        android:paddingStart="20dp" android:paddingEnd="20dp" android:paddingTop="6dp" android:paddingBottom="6dp"
-        android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
-        <ImageView android:layout_width="40dp" android:layout_height="40dp" android:padding="10dp"
-            android:background="@drawable/circle_outline" android:src="@drawable/ic_cloud" android:tint="@color/label"
-            android:importantForAccessibility="no" />
-        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:layout_marginStart="14dp" android:orientation="vertical">
-            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="@string/main_cloud" android:textSize="16sp" android:textColor="@color/label" />
-            <TextView android:id="@+id/cloudSub" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="1dp" android:textSize="12sp" android:textColor="@color/secondary"
-                android:text="@string/main_cloud_sub" android:maxLines="2" android:ellipsize="end" />
+        <!-- 수신 켜기/끄기: 끄면 수신 서비스(포트·상시 알림)가 멈추고 보내기만 된다 -->
+        <LinearLayout android:id="@+id/receiveRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="64dp" android:orientation="horizontal" android:gravity="center_vertical"
+            android:paddingStart="14dp" android:paddingEnd="14dp" android:paddingTop="8dp" android:paddingBottom="8dp"
+            android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+            <ImageView style="@style/RowTile" android:importantForAccessibility="no" android:src="@drawable/ic_arrow_down" />
+            <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                android:layout_marginStart="16dp" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="@string/main_receive" android:textSize="15sp" android:fontFamily="sans-serif-medium"
+                    android:textColor="@color/label" />
+                <TextView android:id="@+id/svcState" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp" android:textSize="13sp" android:textColor="@color/secondary"
+                    android:maxLines="2" android:ellipsize="end" />
+            </LinearLayout>
+            <androidx.appcompat.widget.SwitchCompat android:id="@+id/receiveSwitch"
+                android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp"
+                android:contentDescription="@string/main_receive" />
         </LinearLayout>
-        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_chevron_right"
-            android:tint="@color/secondary" android:importantForAccessibility="no" />
-    </LinearLayout>
 
-    <TextView android:id="@+id/devHeader" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:paddingStart="20dp" android:paddingTop="18dp" android:paddingBottom="6dp"
-        android:text="@string/main_devices" android:textSize="13sp" android:textStyle="bold" android:textColor="@color/secondary" />
+        <!-- 클라우드(1.8.0): PC의 클라우드 폴더 보기·받기·올리기 -->
+        <LinearLayout android:id="@+id/cloudRow" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="64dp" android:orientation="horizontal" android:gravity="center_vertical"
+            android:paddingStart="14dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp"
+            android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+            <ImageView style="@style/RowTile" android:importantForAccessibility="no" android:src="@drawable/ic_cloud" />
+            <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                android:layout_marginStart="16dp" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="@string/main_cloud" android:textSize="15sp" android:fontFamily="sans-serif-medium"
+                    android:textColor="@color/label" />
+                <TextView android:id="@+id/cloudSub" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp" android:textSize="13sp" android:textColor="@color/secondary"
+                    android:text="@string/main_cloud_sub" android:maxLines="2" android:ellipsize="end" />
+            </LinearLayout>
+            <ImageView android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/ic_chevron_right"
+                android:tint="@color/secondary" android:importantForAccessibility="no" />
+        </LinearLayout>
+    </com.choidev.tailhop.GlassCard>
+
+    <TextView android:id="@+id/devHeader" style="@style/SectionHeader" android:text="@string/main_devices" />
 
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
-        <androidx.recyclerview.widget.RecyclerView android:id="@+id/devices"
-            android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false"
-            android:paddingBottom="16dp" />
-        <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="match_parent"
-            android:orientation="vertical" android:gravity="center" android:padding="32dp" android:visibility="gone">
-            <ImageView android:layout_width="72dp" android:layout_height="72dp" android:padding="20dp"
-                android:background="@drawable/circle_outline_lg" android:src="@drawable/ic_laptop"
+        <!-- 기기 목록은 내용만큼(많으면 화면 끝까지 늘어 그 안에서 스크롤) -->
+        <com.choidev.tailhop.GlassCard android:id="@+id/devCard" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_gravity="top" android:orientation="vertical"
+            android:layout_marginStart="16dp" android:layout_marginEnd="16dp" android:layout_marginBottom="16dp">
+            <androidx.recyclerview.widget.RecyclerView android:id="@+id/devices"
+                android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingTop="4dp"
+                android:paddingBottom="4dp" android:clipToPadding="false" />
+        </com.choidev.tailhop.GlassCard>
+        <com.choidev.tailhop.GlassCard android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="center" android:layout_marginStart="16dp" android:layout_marginEnd="16dp"
+            android:layout_marginBottom="48dp" android:orientation="vertical" android:gravity="center_horizontal"
+            android:paddingStart="24dp" android:paddingEnd="24dp" android:paddingTop="28dp" android:paddingBottom="24dp"
+            android:visibility="gone">
+            <ImageView android:layout_width="56dp" android:layout_height="56dp" android:padding="14dp"
+                android:background="@drawable/bg_icon_tile" android:src="@drawable/ic_laptop"
                 android:tint="@color/label" android:importantForAccessibility="no" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="20dp" android:text="@string/main_empty_title" android:textSize="26sp"
-                android:textStyle="bold" android:textColor="@color/label" android:gravity="center" />
+                android:layout_marginTop="18dp" android:text="@string/main_empty_title" android:textSize="22sp"
+                android:textStyle="bold" android:textColor="@color/label" android:gravity="center" android:letterSpacing="-0.01" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:gravity="center" android:textSize="15sp" android:textColor="@color/secondary"
-                android:text="@string/main_empty_sub" />
+                android:layout_marginTop="8dp" android:gravity="center" android:textSize="14sp" android:textColor="@color/secondary"
+                android:lineSpacingExtra="2dp" android:text="@string/main_empty_sub" />
             <Button android:id="@+id/qrBtn" style="@style/Btn.Primary" android:layout_width="wrap_content"
-                android:layout_weight="0" android:layout_marginTop="24dp" android:paddingStart="28dp"
-                android:paddingEnd="28dp" android:text="@string/main_scan_qr" />
-        </LinearLayout>
+                android:layout_weight="0" android:layout_marginTop="20dp" android:text="@string/main_scan_qr" />
+        </com.choidev.tailhop.GlassCard>
     </FrameLayout>
 </LinearLayout>

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 보내기 버튼: shadcn Button default(아이콘 크기), rounded-md 6dp. 쓸 글이 없으면 흐림 -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
-  <item android:state_enabled="false"><shape android:shape="oval"><solid android:color="@color/sendDisabled"/></shape></item>
-  <item><shape android:shape="oval"><solid android:color="@color/accent"/></shape></item>
+    <item android:state_enabled="false"><shape android:shape="rectangle"><solid android:color="@color/sendDisabled" /><corners android:radius="6dp" /></shape></item>
+    <item><shape android:shape="rectangle"><solid android:color="@color/accent" /><corners android:radius="6dp" /></shape></item>
 </selector>

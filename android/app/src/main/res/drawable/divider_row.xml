@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 유리 카드 안 줄 사이 머리카락 선(아이콘 칸 뒤부터) -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:insetLeft="66dp">
+    <shape android:shape="rectangle"><solid android:color="@color/separator" /><size android:height="1dp" /></shape>
+</inset>

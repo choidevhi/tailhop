@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 체크 상자의 체크 표시: ic_check(Lucide check)와 같은 선을 onAccent 색으로(체크 상자 안에서 밝은·어두운 화면 모두 보이게) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M20,6L9,17L4,12"
+        android:strokeColor="@color/onAccent"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

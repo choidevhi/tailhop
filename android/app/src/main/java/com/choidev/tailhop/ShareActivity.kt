@@ -110,10 +110,12 @@ class ShareActivity : AppCompatActivity() {
             maxLines = 10
             ellipsize = TextUtils.TruncateAt.END
             textSize = 15f
+            setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.label)) // 유리 창 위 본문 대비(4.5:1)
         })
         box.addView(TextView(this).apply {
             this.text = getString(R.string.share_confirm_target)
             textSize = 13f
+            setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.secondary))
             setPadding(0, (16 * d).toInt(), 0, (4 * d).toInt())
         })
         val current = Store.load(this)?.pcIp

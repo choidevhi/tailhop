@@ -18,8 +18,8 @@ android {
         applicationId = "com.choidev.tailhop"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.9.0"
+        versionCode = 10
+        versionName = "1.9.1"
     }
 
     signingConfigs {

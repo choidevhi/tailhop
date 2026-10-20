@@ -62,6 +62,7 @@ class CloudActivity : AppCompatActivity() {
     private lateinit var crumbsScroll: HorizontalScrollView
     private lateinit var crumbs: LinearLayout
     private lateinit var list: RecyclerView
+    private lateinit var listCard: View
     private lateinit var empty: View
     private lateinit var emptyIcon: ImageView
     private lateinit var emptyTitle: TextView
@@ -112,6 +113,7 @@ class CloudActivity : AppCompatActivity() {
         crumbsScroll = findViewById(R.id.crumbsScroll)
         crumbs = findViewById(R.id.crumbs)
         list = findViewById(R.id.list)
+        listCard = findViewById(R.id.listCard)
         empty = findViewById(R.id.empty)
         emptyIcon = findViewById(R.id.emptyIcon)
         emptyTitle = findViewById(R.id.emptyTitle)
@@ -297,8 +299,7 @@ class CloudActivity : AppCompatActivity() {
             title.text = getString(R.string.cloud_title)
             subtitle.text = getString(R.string.cloud_pick_sub)
             Store.all(this).forEach { rows += Row.Pc(it, pcStates[it.pcIp] ?: PcState.CHECKING) }
-            adapter.rows = rows
-            adapter.notifyDataSetChanged()
+            setRows(rows)
             showEmpty(false)
             return
         }
@@ -321,13 +322,19 @@ class CloudActivity : AppCompatActivity() {
             rows += if (err != null) Row.Note(getString(R.string.cloud_load_failed), err, true)
             else Row.Note(getString(R.string.cloud_empty), getString(R.string.cloud_empty_sub), false)
         }
-        adapter.rows = rows
-        adapter.notifyDataSetChanged()
+        setRows(rows)
         if (nothing && jobs.isEmpty()) {
             if (err != null) setEmpty(R.drawable.ic_cloud, getString(R.string.cloud_load_failed), err, true)
             else setEmpty(R.drawable.ic_folder, getString(R.string.cloud_empty), getString(R.string.cloud_empty_sub), false)
             showEmpty(true)
         } else showEmpty(false)
+    }
+
+    /** 목록을 바꾼다. 줄이 없으면 유리 카드도 숨긴다(빈 테두리만 남지 않게). */
+    private fun setRows(rows: List<Row>) {
+        adapter.rows = rows
+        adapter.notifyDataSetChanged()
+        listCard.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun setEmpty(icon: Int, t: String, sub: String, retry: Boolean) {

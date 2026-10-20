@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shadcn Switch 손잡이 색: 켜짐/꺼짐(어두운 화면에서 꺼진 손잡이가 트랙에 묻히지 않게 values-night에서 밝게) -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true" android:color="@color/switchThumbOn" />
+    <item android:color="@color/switchThumbOff" />
+</selector>

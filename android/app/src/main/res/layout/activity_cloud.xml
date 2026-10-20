@@ -1,57 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 클라우드(1.8.0): PC 고르기 → 폴더 보기. 머리는 대화방과 같은 모양, 아래에 경로(빵 부스러기)와 목록. -->
+<!-- 클라우드(1.8.0, 1.9.0 유리 디자인): PC 고르기 → 폴더 보기. 떠 있는 유리 위 막대, 경로 알약, 목록 유리 카드. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:orientation="vertical" android:background="@color/bg">
-    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp"
-        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="4dp" android:paddingEnd="8dp">
-        <ImageButton android:id="@+id/backBtn" android:layout_width="48dp" android:layout_height="48dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_back" android:tint="@color/label"
+    android:orientation="vertical">
+    <com.choidev.tailhop.GlassCard android:layout_width="match_parent" android:layout_height="56dp"
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="6dp">
+        <ImageButton android:id="@+id/backBtn" style="@style/IconBtn" android:src="@drawable/ic_back"
             android:contentDescription="@string/chat_back" />
         <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
-            android:orientation="vertical" android:layout_marginStart="4dp">
+            android:orientation="vertical" android:layout_marginStart="6dp">
             <TextView android:id="@+id/title" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:textSize="16sp" android:textStyle="bold" android:textColor="@color/label"
+                android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="@color/label"
                 android:maxLines="1" android:ellipsize="end" android:accessibilityHeading="true" />
             <TextView android:id="@+id/subtitle" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:textSize="12sp" android:textColor="@color/secondary" android:maxLines="1" android:ellipsize="end" />
         </LinearLayout>
-        <ImageButton android:id="@+id/newFolderBtn" android:layout_width="44dp" android:layout_height="44dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_folder_plus" android:tint="@color/label"
-            android:padding="11dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_new_folder" />
-        <ImageButton android:id="@+id/uploadBtn" android:layout_width="44dp" android:layout_height="44dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_cloud_upload" android:tint="@color/label"
-            android:padding="11dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_upload" />
-        <ImageButton android:id="@+id/refreshBtn" android:layout_width="44dp" android:layout_height="44dp"
-            android:background="@drawable/bg_row_press" android:src="@drawable/ic_refresh" android:tint="@color/label"
-            android:padding="12dp" android:scaleType="fitCenter" android:contentDescription="@string/cloud_refresh" />
-    </LinearLayout>
+        <ImageButton android:id="@+id/newFolderBtn" style="@style/IconBtn" android:src="@drawable/ic_folder_plus"
+            android:contentDescription="@string/cloud_new_folder" />
+        <ImageButton android:id="@+id/uploadBtn" style="@style/IconBtn" android:src="@drawable/ic_cloud_upload"
+            android:contentDescription="@string/cloud_upload" />
+        <ImageButton android:id="@+id/refreshBtn" style="@style/IconBtn" android:src="@drawable/ic_refresh"
+            android:padding="11dp" android:contentDescription="@string/cloud_refresh" />
+    </com.choidev.tailhop.GlassCard>
 
-    <!-- 지금 폴더까지의 경로. 조각을 누르면 그 폴더로 간다. 구분은 벡터 아이콘(ic_chevron_right) -->
+    <!-- 지금 폴더까지의 경로(유리 알약). 조각을 누르면 그 폴더로 간다. 구분은 벡터 아이콘(ic_chevron_right) -->
     <HorizontalScrollView android:id="@+id/crumbsScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:scrollbars="none" android:fillViewport="false">
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+        android:background="@drawable/bg_glass" android:scrollbars="none" android:fillViewport="false">
         <LinearLayout android:id="@+id/crumbs" android:layout_width="wrap_content" android:layout_height="40dp"
-            android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="16dp" />
+            android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="10dp" />
     </HorizontalScrollView>
 
-    <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
-        <androidx.recyclerview.widget.RecyclerView android:id="@+id/list"
-            android:layout_width="match_parent" android:layout_height="match_parent" android:clipToPadding="false"
-            android:paddingBottom="16dp" />
-        <LinearLayout android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_gravity="center" android:orientation="vertical" android:gravity="center" android:padding="32dp"
+    <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:layout_marginTop="8dp">
+        <com.choidev.tailhop.GlassCard android:id="@+id/listCard" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_gravity="top" android:orientation="vertical"
+            android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginBottom="12dp">
+            <androidx.recyclerview.widget.RecyclerView android:id="@+id/list"
+                android:layout_width="match_parent" android:layout_height="wrap_content" android:clipToPadding="false"
+                android:paddingTop="4dp" android:paddingBottom="4dp" />
+        </com.choidev.tailhop.GlassCard>
+        <com.choidev.tailhop.GlassCard android:id="@+id/empty" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="center" android:layout_marginStart="24dp" android:layout_marginEnd="24dp"
+            android:layout_marginBottom="48dp" android:orientation="vertical" android:gravity="center_horizontal"
+            android:paddingStart="24dp" android:paddingEnd="24dp" android:paddingTop="28dp" android:paddingBottom="24dp"
             android:visibility="gone">
-            <ImageView android:id="@+id/emptyIcon" android:layout_width="64dp" android:layout_height="64dp"
-                android:padding="18dp" android:background="@drawable/circle_outline_lg" android:src="@drawable/ic_cloud"
+            <ImageView android:id="@+id/emptyIcon" android:layout_width="56dp" android:layout_height="56dp"
+                android:padding="15dp" android:background="@drawable/bg_icon_tile" android:src="@drawable/ic_cloud"
                 android:tint="@color/label" android:importantForAccessibility="no" />
             <TextView android:id="@+id/emptyTitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="18dp" android:textSize="22sp" android:textStyle="bold"
+                android:layout_marginTop="18dp" android:textSize="20sp" android:textStyle="bold" android:letterSpacing="-0.01"
                 android:textColor="@color/label" android:gravity="center" />
             <TextView android:id="@+id/emptySub" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:textSize="15sp" android:textColor="@color/secondary" android:gravity="center" />
+                android:layout_marginTop="8dp" android:textSize="14sp" android:textColor="@color/secondary" android:gravity="center" />
             <Button android:id="@+id/emptyBtn" style="@style/Btn.Tinted" android:layout_width="wrap_content"
-                android:layout_weight="0" android:layout_marginTop="20dp" android:paddingStart="28dp"
-                android:paddingEnd="28dp" android:text="@string/cloud_retry" android:visibility="gone" />
-        </LinearLayout>
+                android:layout_weight="0" android:layout_marginTop="20dp" android:text="@string/cloud_retry" android:visibility="gone" />
+        </com.choidev.tailhop.GlassCard>
     </FrameLayout>
 </LinearLayout>

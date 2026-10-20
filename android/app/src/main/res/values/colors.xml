@@ -1,26 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- shadcn/ui zinc 테마의 색 토큰(밝은 화면). 어두운 화면은 values-night. -->
-    <color name="bg">#FFFFFF</color>
     <color name="card">#FFFFFF</color>
     <color name="label">#09090B</color>
-    <color name="secondary">#71717A</color>
+    <color name="secondary">#6B6B74</color>
     <color name="header">#71717A</color>
     <color name="separator">#E4E4E7</color>
     <color name="accent">#18181B</color>
-    <color name="accentTint">#F4F4F5</color>
     <color name="onAccent">#FAFAFA</color>
     <color name="green">#16A34A</color>
-    <color name="red">#EF4444</color>
+    <color name="red">#DC2626</color>
     <color name="orange">#D97706</color>
     <color name="gray">#A1A1AA</color>
     <color name="field">#F4F4F5</color>
     <color name="pressed">#0F000000</color>
     <color name="launcherBg">#181E2C</color>
-    <color name="bubbleOut">#F4F4F5</color>
     <color name="bubbleIn">#00000000</color>
-    <color name="composerBg">#FFFFFF</color>
-    <color name="composerBorder">#E4E4E7</color>
-    <color name="sendDisabled">#8C8C8D</color>
-    <color name="iconCircle">#F4F4F5</color>
+    <color name="sendDisabled">#8018181B</color>
+    <!-- 유리(glassmorphism, 1.9.0): 배경 오로라 위에 반투명 면. 글자 대비는 WCAG AA(본문 4.5:1)를 지킨다 -->
+    <color name="glass">#B8FFFFFF</color>
+    <color name="glassStrong">#EBFFFFFF</color>
+    <color name="glassBorder">#A6FFFFFF</color>
+    <color name="glassShadow">#0A000000</color>
+    <color name="backdropBase">#FAFAFA</color>
+    <color name="blob1">#80C4B5FD</color>
+    <color name="blob1Clear">#00C4B5FD</color>
+    <color name="blob2">#667DD3FC</color>
+    <color name="blob2Clear">#007DD3FC</color>
+    <color name="blob3">#5CF9A8D4</color>
+    <color name="blob3Clear">#00F9A8D4</color>
+    <color name="blob4">#526EE7B7</color>
+    <color name="blob4Clear">#006EE7B7</color>
+    <color name="onAccentSub">#B3FAFAFA</color>
+    <color name="onAccentCircle">#29FFFFFF</color>
+    <color name="switchThumbOn">#FFFFFF</color>
+    <color name="switchThumbOff">#FFFFFF</color>
+    <!-- 배경 위에 바로 놓이는 회색 글자(유리 위보다 진하게, 4.5:1) -->
+    <color name="secondaryOnBackdrop">#52525B</color>
+    <!-- 유리 위 아이콘 칸: 뒤가 비치는 옅은 덧칠(어느 배경 위에서도 칸이 보이게) -->
+    <color name="tile">#0F09090B</color>
+    <!-- 팝업 메뉴: 창 뒤를 흐릴 수 없어 불투명(shadcn popover처럼, 뒤 글자가 비쳐 겹쳐 보이지 않게) -->
+    <color name="popup">#FFFFFFFF</color>
 </resources>

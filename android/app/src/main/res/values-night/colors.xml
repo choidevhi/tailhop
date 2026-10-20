@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#09090B</color>
     <color name="card">#09090B</color>
     <color name="label">#FAFAFA</color>
     <color name="secondary">#A1A1AA</color>
     <color name="header">#A1A1AA</color>
     <color name="separator">#27272A</color>
     <color name="accent">#FAFAFA</color>
-    <color name="accentTint">#27272A</color>
     <color name="onAccent">#18181B</color>
     <color name="green">#22C55E</color>
     <color name="red">#F87171</color>
@@ -15,10 +13,26 @@
     <color name="gray">#52525B</color>
     <color name="field">#27272A</color>
     <color name="pressed">#1FFFFFFF</color>
-    <color name="bubbleOut">#27272A</color>
     <color name="bubbleIn">#00000000</color>
-    <color name="composerBg">#09090B</color>
-    <color name="composerBorder">#27272A</color>
-    <color name="sendDisabled">#828283</color>
-    <color name="iconCircle">#27272A</color>
+    <color name="sendDisabled">#80FAFAFA</color>
+    <color name="glass">#B318181B</color>
+    <color name="glassStrong">#E618181B</color>
+    <color name="glassBorder">#1AFFFFFF</color>
+    <color name="glassShadow">#40000000</color>
+    <color name="backdropBase">#09090B</color>
+    <color name="blob1">#8C5B21B6</color>
+    <color name="blob1Clear">#005B21B6</color>
+    <color name="blob2">#80075985</color>
+    <color name="blob2Clear">#00075985</color>
+    <color name="blob3">#66831843</color>
+    <color name="blob3Clear">#00831843</color>
+    <color name="blob4">#73115E59</color>
+    <color name="blob4Clear">#00115E59</color>
+    <color name="onAccentSub">#B318181B</color>
+    <color name="onAccentCircle">#14000000</color>
+    <color name="switchThumbOn">#18181B</color>
+    <color name="switchThumbOff">#A1A1AA</color>
+    <color name="secondaryOnBackdrop">#A1A1AA</color>
+    <color name="tile">#17FFFFFF</color>
+    <color name="popup">#FF18181B</color>
 </resources>

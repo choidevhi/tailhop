@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shadcn Switch 손잡이: 20dp 원(트랙 안 2dp 여백) -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:inset="2dp">
+    <shape android:shape="oval"><solid android:color="@color/switch_thumb" /><size android:width="20dp" android:height="20dp" /></shape>
+</inset>
