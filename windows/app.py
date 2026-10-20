@@ -10,14 +10,13 @@ import datetime as dt
 import hashlib
 import os
 import queue
-import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import winreg
-from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -29,6 +28,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import bridge
 import i18n
+import outbox
 import protocol as p
 import store
 import thumbs
@@ -37,7 +37,7 @@ from i18n import t
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -242,8 +242,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.node = Node(lambda kind, data: self.events.put((kind, data)))
         self.lang_var = tk.StringVar(value=self.node.settings.get("language", i18n.SYSTEM))
         i18n.set_language(self.lang_var.get())
-        self.busy = False
-        self.jobs: deque = deque()  # 보내는 중에 들어온 보내기 (이름표, 할 일). 앞의 것이 끝나면 차례로 보낸다
+        self.active: dict[str, tuple[int, int, str]] = {}  # 보내는 중인 건: id: (보낸 바이트, 전체, 이름)
+        self.pending_labels: dict[str, ctk.CTkLabel] = {}  # 대화방의 대기 말풍선 상태 줄(진행률만 바꿀 때)
         self.qr_window: ctk.CTkToplevel | None = None
         self.join_window: ctk.CTkToplevel | None = None
         self.status: tuple[str, dict] = ("status.checking", {})
@@ -277,6 +277,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if self.hotkey_var.get():
             self._start_hotkey(quiet=True)
         self.after(100, self._poll)
+        self.after(1000, self._tick_pending)
         if start_hidden:
             self.withdraw()
         if request is not None and request.has_work:
@@ -428,8 +429,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._on_typing()
         self._refresh_all()
         self._update_tray()
-        if self.busy:
-            self._show_progress(t("progress.sending"), None)
+        self._show_active()
 
     def _toggle_sidebar(self) -> None:
         if self.sidebar_open:
@@ -485,21 +485,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if target is None:
             return
         name = dt.datetime.now().strftime("clipboard_%Y%m%d_%H%M%S.png")
-        folder = Path(tempfile.mkdtemp(prefix="tailhop_"))
-        path = folder / name
+        # 다 보낼 때까지(다시 시도 포함) 보낼 곳 목록의 작업 폴더에 둔다. 끝나면 목록이 지운다.
+        job_id, path = self.node.outbox.owned_file(name)
         try:
             image.convert("RGBA" if "A" in image.getbands() else "RGB").save(path, "PNG")
         finally:
             image.close()  # 큰 스크린샷을 들고 있지 않는다
-
-        def job() -> None:
-            try:
-                self.node.send_file(target, path)
-            finally:
-                path.unlink(missing_ok=True)
-                folder.rmdir()
-
-        self._run_bg(t("progress.sending_clipboard_image"), job)
+        self.node.outbox.add_owned(target, job_id, path)
 
     def _on_enter(self, event) -> str | None:
         if event.state & 0x1:  # Shift+Enter는 줄바꿈
@@ -666,9 +658,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _render_history(self, scroll_to_end: bool = True) -> None:
         for child in self.log.winfo_children():
             child.destroy()
+        self.pending_labels.clear()
         all_items = self._items_for(self.current) if self.current else []
         items = all_items[-self.visible_rows:]
-        if not items:
+        pending = self.node.outbox.jobs_for(self.current) if self.current else []
+        if not items and not pending:
             self._render_empty()
             return
         hidden = len(all_items) - len(items)
@@ -683,7 +677,80 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 last_day = when.date()
                 ctk.CTkLabel(self.log, text=date_label(when), font=font(11), text_color=SECONDARY).pack(pady=(16, 4))
             self._message(item, when)
+        for job in pending:
+            self._pending_message(job)
         self.after(80, lambda: self.log._parent_canvas.yview_moveto(1.0 if scroll_to_end else 0.0))
+
+    def _pending_status(self, job: outbox.Job) -> tuple[str, tuple]:
+        """대기 말풍선 아래 줄: (문장, 색)."""
+        if job.state == outbox.SENDING:
+            if job.total:
+                return t("pending.sending", pct=int(job.done * 100 / max(1, job.total)),
+                         done=human_size(job.done), total=human_size(job.total)), SECONDARY
+            return t("pending.sending_start"), SECONDARY
+        if job.state == outbox.FAILED:
+            return t("pending.failed", error=job.error), RED
+        if job.attempts == 0:
+            return t("pending.queued"), SECONDARY
+        secs = max(0, int(job.next_at - time.time() + 0.99))
+        return t("pending.retry", secs=secs, error=job.error), AMBER
+
+    def _pending_message(self, job: outbox.Job) -> None:
+        """아직 못 보낸 건(보내는 중·다시 시도 대기·실패): 내 쪽 말풍선을 흐리게, 아래에 상태와 다시·취소."""
+        row = ctk.CTkFrame(self.log, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=4)
+        box = ctk.CTkFrame(row, fg_color=BUBBLE, corner_radius=18)
+        box.pack(anchor="e")
+        if job.kind == "text":
+            text = job.text or ""
+            text = text if len(text) <= TEXT_PREVIEW else text[:TEXT_PREVIEW].rstrip() + " …"
+            ctk.CTkLabel(box, text=text, font=font(13), text_color=SECONDARY, justify="left", wraplength=420,
+                         anchor="w").pack(padx=14, pady=8)
+        else:
+            inner = ctk.CTkFrame(box, fg_color="transparent")
+            inner.pack(padx=12, pady=10)
+            round_icon(inner, "folder" if job.kind == "folder" else "file", 38, fg=MAIN_BG,
+                       color=SECONDARY).pack(side="left")
+            names = ctk.CTkFrame(inner, fg_color="transparent")
+            names.pack(side="left", padx=(10, 4))
+            name = job.name + (".zip" if job.kind == "folder" else "")
+            name = name if len(name) <= 44 else name[:41] + "…"
+            ctk.CTkLabel(names, text=name, font=font(13, "bold"), text_color=SECONDARY, anchor="w",
+                         height=19).pack(anchor="w")
+            if job.size:
+                ctk.CTkLabel(names, text=human_size(job.size), font=font(11), text_color=SECONDARY,
+                             anchor="w", height=15).pack(anchor="w")
+        meta = ctk.CTkFrame(row, fg_color="transparent")
+        meta.pack(anchor="e", padx=2)
+        text, color = self._pending_status(job)
+        icon_name = "triangle-alert" if job.state == outbox.FAILED else "clock"
+        status = ctk.CTkLabel(meta, text=" " + text, font=font(10), text_color=color, height=22,
+                              image=icon(icon_name, 12, color), compound="left", wraplength=360, justify="right")
+        status.pack(side="left", padx=(0, 4))
+        self.pending_labels[job.id] = status
+        if job.state != outbox.SENDING:
+            ghost_button(meta, "rotate-ccw", lambda j=job.id: self.node.outbox.retry(j), size=24).pack(side="left")
+        ghost_button(meta, "x", lambda j=job.id: self._cancel_job(j), size=24).pack(side="left")
+
+    def _cancel_job(self, job_id: str) -> None:
+        job = self.node.outbox.get(job_id)
+        if job is None:
+            return
+        if job.state == outbox.SENDING and not messagebox.askyesno(APP_NAME, t("dialog.cancel_sending"), parent=self):
+            return
+        self.node.outbox.cancel(job_id)
+
+    def _tick_pending(self) -> None:
+        """다시 시도까지 남은 초를 1초마다 바꾼다(대화방을 다시 그리지 않고 글자만)."""
+        try:
+            for job_id, label in list(self.pending_labels.items()):
+                job = self.node.outbox.get(job_id)
+                if job is None or not label.winfo_exists():
+                    continue
+                text, color = self._pending_status(job)
+                label.configure(text=" " + text, text_color=color)
+        finally:
+            self.after(1000, self._tick_pending)
 
     def _show_more(self) -> None:
         self.visible_rows += HISTORY_PAGE
@@ -834,8 +901,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._show_progress(text, 1.0)
         self.after(2000, self._hide_progress)
 
+    def _show_active(self) -> None:
+        """보내는 중인 건이 있으면 아래 진행 줄에 보인다(여러 기기로 보내면 가장 최근 것)."""
+        if not self.active:
+            return
+        done, total, name = next(reversed(self.active.values()))
+        if total:
+            self._show_progress(t("progress.sending_named", name=name, done=human_size(done),
+                                  total=human_size(total)), done / max(1, total))
+        else:
+            self._show_progress(t("progress.sending"), None)
+
     def _hide_progress(self) -> None:
-        if not self.busy and self.progress_row.winfo_exists():
+        if not self.active and self.progress_row.winfo_exists():
             self.progress.stop()
             self.progress_row.pack_forget()
 
@@ -851,50 +929,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         pairing = self.node.pairings.get(stable_id)
         return pairing.name if pairing else ""
 
-    def _run_bg(self, label: str, job) -> None:
-        """보내기는 한 번에 하나씩. 보내는 중이면 대기열에 넣고 앞의 것이 끝나면 이어서 보낸다."""
-        if self.busy:
-            self.jobs.append((label, job))
-            self._notify(t("notify.queued", count=len(self.jobs)))
-            return
-        self.busy = True
-        self._show_progress(label, None)
-
-        def work() -> None:
-            try:
-                # 막 켜진 앱(명령줄·'보내기' 메뉴로 켰을 때): Tailscale 주소를 얻을 때까지 15초까지 기다린다
-                waited = threading.Event()
-                for _ in range(150):
-                    if self.node.me is not None:
-                        break
-                    waited.wait(0.1)
-                job()
-                self.events.put(("job_done", {}))
-            except Exception as exc:  # noqa: BLE001
-                self.events.put(("job_error", {"error": str(exc)}))
-
-        threading.Thread(target=work, daemon=True).start()
-
     def _send_paths(self, paths: list[Path], stable_id: str | None = None) -> None:
-        """파일은 그대로, 폴더는 임시 zip(<폴더 이름>.zip)으로 묶어 보낸다."""
+        """보낼 곳 목록에 넣는다. 파일은 그대로, 폴더는 보낼 때 zip(<폴더 이름>.zip)으로 묶는다.
+        상대가 꺼져 있으면 켜질 때까지 다시 시도한다(docs/PROTOCOL.md §11.3)."""
         target = self._target(stable_id)
         items = [x for x in paths if x.is_file() or x.is_dir()]
         if target is None or not items:
             return
-
-        def job() -> None:
-            for item in items:
-                if item.is_file():
-                    self.node.send_file(target, item)
-                    continue
-                self.events.put(("packing", {"name": item.name}))
-                folder = Path(tempfile.mkdtemp(prefix="tailhop_"))
-                try:
-                    self.node.send_file(target, bridge.pack_folder(item, folder), record_path=item)
-                finally:
-                    shutil.rmtree(folder, ignore_errors=True)
-
-        self._run_bg(t("progress.sending_files", name=self._target_name(target), count=len(items)), job)
+        self.node.outbox.add_paths(target, items)
 
     def _on_drop(self, event, stable_id: str | None = None) -> str:
         self.log.configure(fg_color=MAIN_BG)
@@ -915,7 +957,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         text = self._typed_text()
         target = self._target() if text.strip() else None
         if target:
-            self._run_bg(t("progress.sending"), lambda: self.node.send_text(target, text))
+            self.node.outbox.add_text(target, text)
             self.text.delete("1.0", "end")
             self._on_typing()
 
@@ -929,8 +971,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         except tk.TclError:
             text = ""
         if text.strip():
-            self._run_bg(t("progress.sending_clipboard", name=self._target_name(target)),
-                         lambda: self.node.send_text(target, text))
+            self.node.outbox.add_text(target, text)
+            self._notify(t("notify.sending_to", name=self._target_name(target)))
             return
         try:
             clip = ImageGrab.grabclipboard()
@@ -1141,8 +1183,29 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         missing = [x for x in req.paths if not Path(x).exists()]
         if missing:
             return {"ok": False, "error": "missing", "paths": missing}
-        self.events.put(("bridge", {"request": req, "target": target}))
-        return {"ok": True, "to": self.node.pairings[target].name}
+        # 보낼 곳 목록은 여러 스레드에서 써도 된다: 여기서 바로 넣고, 기다리라면 상대가 받을 때까지 기다린다.
+        jobs = self._enqueue(req, target)
+        name = self.node.pairings[target].name
+        self.events.put(("bridge_queued", {"target": target}))
+        if not req.wait:
+            return {"ok": True, "to": name}
+        result = self.node.outbox.wait([j.id for j in jobs], req.timeout)
+        failed = [{"name": j.name or "text", "error": j.error} for j in result.values()
+                  if j is not None and j.state == outbox.FAILED]
+        pending = [j for j in result.values() if j is not None and j.state != outbox.FAILED]
+        sent = sum(1 for j in result.values() if j is None)
+        if failed or pending:
+            return {"ok": False, "error": "failed" if failed else "pending", "to": name, "sent": sent,
+                    "failed": failed, "pending": len(pending)}
+        return {"ok": True, "to": name, "sent": sent, "delivered": True}
+
+    def _enqueue(self, req: bridge.Request, target: str) -> list[outbox.Job]:
+        jobs = []
+        if req.text is not None and req.text.strip():
+            jobs.append(self.node.outbox.add_text(target, req.text))
+        if req.paths:
+            jobs.extend(self.node.outbox.add_paths(target, [Path(x) for x in req.paths]))
+        return jobs
 
     def _do_request(self, req: bridge.Request, target: str | None = None) -> None:
         if target is None:
@@ -1152,11 +1215,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._show()
                 messagebox.showwarning(APP_NAME, t("dialog.no_device", name=req.to or ""), parent=self)
                 return
-        text = req.text
-        if text is not None and text.strip():
-            self._run_bg(t("progress.sending"), lambda: self.node.send_text(target, text))
-        if req.paths:
-            self._send_paths([Path(x) for x in req.paths], target)
+        self._enqueue(req, target)
         self._notify(t("notify.sending_to", name=self._target_name(target)))
 
     def _set_language(self, choice: str) -> None:
@@ -1249,11 +1308,6 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.lift()
         self.focus_force()
 
-    def _next_job(self) -> None:
-        if self.jobs and not self.busy:
-            label, job = self.jobs.popleft()
-            self._run_bg(label, job)
-
     def _quit(self) -> None:
         if self.bridge is not None:
             self.bridge.close()
@@ -1272,6 +1326,28 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         except queue.Empty:
             pass
         self.after(100, self._poll)
+
+    def _on_outbox(self, data: dict) -> None:
+        """보낼 곳 목록이 바뀜: 넣음·보내기 시작·다시 시도 대기·실패·끝(gone)."""
+        job_id, peer = data["id"], data["peer"]
+        if data.get("gone"):
+            self.active.pop(job_id, None)
+            if not self.active:
+                self._hide_progress()
+        job = self.node.outbox.get(job_id)
+        if job is not None and job.state != outbox.SENDING:
+            self.active.pop(job_id, None)
+        if data.get("failed") and job is not None:
+            what = job.name or t("pending.text")
+            message = t("notify.send_failed", peer=self._target_name(peer), name=what, error=job.error)
+            if self.winfo_viewable() and peer == self.current:
+                self._flash(message)
+            else:  # 창이 숨어 있을 때(명령줄·단축키) 보이지 않는 대화상자 대신 알림
+                self._notify(message)
+        elif job is not None and job.state == outbox.WAITING and job.attempts == 1:
+            self._notify(t("notify.waiting", peer=self._target_name(peer)))  # 처음 실패했을 때만 한 번
+        if peer == self.current:
+            self._render_history()
 
     def _handle_event(self, kind: str, data: dict) -> None:
         if kind == "listening":
@@ -1322,33 +1398,34 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._render_devices()
             self._render_history()
         elif kind == "progress":
+            if data["dir"] == "out":
+                return  # 보내기 진행은 보낼 곳 목록(outbox_progress)으로 보인다
             total = max(1, data["total"])
             key = "progress.receiving_bytes" if data["dir"] == "in" else "progress.sending_bytes"
             self._show_progress(t(key, done=human_size(data["done"]), total=human_size(data["total"])),
                                 data["done"] / total)
-        elif kind == "job_done":
-            self.busy = False
-            self._flash(t("flash.sent"))
-            self._next_job()
-        elif kind == "job_error":
-            self.busy = False
-            self._hide_progress()
-            if self.winfo_viewable():
-                messagebox.showerror(APP_NAME, t("dialog.send_failed", error=data["error"]), parent=self)
-            else:  # 창이 숨어 있을 때(명령줄·단축키) 보이지 않는 대화상자 대신 알림
-                self._notify(t("dialog.send_failed", error=data["error"]))
-            self._next_job()
+        elif kind == "outbox":
+            self._on_outbox(data)
+        elif kind == "outbox_progress":
+            self.active[data["id"]] = (data["done"], data["total"], data.get("name") or "")
+            self._show_active()
+            label = self.pending_labels.get(data["id"])
+            if label is not None and label.winfo_exists():
+                pct = int(data["done"] * 100 / max(1, data["total"]))
+                label.configure(text=" " + t("pending.sending", pct=pct, done=human_size(data["done"]),
+                                             total=human_size(data["total"])), text_color=SECONDARY)
+        elif kind == "bridge_queued":
+            self._notify(t("notify.sending_to", name=self._target_name(data["target"])))
         elif kind == "thumb":
             self._on_thumb(data["src"], data["out"])
         elif kind == "packing":
-            self._show_progress(t("progress.packing", name=data["name"]), None)
+            if data.get("peer") == self.current:
+                self._show_progress(t("progress.packing", name=data["name"]), None)
         elif kind == "hotkey":
             if self.current is None:
                 self._notify(t("dialog.connect_first"))
             else:
                 self._send_clipboard()
-        elif kind == "bridge":
-            self._do_request(data["request"], data["target"])
         elif kind == "join_error":
             if self.join_window is not None and self.join_window.winfo_exists():
                 self.join_window.on_error(data["error"])
@@ -1388,11 +1465,19 @@ def _print_reply(req: bridge.Request, reply: dict) -> int:
         for d in reply.get("devices", []):
             _say(f"{'*' if d['current'] else ' '} {d['name']}  ({kind_label(d['kind'])}, {d['id']})")
     if reply.get("ok"):
-        if not req.list_devices:
-            _say(t("cli.sending", name=reply.get("to", "")))
+        if req.list_devices:
+            return 0
+        _say(t("cli.delivered", name=reply.get("to", "")) if reply.get("delivered")
+             else t("cli.sending", name=reply.get("to", "")))
         return 0
 
     error = reply.get("error")
+    if error in ("failed", "pending"):
+        for item in reply.get("failed", []):
+            _say(t("cli.item_failed", name=item.get("name", ""), error=item.get("error", "")))
+        if reply.get("pending"):
+            _say(t("cli.pending", name=reply.get("to", ""), count=reply["pending"]))
+        return 1 if reply.get("failed") else 3
     if error == "no_device":
         _say(t("dialog.no_device", name=req.to or ""))
     elif error == "missing":

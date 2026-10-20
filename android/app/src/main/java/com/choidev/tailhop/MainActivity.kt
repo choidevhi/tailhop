@@ -1,13 +1,17 @@
 package com.choidev.tailhop
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -75,6 +79,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // 정해 둔 수신 중지 시간이 지났으면(알람이 늦거나 막혔어도) 여기서 다시 켠다.
         if (Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.OFF) ReceiverService.start(this)
+        SendService.resumeIfNeeded(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
         reload(); ui.post(ticker)
     }
     override fun onPause() { super.onPause(); ui.removeCallbacks(ticker) }
@@ -98,12 +103,14 @@ class MainActivity : AppCompatActivity() {
         if (Store.isPaired(this)) {
             if (Receiving.isOn(this)) m.menu.add(0, 2, 1, R.string.menu_pause_hour)
             else m.menu.add(0, 3, 1, R.string.menu_resume)
+            if (!batteryExempt(this)) m.menu.add(0, 4, 2, R.string.menu_background)
         }
         m.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> chooseLanguage()
                 2 -> setReceiving(false, Receiving.HOUR_MS)
                 3 -> setReceiving(true, null)
+                4 -> requestBatteryExemption(this)
             }
             true
         }
@@ -192,7 +199,8 @@ class MainActivity : AppCompatActivity() {
                 reload()
                 ui.postDelayed({ ReceiverService.start(this) }, 500)
                 toast(getString(R.string.pair_saved, p.pcName))
-                openChat(p.pcIp)
+                // 배터리 질문을 먼저 보이고(한 번만), 닫으면 대화방을 연다.
+                if (!askBatteryOnce { openChat(p.pcIp) }) openChat(p.pcIp)
             }
             .setNegativeButton(R.string.pair_confirm_no) { _, _ ->
                 pending.cancel { copy ->
@@ -202,6 +210,25 @@ class MainActivity : AppCompatActivity() {
                 }
                 toast(getString(R.string.pair_cancelled))
             }.show()
+    }
+
+    /**
+     * 페어링한 뒤 한 번만: 배터리 최적화에서 빼 달라고 부드럽게 묻는다. 빼 두면 앱을 열지 않아도 받기 서비스가 계속 돌고,
+     * PC가 켜졌을 때 백그라운드에서 보내기 서비스를 다시 시작할 수 있다. 거절해도 메뉴에서 다시 고를 수 있다.
+     */
+    private fun askBatteryOnce(then: () -> Unit): Boolean {
+        if (batteryExempt(this)) return false
+        val sp = getSharedPreferences("settings", MODE_PRIVATE)
+        if (sp.getBoolean(K_BATTERY_ASKED, false)) return false
+        sp.edit().putBoolean(K_BATTERY_ASKED, true).apply()
+        AlertDialog.Builder(this).setTitle(R.string.battery_title)
+            .setMessage(R.string.battery_message)
+            // 대화방을 먼저 열고 그 위에 시스템 확인 창을 띄운다.
+            .setPositiveButton(R.string.battery_allow) { _, _ -> then(); requestBatteryExemption(this) }
+            .setNegativeButton(R.string.battery_later) { _, _ -> then() }
+            .setOnCancelListener { then() }
+            .show()
+        return true
     }
 
     private fun openChat(ip: String) {
@@ -247,6 +274,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val K_BATTERY_ASKED = "batteryAsked"
+
+        fun batteryExempt(ctx: Context): Boolean =
+            ctx.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(ctx.packageName) == true
+
+        /**
+         * 배터리 최적화 제외 요청(시스템 확인 창). 이 앱은 스토어가 아니라 직접 설치하는 앱이고, 페어링한 내 기기의 연결을
+         * 기다리는 것이 핵심 기능이라 직접 묻는다. 창을 띄울 수 없는 기기는 배터리 최적화 목록 화면을 연다.
+         */
+        @SuppressLint("BatteryLife")
+        fun requestBatteryExemption(ctx: Context) {
+            val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
+            try { ctx.startActivity(ask) } catch (e: Exception) {
+                try { ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (x: Exception) { }
+            }
+        }
+
         fun fileIcon(ctx: Context, color: Int): android.graphics.drawable.Drawable? {
             val d = androidx.appcompat.content.res.AppCompatResources.getDrawable(ctx, R.drawable.ic_doc)?.mutate() ?: return null
             val px = (14 * ctx.resources.displayMetrics.density).toInt()
@@ -266,6 +310,9 @@ class MainActivity : AppCompatActivity() {
                 .setMessage(R.string.unpair_message)
                 .setPositiveButton(R.string.unpair_confirm) { _, _ ->
                     History.clearDevice(ctx, p.pcIp)
+                    SendService.forgetDevice(ctx, p.pcIp)
+                    val app = ctx.applicationContext
+                    Thread { Transfers.forgetPeer(app, p.pcIp) }.start() // 받다 만 조각 파일도 지운다
                     Store.remove(ctx, p.pcIp)
                     ReceiverService.stop(ctx)
                     if (Store.isPaired(ctx)) ReceiverService.start(ctx)

@@ -42,6 +42,13 @@ class PauseReceiver : BroadcastReceiver() {
     }
 }
 
+/** 보내기 알림의 "모두 취소" (exported=false). 실패한 건은 대화방에 남는다. */
+class SendCancelReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        SendService.cancelAll(context)
+    }
+}
+
 /** 정해 둔 수신 중지 시간이 끝남(알람, exported=false). 백그라운드라 서비스를 못 켜면 탭해서 켜는 알림을 띄운다. */
 class ResumeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

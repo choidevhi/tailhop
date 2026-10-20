@@ -1,10 +1,7 @@
 package com.choidev.tailhop
 
 import android.Manifest
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentValues
 import android.content.Context
@@ -12,13 +9,16 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.MediaScannerConnection
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
 import android.provider.MediaStore
-import android.webkit.MimeTypeMap
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -28,20 +28,36 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.Semaphore
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * 포그라운드 수신 서비스. 자기 Tailscale IPv4:47101에만 bind 하고 페어링된 PC IP만 받는다.
  * 수신 중지(Receiving)면 시작하지 않고, 켜져 있으면 멈춘다 — 대기 소켓과 상시 알림이 함께 사라진다. 보내기는 이 서비스와 상관없다.
+ *
+ * 형식은 specialUse다(1.7.0). dataSync는 Android 15+에서 하루 6시간으로 묶이고(시간이 다 되면 onTimeout으로 멈춤)
+ * BOOT_COMPLETED에서 시작할 수도 없어, 앱을 열기 전까지 말없이 못 받는 일이 생겼다.
+ * Tailscale 주소가 바뀌었는지는 네트워크 콜백으로 안다(15초마다 깨던 것을 없앰). 5분마다 한 번만 따로 확인한다.
  */
 class ReceiverService : Service() {
     @Volatile private var running = false
     @Volatile private var server: ServerSocket? = null
+    /** 지금 bind 한 주소(바뀌면 대기 소켓을 닫아 다시 bind). */
+    @Volatile private var boundIp: Inet4Address? = null
+    /** 네트워크가 바뀌어 주소를 다시 볼 일이 생김(소켓을 닫은 이유가 오류가 아님). */
+    @Volatile private var netDirty = false
+    private val netLock = Object()
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var timer: ScheduledExecutorService? = null
     private var thread: Thread? = null
     private val slots = Semaphore(MAX_CONN)
     private lateinit var guard: ReplayGuard
@@ -60,25 +76,33 @@ class ReceiverService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val n = Notifs.service(this, getString(R.string.status_listening))
         try {
-            ServiceCompat.startForeground(this, Notifs.ID_SERVICE, n,
-                if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0)
+            ServiceCompat.startForeground(this, Notifs.ID_SERVICE, n, foregroundType())
         } catch (e: Exception) {
             stopSelf(); return START_NOT_STICKY
         }
         if (Store.load(this) == null || !Receiving.isOn(this)) { stopSelf(); return START_NOT_STICKY }
         if (!running) {
             running = true
+            timer = Executors.newSingleThreadScheduledExecutor()
+            watchNetwork()
             thread = Thread({ loop() }, "tailhop-accept").also { it.start() }
         }
         return START_STICKY
     }
 
+    /** specialUse는 하루 시간 제한이 없어 불리지 않는다. 다른 형식의 제한이 오면 멈춘다(멈추지 않으면 앱이 강제 종료된다). */
     override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }
 
     override fun onDestroy() {
         running = false
         try { server?.close() } catch (e: Exception) { }
         thread?.interrupt()
+        synchronized(netLock) { netLock.notifyAll() }
+        netCallback?.let { cb ->
+            try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) } catch (e: Exception) { }
+        }
+        netCallback = null
+        timer?.shutdownNow()
         state = State.OFF
         super.onDestroy()
     }
@@ -92,31 +116,78 @@ class ReceiverService : Service() {
         nm.notify(Notifs.ID_SERVICE, Notifs.service(this, statusText(this)))
     }
 
+    /**
+     * 어떤 네트워크든 생기거나 없어지거나 주소가 바뀌면 Tailscale 주소를 다시 본다. VPN(Tailscale)도 받도록
+     * NOT_VPN·INTERNET 조건을 뺀다. Tailscale이 주소를 붙이는 때가 콜백보다 조금 늦을 수 있어 3초 뒤 한 번 더 본다.
+     */
+    private fun watchNetwork() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val req = NetworkRequest.Builder()
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = netChanged()
+            override fun onLost(network: Network) = netChanged()
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = netChanged()
+        }
+        try { cm.registerNetworkCallback(req, cb); netCallback = cb } catch (e: Exception) { }
+    }
+
+    private fun netChanged() {
+        recheckAddress()
+        try { timer?.schedule({ recheckAddress() }, 3, TimeUnit.SECONDS) } catch (e: Exception) { }
+    }
+
+    /** 주소가 바뀌었으면 대기 소켓을 닫아(accept가 풀림) 새 주소로 다시 bind 하게 한다. 꺼져 있던 동안의 대기도 깨운다. */
+    private fun recheckAddress() {
+        if (!running) return
+        val now = Net.tailscaleIp()
+        val bound = boundIp
+        if (now == bound) return
+        netDirty = true
+        if (bound != null) try { server?.close() } catch (e: Exception) { }
+        synchronized(netLock) { netLock.notifyAll() }
+    }
+
+    /** 네트워크가 바뀔 때까지(또는 ms가 지날 때까지) 기다린다. */
+    private fun waitNet(ms: Long) {
+        synchronized(netLock) {
+            if (!netDirty && running) try { netLock.wait(ms) } catch (e: InterruptedException) { }
+        }
+    }
+
     private fun loop() {
+        Transfers.prune(this) // 24시간 지난 조각 정리
         while (running) {
+            netDirty = false
             val ip = Net.tailscaleIp()
             if (ip == null) {
                 setState(State.TAILSCALE_OFF)
-                sleepQuietly(10_000); continue
+                waitNet(SAFETY_RECHECK_MS); continue
             }
             try {
                 ServerSocket().use { ss ->
                     server = ss
                     ss.reuseAddress = true
                     ss.bind(InetSocketAddress(ip, Protocol.PHONE_PORT), 8)
-                    ss.soTimeout = 15_000
+                    boundIp = ip
+                    // accept는 연결이 올 때까지 잔다. 주소가 바뀌면 네트워크 콜백이 소켓을 닫는다. 이 시간은 안전용 확인뿐.
+                    ss.soTimeout = SAFETY_RECHECK_MS.toInt()
                     setState(State.LISTENING, "${ip.hostAddress}:${Protocol.PHONE_PORT}")
+                    if (Net.tailscaleIp() != ip) return@use // bind 하는 사이 바뀜
                     while (running) {
                         val sock = try { ss.accept() } catch (e: SocketTimeoutException) {
-                            // Tailscale 주소가 바뀌거나 꺼졌으면 다시 bind.
+                            Transfers.prune(this)
                             if (Net.tailscaleIp() != ip) break else continue
                         }
                         handOff(sock)
                     }
                 }
             } catch (e: Exception) {
-                if (running) { setState(State.BIND_FAILED); sleepQuietly(10_000) }
-            } finally { server = null }
+                // 콜백이 주소가 바뀌어 닫은 것이면 바로 다시 bind, 아니면 잠시 뒤 다시.
+                if (running && !netDirty) { setState(State.BIND_FAILED); sleepQuietly(10_000) }
+            } finally { server = null; boundIp = null }
         }
     }
 
@@ -148,11 +219,17 @@ class ReceiverService : Service() {
                 throw ProtocolException("bad_header")
             }
             val type = header.opt("type")
-            if (header.opt("v") != 1 || (type != "text" && type != "file")) throw ProtocolException("unsupported")
+            if (header.opt("v") != 1 || type !in TYPES) throw ProtocolException("unsupported")
             guard.checkAndAdd(header.opt("id"), header.opt("ts"))
+            // 인증된 메시지가 왔다 = 그 PC가 켜져 있다. 그 PC로 보낼 대기 건을 바로 깨운다(§11.3).
+            SendService.wake(this, pairing.pcIp)
             val from = Protocol.cleanDeviceName(header.optString("from", "")).ifEmpty { pairing.pcName }
-            if (type == "text") receiveText(ch, header, from, pairing.pcIp) else receiveFile(ch, header, from, pairing.pcIp)
-            ch.send("{\"ok\":true}".toByteArray(), last = true)
+            val reply = when (type) {
+                "hello" -> hello(ch, header, pairing.pcIp)
+                "text" -> { receiveText(ch, header, from, pairing.pcIp); OK }
+                else -> { receiveFile(ch, header, from, pairing.pcIp, sock); OK }
+            }
+            ch.send(reply.toString().toByteArray(), last = true)
         } catch (e: AuthException) {
             throw e // 태그 실패: 응답 없이 즉시 끊음
         } catch (e: ProtocolException) {
@@ -171,24 +248,50 @@ class ReceiverService : Service() {
         } catch (x: Exception) { }
     }
 
+    /** §11.1 hello: 아는 확장과, xfer·size를 주면 받다 만 조각 길이(have)·이미 받았는지(done). 상태를 바꾸지 않는다. */
+    private fun hello(ch: Channel, header: JSONObject, dev: String): JSONObject {
+        val (body, last) = ch.recv()
+        if (body.isNotEmpty() || !last) throw ProtocolException("bad_header")
+        // xfer·size는 선택이다. 형식이 틀리면 거부하지 않고 조각이 없는 것으로 답한다(PC와 같다).
+        val xfer = Xfer.field(header, "xfer")
+        val size = Xfer.jsonLong(Xfer.field(header, "size"))?.takeIf { it in 0..Protocol.MAX_FILE }
+        if (!Xfer.isValid(xfer) || size == null) return Xfer.helloReply(0, false)
+        val (have, done) = Transfers.helloState(this, dev, xfer as String, size)
+        return Xfer.helloReply(have, done)
+    }
+
     private fun receiveText(ch: Channel, header: JSONObject, from: String, dev: String) {
         val text = header.opt("text") as? String
         if (text == null || text.toByteArray(Charsets.UTF_8).size > Protocol.MAX_TEXT) throw ProtocolException("bad_text")
+        val xfer = Xfer.field(header, "xfer")
+        if (xfer != null && !Xfer.isValid(xfer)) throw ProtocolException("bad_xfer")
         val (body, last) = ch.recv()
         if (body.isNotEmpty() || !last) throw ProtocolException("bad_text_format")
         val id = Protocol.newId()
-        History.add(this, HistoryItem(id, System.currentTimeMillis(), true, true, text, null,
-            text.toByteArray(Charsets.UTF_8).size.toLong(), null, dev))
+        synchronized(TEXT_LOCK) {
+            // 응답이 사라져 PC가 같은 xfer로 다시 보낸 글: 다시 기록·알림하지 않고 ok만(§11.2).
+            if (xfer != null && Transfers.isDone(this, dev, xfer as String)) return
+            History.add(this, HistoryItem(id, System.currentTimeMillis(), true, true, text, null,
+                text.toByteArray(Charsets.UTF_8).size.toLong(), null, dev))
+            if (xfer != null) Transfers.finish(this, dev, xfer as String) // 답하기 전에: 응답이 사라져도 두 번 받지 않게
+        }
         Notifs.text(this, id, from, text)
     }
 
-    private fun receiveFile(ch: Channel, header: JSONObject, from: String, dev: String) {
+    private fun receiveFile(ch: Channel, header: JSONObject, from: String, dev: String, sock: Socket) {
         val sizeAny = header.opt("size")
         val size = (sizeAny as? Number)?.takeIf { sizeAny is Int || sizeAny is Long }?.toLong()
         val rawName = header.opt("name") as? String
         if (size == null || size < 0 || size > Protocol.MAX_FILE || rawName == null) throw ProtocolException("bad_file_info")
-        if (freeBytes() < size + DISK_RESERVE) throw ProtocolException("disk_full")
         val name = Protocol.sanitizeFilename(rawName)
+        val xfer = Xfer.field(header, "xfer")
+        if (xfer != null) {
+            if (!Xfer.isValid(xfer)) throw ProtocolException("bad_xfer")
+            receiveXferFile(ch, header, from, dev, sock, xfer as String, size, name)
+            return
+        }
+        // xfer 없는 예전 방식(§4): 실패하면 지운다.
+        if (freeBytes() < size + DISK_RESERVE) throw ProtocolException("disk_full")
         val sink = if (Build.VERSION.SDK_INT >= 29) MediaStoreSink(this, name) else LegacySink(this, name)
         var ok = false
         try {
@@ -213,9 +316,80 @@ class ReceiverService : Service() {
         }
     }
 
+    /**
+     * §11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 조각 전체를 확인한다.
+     * 끊기거나 시간 초과면 조각을 남기고(24시간), 규칙 위반·해시 불일치·저장 실패면 지운다.
+     * 같은 조각은 한 연결만 쓴다: 같은 PC가 같은 xfer로 새로 연결하면(앞 연결이 끊긴 걸 상대가 먼저 알았다) 앞 연결을 닫고 이어받는다.
+     */
+    private fun receiveXferFile(ch: Channel, header: JSONObject, from: String, dev: String, sock: Socket,
+                                xfer: String, size: Long, name: String) {
+        val offset = Xfer.offset(header, size)
+        if (freeBytes() < size - offset + DISK_RESERVE) throw ProtocolException("disk_full")
+        XferLocks.exclusive(TransferBook.key(dev, xfer), sock) {
+            val md = Xfer.sha256()
+            val loc: String
+            val out: OutputStream
+            if (offset > 0) {
+                val rec = Transfers.claim(this, dev, xfer, size) ?: throw ProtocolException("resume_lost")
+                loc = rec.loc
+                out = try { PartFiles.openAt(this, loc, offset, md) } catch (e: ProtocolException) {
+                    Transfers.drop(this, dev, xfer, loc); throw e
+                }
+            } else {
+                loc = PartFiles.create(this, name)
+                Transfers.begin(this, dev, xfer, size, loc, name)
+                out = try { PartFiles.openAt(this, loc, 0, md) } catch (e: ProtocolException) {
+                    Transfers.drop(this, dev, xfer, loc); throw ProtocolException("storage")
+                }
+            }
+            val committed = try {
+                receiveParts(ch, out, md, offset, size)
+                PartFiles.commit(this, loc, name)
+            } catch (e: Exception) {
+                if (isNetDrop(e)) Transfers.keep(this, dev, xfer, loc) else Transfers.drop(this, dev, xfer, loc)
+                throw e
+            }
+            Transfers.finish(this, dev, xfer)
+            val (uri, finalName) = committed
+            val id = Protocol.newId()
+            History.add(this, HistoryItem(id, System.currentTimeMillis(), true, false, null, finalName, size, uri.toString(), dev))
+            Notifs.file(this, id, from, finalName, uri, PartFiles.mime(finalName))
+        }
+    }
+
+    /** 데이터 프레임(last=0, 비어 있으면 안 됨)을 끝까지 쓰고 트레일러(last=1)의 해시와 맞춘다. */
+    private fun receiveParts(ch: Channel, out: OutputStream, md: MessageDigest, offset: Long, size: Long) {
+        var got = offset
+        var trailer: ByteArray? = null
+        out.use { o ->
+            while (true) {
+                val (data, last) = ch.recv()
+                if (last) { trailer = data; break }
+                if (data.isEmpty()) throw ProtocolException("bad_xfer")
+                got += data.size
+                if (got > size) throw ProtocolException("file_too_big")
+                try { o.write(data) } catch (e: IOException) { throw storageError() }
+                md.update(data)
+            }
+            try { o.flush() } catch (e: IOException) { throw storageError() }
+        }
+        if (got != size) throw ProtocolException("file_incomplete")
+        val sha = Xfer.parseTrailer(trailer ?: throw ProtocolException("bad_xfer"))
+        if (!MessageDigest.isEqual(sha.toByteArray(), Xfer.hex(md.digest()).toByteArray())) throw ProtocolException("hash_mismatch")
+    }
+
+    /** 저장 중 쓰기 실패: 공간이 거의 없으면 disk_full, 아니면 storage. */
+    private fun storageError() = ProtocolException(if (freeBytes() < 2L * Protocol.CHUNK) "disk_full" else "storage")
+
+    /** 끊김·시간 초과(조각을 남길 실패)인지. 규칙 위반(ProtocolException)·태그 실패·저장 실패는 아니다. */
+    private fun isNetDrop(e: Throwable): Boolean = when (e) {
+        is ProtocolException -> e.code == "disconnected"
+        is IOException -> true // SocketTimeoutException, 연결 리셋, 다른 연결이 이어받으려고 닫음
+        else -> false
+    }
+
     private abstract class Sink(val name: String) {
-        val mime: String = MimeTypeMap.getSingleton()
-            .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+        val mime: String = PartFiles.mime(name)
         abstract val out: OutputStream
         abstract var finalName: String
         abstract fun commit(): Uri
@@ -272,22 +446,16 @@ class ReceiverService : Service() {
             @Suppress("DEPRECATION")
             dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "TailHop")
             if (!dir.isDirectory && !dir.mkdirs()) throw ProtocolException("storage_folder")
-            synchronized(LOCK) {
-                target = unique(name)
+            synchronized(LegacyNames.LOCK) {
+                target = LegacyNames.unique(dir, name)
                 part = File(dir, target.name + ".part")
                 out = java.nio.file.Files.newOutputStream(part.toPath(), java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
             }
         }
 
-        private fun unique(n: String): File {
-            var f = File(dir, n); var i = 1
-            while (f.exists() || File(dir, f.name + ".part").exists()) { f = File(dir, Protocol.numberedName(n, i++)) }
-            return f
-        }
-
         override fun commit(): Uri {
-            synchronized(LOCK) {
-                if (target.exists()) target = unique(target.name)
+            synchronized(LegacyNames.LOCK) {
+                if (target.exists()) target = LegacyNames.unique(dir, target.name)
                 if (!part.renameTo(target)) throw ProtocolException("storage")
             }
             finalName = target.name
@@ -296,8 +464,35 @@ class ReceiverService : Service() {
         }
 
         override fun abort() { part.delete() }
+    }
 
-        companion object { val LOCK = Any() }
+    /**
+     * 조각 하나는 한 연결만 쓴다. 새 연결이 오면 앞 연결의 소켓을 닫아(그쪽은 끊김으로 보고 조각을 남긴 뒤 잠금을 푼다)
+     * 기다렸다가 이어 쓴다. 앞 연결은 상대가 이미 버린 연결이다(같은 PC가 같은 xfer로 다시 왔다).
+     */
+    private object XferLocks {
+        private class Entry { val lock = ReentrantLock(); var sock: Socket? = null; var users = 0 }
+        private val map = HashMap<String, Entry>()
+
+        fun exclusive(key: String, sock: Socket, block: () -> Unit) {
+            val (e, old) = synchronized(map) {
+                val e = map.getOrPut(key) { Entry() }
+                e.users++
+                val old = e.sock
+                e.sock = sock
+                e to old
+            }
+            try {
+                if (old != null) closeQuietly(old)
+                if (!e.lock.tryLock(15, TimeUnit.SECONDS)) throw IOException("busy") // 응답 없이 끊음 → 상대가 다시 시도
+                try { block() } finally { e.lock.unlock() }
+            } finally {
+                synchronized(map) {
+                    if (e.sock === sock) e.sock = null
+                    if (--e.users == 0) map.remove(key)
+                }
+            }
+        }
     }
 
     enum class State { OFF, LISTENING, TAILSCALE_OFF, BIND_FAILED }
@@ -312,8 +507,23 @@ class ReceiverService : Service() {
         const val MAX_CONN = 4
         /** 파일을 받은 뒤에도 남겨 둘 여유(PC와 같은 64 MiB). */
         const val DISK_RESERVE = 64L * 1024 * 1024
+        /** 네트워크 콜백을 놓쳤을 때를 위한 안전용 주소 확인 간격. */
+        private const val SAFETY_RECHECK_MS = 5 * 60_000L
+        private val TYPES = setOf("text", "file", "hello")
+        private val OK = JSONObject().put("ok", true)
+        /** 같은 xfer의 글이 동시에 두 번 와도 한 번만 기록한다. */
+        private val TEXT_LOCK = Any()
         @Volatile var state: State = State.OFF
         @Volatile var address: String = ""
+
+        /**
+         * startForeground에 줄 형식. API 34+는 manifest와 같은 specialUse를 꼭 줘야 한다.
+         * API 29–33에는 specialUse 상수가 없다(0x40000000은 34에서 생김). 이때 0(NONE)을 준다 — 그 버전의 AMS는
+         * "준 형식이 manifest 형식의 부분집합인가"만 보고(0 & x == 0이라 늘 통과) 형식별 권한 검사는 34부터다.
+         * API 26–28은 형식 인자가 없다(ServiceCompat이 두 인자 startForeground를 부른다).
+         */
+        fun foregroundType(): Int =
+            if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
 
         /** 화면·알림에 보일 수신 상태(ctx의 언어로). */
         fun statusText(ctx: Context): String {
@@ -337,91 +547,5 @@ class ReceiverService : Service() {
 
         private fun sleepQuietly(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
         private fun closeQuietly(s: Socket) { try { s.close() } catch (e: Exception) { } }
-    }
-}
-
-object Notifs {
-    const val CH_SERVICE = "service"
-    const val CH_RECEIVED = "received"
-    const val ID_SERVICE = 1
-    private val nextId = AtomicInteger(100)
-
-    const val ID_RESUME = 2
-
-    /** 채널 이름은 지금 언어로(언어를 바꾸면 다음 호출 때 이름이 바뀐다). */
-    fun ensureChannels(ctx: Context) {
-        val nm = ctx.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CH_SERVICE, ctx.getString(R.string.notif_channel_service), NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(CH_RECEIVED, ctx.getString(R.string.notif_channel_received), NotificationManager.IMPORTANCE_DEFAULT))
-    }
-
-    private fun flags() = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-
-    fun service(ctx: Context, text: String): Notification {
-        val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), flags())
-        val pause = PendingIntent.getBroadcast(ctx, 1, Intent(ctx, PauseReceiver::class.java), flags())
-        return NotificationCompat.Builder(ctx, CH_SERVICE)
-            .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("TailHop")
-            .setContentText(text)
-            .setOngoing(true)
-            .setContentIntent(open)
-            .addAction(0, ctx.getString(R.string.notif_pause), pause)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
-    }
-
-    private fun canPost(ctx: Context) = Build.VERSION.SDK_INT < 33 ||
-        ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-
-    fun text(ctx: Context, historyId: String, from: String, text: String) {
-        if (!canPost(ctx)) return
-        val nid = nextId.incrementAndGet()
-        val copy = Intent(ctx, CopyReceiver::class.java).putExtra(CopyReceiver.EXTRA_ID, historyId).putExtra(CopyReceiver.EXTRA_NID, nid)
-        val pi = PendingIntent.getBroadcast(ctx, nid, copy, flags())
-        val preview = if (text.length > 200) text.take(200) + "…" else text
-        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
-            .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(ctx.getString(R.string.notif_text_title, from))
-            .setContentText(preview)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setContentIntent(pi)
-            .addAction(0, ctx.getString(R.string.notif_copy), pi)
-            .setAutoCancel(true)
-            .build()
-        try { ctx.getSystemService(NotificationManager::class.java).notify(nid, n) } catch (e: SecurityException) { }
-    }
-
-    /** 정해 둔 수신 중지가 끝났는데 백그라운드라 서비스를 못 켰을 때: 탭하면 앱을 열어 다시 켠다. */
-    fun resumePrompt(ctx: Context) {
-        if (!canPost(ctx)) return
-        ensureChannels(ctx)
-        val open = PendingIntent.getActivity(ctx, ID_RESUME, Intent(ctx, MainActivity::class.java), flags())
-        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
-            .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(ctx.getString(R.string.notif_resume_title))
-            .setContentText(ctx.getString(R.string.notif_resume_text))
-            .setContentIntent(open)
-            .setAutoCancel(true)
-            .build()
-        try { ctx.getSystemService(NotificationManager::class.java).notify(ID_RESUME, n) } catch (e: SecurityException) { }
-    }
-
-    fun file(ctx: Context, historyId: String, from: String, name: String, uri: Uri, mime: String) {
-        if (!canPost(ctx)) return
-        val nid = nextId.incrementAndGet()
-        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pi = PendingIntent.getActivity(ctx, nid, view, flags())
-        val n = NotificationCompat.Builder(ctx, CH_RECEIVED)
-            .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(ctx.getString(R.string.notif_file_title, from))
-            .setContentText(ctx.getString(R.string.notif_file_text, name))
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setContentIntent(pi)
-            .setAutoCancel(true)
-            .build()
-        try { ctx.getSystemService(NotificationManager::class.java).notify(nid, n) } catch (e: SecurityException) { }
     }
 }

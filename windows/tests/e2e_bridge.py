@@ -3,7 +3,8 @@
 - 앱은 임시 APPDATA로 띄운다(실제 %APPDATA%\\TailHop, 실행 중인 설치본, 탐색기 '보내기' 폴더는 건드리지 않는다).
   설정 폴더가 다르면 중복 실행 방지 이름도 달라서 설치본과 함께 뜬다.
 - 받는 쪽은 이 PC의 Tailscale IP에 다른 포트로 띄운 Node(가짜 PC "FakeB")다. whois·소켓은 실제 것을 쓴다.
-- 확인: --list, 파일 + 폴더(zip) + 텍스트를 한 번에 보내기, 없는 기기·없는 파일 거부, 탐색기 '보내기' 바로 가기.
+- 확인: --list, 파일 + 폴더(zip) + 텍스트를 한 번에 보내기(도착할 때까지 기다림), 없는 기기·없는 파일 거부,
+  (1.7.0) 상대가 꺼져 있으면 종료 코드 3으로 끝나고 상대가 다시 켜지면 앱이 저절로 보냄, 탐색기 '보내기' 바로 가기.
 - 빌드한 exe로 확인하려면 TAILHOP_EXE=dist\TailHop\TailHop.exe 를 준다. 앱은 트레이로만(--hidden) 띄운다.
 """
 import os
@@ -38,6 +39,15 @@ class SelfIdOverride:
     is_tailscale_ip = staticmethod(tsnet.is_tailscale_ip)
 
 
+def make_b(port=0):
+    n = nodemod.Node(lambda k, d: events.append((k, d)), app_dir=tmp / "B" / "app",
+                     ts=SelfIdOverride("fakeB", "FakeB"), port=port)
+    n.settings["save_dir"] = str(tmp / "B" / "recv")
+    n.pairings[me.stable_id] = store.Pairing(ip=me.ip, port=47100, name="DevApp", stable_id=me.stable_id,
+                                             secret=secret, kind="pc", role="joiner")
+    return n
+
+
 def wait_for(cond, timeout=20.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -52,7 +62,7 @@ APP_CMD = [os.environ["TAILHOP_EXE"]] if os.environ.get("TAILHOP_EXE") else [sys
 
 def run_cli(env, *args):
     done = subprocess.run([*APP_CMD, *args], env=env, capture_output=True,
-                          text=True, errors="replace", timeout=30)  # 콘솔·파이프는 시스템 코드 페이지
+                          text=True, errors="replace", timeout=120)  # 콘솔·파이프는 시스템 코드 페이지
     print(f"$ TailHop {' '.join(args)}  -> exit {done.returncode}\n{done.stdout.strip()}")
     return done
 
@@ -60,11 +70,7 @@ def run_cli(env, *args):
 me = tsnet.self_info()
 secret = os.urandom(32)
 events = []
-b = nodemod.Node(lambda k, d: events.append((k, d)), app_dir=tmp / "B" / "app",
-                 ts=SelfIdOverride("fakeB", "FakeB"), port=0)
-b.settings["save_dir"] = str(tmp / "B" / "recv")
-b.pairings[me.stable_id] = store.Pairing(ip=me.ip, port=47100, name="DevApp", stable_id=me.stable_id,
-                                         secret=secret, kind="pc", role="joiner")
+b = make_b()
 b.start()
 assert wait_for(lambda: b.listener is not None), "B listen"
 
@@ -85,8 +91,8 @@ try:
     big = os.urandom(3 * 1024 * 1024 + 7)
     (src / "사진.bin").write_bytes(big)
     sent = run_cli(env, "--to", "fake", "--text", "명령줄에서 안녕", str(src / "사진.bin"), str(src / "폴더"))
-    assert sent.returncode == 0, sent.stdout
-    assert wait_for(lambda: sum(1 for k, _ in events if k == "received") == 3, 60), events
+    assert sent.returncode == 0, sent.stdout  # 0 = 셋 다 도착했다고 상대가 답했다
+    assert sum(1 for k, _ in events if k == "received") == 3, events
 
     recv = tmp / "B" / "recv"
     assert (recv / "사진.bin").read_bytes() == big
@@ -97,6 +103,19 @@ try:
     leftovers = [x for x in Path(tempfile.gettempdir()).glob("tailhop_*") if x.is_dir() and x != tmp
                  and (x / "폴더.zip").exists()]
     assert not leftovers, leftovers
+
+    # 상대가 꺼져 있으면: 기다리다 3으로 끝나고, 앱은 계속 다시 시도하다가 상대가 켜지면 보낸다
+    port_b = b.port
+    b.stop()
+    assert wait_for(lambda: b.listener is None)
+    offline = run_cli(env, "--to", "FakeB", "--timeout", "4", "--text", "꺼져 있을 때 보낸 글")
+    assert offline.returncode == 3, offline.stdout
+    b = make_b(port_b)
+    b.start()
+    assert wait_for(lambda: any(k == "received" and d.get("text") == "꺼져 있을 때 보낸 글" for k, d in events), 90), "retry"
+    quick = run_cli(env, "--to", "FakeB", "--no-wait", "--text", "기다리지 않음")
+    assert quick.returncode == 0, quick.stdout
+    assert wait_for(lambda: any(k == "received" and d.get("text") == "기다리지 않음" for k, d in events), 30)
 
     assert run_cli(env, "--to", "nobody", "--text", "x").returncode == 1
     assert run_cli(env, str(src / "없는 파일.txt")).returncode == 1

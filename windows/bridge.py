@@ -1,6 +1,8 @@
 """실행 중인 앱에 바깥에서 보내기를 맡기는 길(1.6.0).
 
-- 명령줄: `TailHop.exe [--to 기기] [--text 글] [파일·폴더...]`, `TailHop.exe --list`
+- 명령줄: `TailHop.exe [--to 기기] [--text 글] [--no-wait] [--timeout 초] [파일·폴더...]`, `TailHop.exe --list`
+  (1.7.0) 기본으로 상대가 받았다고 답할 때까지 기다린다(기본 60초). 종료 코드 0 = 모두 받음, 1 = 실패,
+  3 = 아직 못 보냄(상대가 꺼져 있음 등, 앱이 계속 다시 시도한다). `--no-wait`이면 넘기기만 하고 0.
 - 탐색기 '보내기' 메뉴: Windows가 고른 파일들을 명령줄 인자로 넘긴다(위와 같은 길).
 - 앱이 이미 떠 있으면 새 프로세스는 창을 띄우지 않고, 127.0.0.1의 로컬 소켓으로 요청만 넘기고 끝난다.
   포트와 토큰은 bridge.json(이 사용자만 읽는 ACL)에 있고, 토큰이 맞지 않으면 아무것도 하지 않는다.
@@ -28,6 +30,8 @@ import store
 BRIDGE_FILE = "bridge.json"
 MAX_REQUEST = 4 * 1024 * 1024  # 텍스트 1 MiB(UTF-8 최대 4바이트/글자)와 경로 목록을 넉넉히 담는다
 CONNECT_TIMEOUT = 5.0
+DEFAULT_WAIT = 60.0
+MAX_WAIT = 24 * 3600.0
 SENDTO_NAME = "TailHop.lnk"
 HOTKEY_LABEL = "Ctrl+Alt+Shift+C"
 _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
@@ -42,13 +46,16 @@ class Request:
     to: str | None = None
     list_devices: bool = False
     hidden: bool = False
+    wait: bool = True  # 상대가 받을 때까지 기다린다(1.7.0). 1.6 명령줄이 보낸 요청에는 없으므로 False로 읽는다
+    timeout: float = DEFAULT_WAIT
 
     @property
     def has_work(self) -> bool:
         return bool(self.paths) or self.text is not None or self.list_devices
 
     def to_json(self) -> dict:
-        return {"paths": self.paths, "text": self.text, "to": self.to, "list": self.list_devices}
+        return {"paths": self.paths, "text": self.text, "to": self.to, "list": self.list_devices,
+                "wait": self.wait, "timeout": self.timeout}
 
 
 class ArgError(ValueError):
@@ -64,6 +71,16 @@ def parse_args(argv: list[str]) -> Request:
             req.hidden = True
         elif arg == "--list":
             req.list_devices = True
+        elif arg == "--no-wait":
+            req.wait = False
+        elif arg == "--timeout":
+            value = next(it, None)
+            try:
+                req.timeout = float(value or "")
+            except ValueError as exc:
+                raise ArgError(arg) from exc
+            if not 0 <= req.timeout <= MAX_WAIT:
+                raise ArgError(arg)
         elif arg in ("--to", "--text"):
             value = next(it, None)
             if value is None:
@@ -92,7 +109,12 @@ def request_from_json(data: dict) -> Request:
         raise ArgError("to")
     if not isinstance(listing, bool):
         raise ArgError("list")
-    return Request(paths=paths, text=text, to=to, list_devices=listing)
+    wait, timeout = data.get("wait", False), data.get("timeout", DEFAULT_WAIT)
+    if not isinstance(wait, bool):
+        raise ArgError("wait")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout <= MAX_WAIT:
+        raise ArgError("timeout")
+    return Request(paths=paths, text=text, to=to, list_devices=listing, wait=wait, timeout=float(timeout))
 
 
 def resolve_device(devices: list[tuple[str, str]], query: str | None, current: str | None) -> str | None:
@@ -206,8 +228,11 @@ class Server:
             pass
 
 
-def send_request(req: Request, app_dir: Path | None = None, timeout: float = CONNECT_TIMEOUT) -> dict:
-    """실행 중인 앱에 요청을 넘기고 응답을 돌려준다. 앱이 없거나 응답이 없으면 OSError."""
+def send_request(req: Request, app_dir: Path | None = None, timeout: float | None = None) -> dict:
+    """실행 중인 앱에 요청을 넘기고 응답을 돌려준다. 앱이 없거나 응답이 없으면 OSError.
+    받을 때까지 기다리는 요청이면 그 시간만큼 응답을 더 기다린다."""
+    if timeout is None:
+        timeout = CONNECT_TIMEOUT + (req.timeout if req.wait and not req.list_devices else 0)
     try:
         info = json.loads(_bridge_path(app_dir).read_text("utf-8"))
         port, token = int(info["port"]), str(info["token"])

@@ -61,17 +61,12 @@
     <string name="chat_send">发送</string>
     <string name="chat_connected">已连接</string>
     <string name="chat_connected_status">已连接 · %1$s</string>
-    <string name="chat_sending_files">正在发送文件 %1$d/%2$d… %3$d%%</string>
-    <string name="busy">上一个操作仍在进行中。</string>
     <string name="cant_open_file">无法打开文件（可能已被移动或删除）。</string>
     <string name="tap_to_open">%1$s · 点按打开</string>
     <string name="sent_file_to_pc">这是你发送到电脑的文件。</string>
     <string name="long_text_more">…（%1$d 个字符 · 点按复制全文）</string>
     <string name="share_nothing">没有可发送的内容。</string>
     <string name="share_pair_first">请先在 TailHop 中与电脑配对。</string>
-    <string name="share_sending">正在发送到电脑…</string>
-    <string name="share_text_sent">文字已发送。</string>
-    <string name="share_failed">发送失败：%1$s</string>
     <string name="err_auth_failed">认证失败。</string>
     <string name="err_disconnected">连接中途断开。</string>
     <string name="err_not_tailhop">不是 TailHop 连接。</string>
@@ -114,9 +109,6 @@
     <string name="err_file_too_large">文件太大（最多 4GB）。</string>
     <string name="err_file_open">无法打开文件。</string>
     <string name="err_file_changed">发送过程中文件大小发生了变化。</string>
-    <plurals name="share_files_sent">
-        <item quantity="other">已发送 %d 个文件。</item>
-    </plurals>
     <string name="pair_confirm_title">核对确认码</string>
     <string name="pair_confirm_message">%1$s (%2$s)\n\n确认码：%3$s\n\n与电脑上显示的确认码一致吗？只有一致时才连接。如果不一致，可能不是你的电脑。</string>
     <string name="pair_confirm_yes">一致，连接</string>
@@ -131,5 +123,39 @@
     <string name="err_tagged_node">TailHop 不与带标签的 Tailscale 设备（服务器、共享设备等）连接。</string>
     <plurals name="share_confirm_files">
         <item quantity="other">%d 个文件：</item>
+    </plurals>
+    <!-- 1.7.0 전송 신뢰성·보내기 목록·백그라운드 받기 -->
+    <string name="err_resume_lost">没有可续传的部分文件，需要从头重新发送。</string>
+    <string name="err_hash_mismatch">收到的文件与原文件不一致（SHA-256 不匹配）。</string>
+    <string name="err_bad_xfer">传输信息（xfer、offset 或校验和）格式不正确。</string>
+    <string name="err_file_gone">无法再读取该文件。它可能已被删除，或分享它的应用已不再允许访问。请重新分享。</string>
+    <string name="err_unpaired">已与这台电脑断开连接。</string>
+    <string name="notif_channel_send">发送</string>
+    <string name="notif_channel_send_failed">发送失败</string>
+    <string name="send_notif_sending">正在发送 %1$s… %2$d%%</string>
+    <string name="send_cancel_all">全部取消</string>
+    <string name="send_failed_title">未能发送到 %1$s</string>
+    <string name="send_queued">已加入发送列表，可在通知中查看进度。</string>
+    <string name="outbox_text">文本</string>
+    <string name="outbox_sending">正在发送… %1$d%%</string>
+    <string name="outbox_queued">等待发送</string>
+    <string name="outbox_retry_in">尚未发送 · %1$s 后重试</string>
+    <string name="outbox_failed">发送失败：%1$s</string>
+    <string name="outbox_gave_up">24 小时内未能发送。%1$s</string>
+    <string name="outbox_retry_now">立即重试</string>
+    <string name="outbox_send_again">重新发送</string>
+    <string name="outbox_cancel">取消发送</string>
+    <string name="outbox_remove">移除</string>
+    <string name="close">关闭</string>
+    <string name="menu_background">在后台始终接收</string>
+    <string name="battery_title">要在后台持续接收吗？</string>
+    <string name="battery_message">要在不打开 TailHop 的情况下接收电脑发来的内容，并完成等待中的发送，请让 TailHop 不受电池优化限制。TailHop 只等待你已配对设备的连接，几乎不耗电。</string>
+    <string name="battery_allow">允许</string>
+    <string name="battery_later">以后再说</string>
+    <plurals name="send_notif_waiting">
+        <item quantity="other">%d 项等待发送 · 连上电脑后立即发送</item>
+    </plurals>
+    <plurals name="send_notif_more">
+        <item quantity="other">另有 %d 项等待中</item>
     </plurals>
 </resources>

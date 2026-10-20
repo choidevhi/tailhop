@@ -532,12 +532,21 @@ class TwoNodeTests(unittest.TestCase):
         box = {}
 
         def phone_server():
-            c, _ = phone_srv.accept()
-            with c:
-                _, prefix = p.read_prefix(c)
-                ch2 = p.open_server(c, prefix, p.derive_key(S, p.INFO_PC_TO_PHONE))
-                box["r"] = p.receive_message(ch2, p.ReplayGuard(self.root / "pseen.json"), self.root / "phone")
-                p.send_reply(ch2, True)
+            # 예전 폰(1.5)처럼: 모르는 메시지(hello)는 unsupported로 답하고, 글은 받는다.
+            guard = p.ReplayGuard(self.root / "pseen.json")
+            while "r" not in box:
+                c, _ = phone_srv.accept()
+                with c:
+                    _, prefix = p.read_prefix(c)
+                    ch2 = p.open_server(c, prefix, p.derive_key(S, p.INFO_PC_TO_PHONE))
+                    try:
+                        got = p.receive_message(ch2, guard, self.root / "phone")
+                    except p.ProtocolError as exc:
+                        box.setdefault("refused", []).append(exc.code)
+                        p.send_reply(ch2, False, exc)
+                        continue
+                    box["r"] = got
+                    p.send_reply(ch2, True)
 
         t = threading.Thread(target=phone_server)
         t.start()
@@ -545,6 +554,8 @@ class TwoNodeTests(unittest.TestCase):
         t.join(5)
         phone_srv.close()
         self.assertEqual(box["r"].header["text"], "PC에서 폰으로")
+        self.assertEqual(box["refused"], ["unsupported"])  # hello를 모르는 폰에는 예전 방식(xfer 없이)으로 보냈다
+        self.assertNotIn("xfer", box["r"].header)
 
 
 if __name__ == "__main__":

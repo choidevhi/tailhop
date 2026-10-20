@@ -62,6 +62,17 @@ def self_info() -> SelfInfo:
     return SelfInfo(ip=ip, user_id=int(me["UserID"]), name=me.get("HostName") or "PC", stable_id=str(me.get("ID") or ""))
 
 
+def peer_ips() -> dict[str, str]:
+    """내 tailnet에 보이는 기기들의 StableID → Tailscale IPv4(페어링된 기기의 주소가 바뀌었는지 볼 때)."""
+    status = json.loads(_run("status", "--json"))
+    table: dict[str, str] = {}
+    for node in (status.get("Peer") or {}).values():
+        ip = next((a for a in node.get("TailscaleIPs") or [] if is_tailscale_ip(a)), None)
+        if node.get("ID") and ip:
+            table[str(node["ID"])] = ip
+    return table
+
+
 @dataclass(frozen=True)
 class Peer:
     """tags: 태그 노드(서버·공유 기기 등)면 ACL 태그 목록. 태그 노드는 사람 계정이 아니라 공용 'tagged-devices'

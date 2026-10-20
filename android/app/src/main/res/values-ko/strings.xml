@@ -61,17 +61,12 @@
     <string name="chat_send">보내기</string>
     <string name="chat_connected">연결됨</string>
     <string name="chat_connected_status">연결됨 · %1$s</string>
-    <string name="chat_sending_files">파일 %1$d/%2$d 보내는 중… %3$d%%</string>
-    <string name="busy">이전 작업이 진행 중입니다.</string>
     <string name="cant_open_file">파일을 열 수 없습니다(이동·삭제되었을 수 있습니다).</string>
     <string name="tap_to_open">%1$s · 탭하여 열기</string>
     <string name="sent_file_to_pc">PC로 보낸 파일이에요.</string>
     <string name="long_text_more">… (%1$d자 · 누르면 전체 복사)</string>
     <string name="share_nothing">보낼 내용이 없습니다.</string>
     <string name="share_pair_first">먼저 TailHop에서 PC와 페어링하세요.</string>
-    <string name="share_sending">PC로 보내는 중…</string>
-    <string name="share_text_sent">텍스트를 보냈습니다.</string>
-    <string name="share_failed">보내기 실패: %1$s</string>
     <string name="err_auth_failed">인증에 실패했습니다.</string>
     <string name="err_disconnected">연결이 중간에 끊겼습니다.</string>
     <string name="err_not_tailhop">TailHop 연결이 아닙니다.</string>
@@ -114,9 +109,6 @@
     <string name="err_file_too_large">파일이 너무 큽니다(최대 4GB).</string>
     <string name="err_file_open">파일을 열 수 없습니다.</string>
     <string name="err_file_changed">보내는 중 파일 크기가 바뀌었습니다.</string>
-    <plurals name="share_files_sent">
-        <item quantity="other">파일 %d개를 보냈습니다.</item>
-    </plurals>
     <string name="pair_confirm_title">확인 코드 비교</string>
     <string name="pair_confirm_message">%1$s (%2$s)\n\n확인 코드: %3$s\n\nPC에 표시된 코드와 같나요? 같을 때만 연결하세요. 다르면 내 PC가 아닐 수 있습니다.</string>
     <string name="pair_confirm_yes">같아요, 연결</string>
@@ -131,5 +123,39 @@
     <string name="err_tagged_node">태그가 붙은 Tailscale 기기(서버·공유 기기 등)와는 연결하지 않습니다.</string>
     <plurals name="share_confirm_files">
         <item quantity="other">파일 %d개:</item>
+    </plurals>
+    <!-- 1.7.0 전송 신뢰성·보내기 목록·백그라운드 받기 -->
+    <string name="err_resume_lost">이어 받을 조각이 없습니다. 처음부터 다시 보내야 합니다.</string>
+    <string name="err_hash_mismatch">받은 파일이 원본과 다릅니다(SHA-256 불일치).</string>
+    <string name="err_bad_xfer">전송 정보(xfer·offset·체크섬) 형식이 잘못되었습니다.</string>
+    <string name="err_file_gone">파일을 더 이상 읽을 수 없습니다. 지워졌거나 공유한 앱이 접근을 끝냈을 수 있습니다. 다시 공유해 주세요.</string>
+    <string name="err_unpaired">이 PC와의 연결이 해제되었습니다.</string>
+    <string name="notif_channel_send">보내기</string>
+    <string name="notif_channel_send_failed">보내기 실패</string>
+    <string name="send_notif_sending">%1$s 보내는 중… %2$d%%</string>
+    <string name="send_cancel_all">모두 취소</string>
+    <string name="send_failed_title">%1$s에 보내지 못했습니다</string>
+    <string name="send_queued">보낼 목록에 넣었습니다. 진행 상황은 알림에서 볼 수 있습니다.</string>
+    <string name="outbox_text">텍스트</string>
+    <string name="outbox_sending">보내는 중… %1$d%%</string>
+    <string name="outbox_queued">보내기 대기 중</string>
+    <string name="outbox_retry_in">아직 못 보냄 · %1$s 뒤 다시 시도</string>
+    <string name="outbox_failed">보내지 못함: %1$s</string>
+    <string name="outbox_gave_up">24시간 동안 보내지 못했습니다. %1$s</string>
+    <string name="outbox_retry_now">지금 다시 시도</string>
+    <string name="outbox_send_again">다시 보내기</string>
+    <string name="outbox_cancel">보내기 취소</string>
+    <string name="outbox_remove">지우기</string>
+    <string name="close">닫기</string>
+    <string name="menu_background">백그라운드에서 항상 받기</string>
+    <string name="battery_title">백그라운드에서도 계속 받을까요?</string>
+    <string name="battery_message">TailHop을 열지 않아도 PC가 보낸 것을 받고 기다리는 보내기를 끝까지 보내려면, 배터리 최적화에서 TailHop을 빼 주세요. 페어링한 내 기기의 연결만 기다리므로 배터리를 거의 쓰지 않습니다.</string>
+    <string name="battery_allow">허용</string>
+    <string name="battery_later">나중에</string>
+    <plurals name="send_notif_waiting">
+        <item quantity="other">보낼 항목 %d건 대기 중 · PC에 연결되면 바로 보냅니다</item>
+    </plurals>
+    <plurals name="send_notif_more">
+        <item quantity="other">%d건 더 대기 중</item>
     </plurals>
 </resources>

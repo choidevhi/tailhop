@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import outbox
 import protocol as p
+import resume
 import store
 import tsnet
 from i18n import t
@@ -26,6 +28,9 @@ PC_PORT = p.DEFAULT_PC_PORT
 PAIR_WINDOW_SEC = 120
 MAX_CONNECTIONS = 4
 PAUSED_POLL_SEC = 30
+CAPS_TTL_SEC = 600  # 상대 능력(hello) 기억 시간. 실패하면 바로 잊는다
+IP_REFRESH_SEC = 30  # 모르는 주소가 들어올 때 tailscale status로 주소표를 다시 읽는 최소 간격
+SOCK_BUF = 4 * 1024 * 1024  # 먼 경로(DERP 중계)에서도 창이 막히지 않게 소켓 버퍼를 넉넉히
 
 
 def _close_gently(conn: socket.socket, limit: int = p.MAX_FRAME + 64) -> None:
@@ -52,6 +57,10 @@ class Node:
         self.pairings: dict[str, store.Pairing] = {x.stable_id: x for x in store.load_pairings(self.app_dir)}
         self.guard = p.ReplayGuard(self.app_dir / "seen.json")
         self.history = store.History(self.app_dir)
+        self.book = resume.ResumeBook(self.app_dir)
+        self.outbox = outbox.Outbox(self.deliver, self.app_dir, on_event)
+        self._caps: dict[str, tuple[float, frozenset[str]]] = {}
+        self._ip_refreshed = 0.0
         first_phone = next((x for x in self.pairings.values() if x.kind == p.KIND_PHONE), None)
         if first_phone is not None:
             # v1.1 이전 기록(기기 표시 없음)은 모두 폰과 주고받은 것이다.
@@ -123,11 +132,13 @@ class Node:
 
     # ---------- 서버 ----------
     def start(self) -> None:
-        """Tailscale IP를 얻을 때까지 재시도하며 대기 소켓을 연다(수신 중지면 열지 않고 기다린다)."""
+        """Tailscale IP를 얻을 때까지 재시도하며 대기 소켓을 연다(수신 중지면 열지 않고 기다린다). 보낼 곳 목록도 돌린다."""
         threading.Thread(target=self._serve_forever, daemon=True).start()
+        self.outbox.start()
 
     def stop(self) -> None:
         self._stop = True
+        self.outbox.stop()
         with self._lock:
             sock, self.listener = self.listener, None
         if sock is not None:
@@ -202,7 +213,32 @@ class Node:
         if any(x.ip == ip for x in list(self.pairings.values())):
             return True
         with self._lock:
-            return self._pair_key is not None and time.monotonic() < self._pair_deadline
+            if self._pair_key is not None and time.monotonic() < self._pair_deadline:
+                return True
+        # 페어링된 기기의 Tailscale 주소가 바뀌었을 수 있다(다시 로그인 등). 주소표는 가끔만 다시 읽는다.
+        return self._refresh_ips(IP_REFRESH_SEC) and any(x.ip == ip for x in list(self.pairings.values()))
+
+    def _refresh_ips(self, min_interval: float = 0.0) -> bool:
+        """tailscale status의 주소표로 페어링된 기기의 주소를 고친다. 하나라도 바뀌면 True."""
+        now = time.monotonic()
+        if (self._ip_refreshed and now - self._ip_refreshed < min_interval) or not hasattr(self.ts, "peer_ips"):
+            return False
+        self._ip_refreshed = now
+        try:
+            table = self.ts.peer_ips()
+        except Exception:  # noqa: BLE001 - Tailscale이 꺼져 있으면 그대로 둔다
+            return False
+        changed = False
+        with self._lock:
+            for sid, pairing in list(self.pairings.items()):
+                ip = table.get(sid)
+                if ip and ip != pairing.ip:
+                    self.pairings[sid] = store.Pairing(ip, pairing.port, pairing.name, sid, pairing.secret,
+                                                       pairing.kind, pairing.role)
+                    changed = True
+            if changed:
+                self._save_pairings()
+        return changed
 
     def _handle(self, conn: socket.socket, ip: str) -> None:
         try:
@@ -291,8 +327,9 @@ class Node:
         def progress(done: int, total: int) -> None:
             self.on_event("progress", {"dir": "in", "done": done, "total": total})
 
+        self.outbox.wake(pairing.stable_id)  # 상대가 켜져 있다: 그 기기로 갈 대기를 깨운다
         try:
-            got = p.receive_message(ch, self.guard, self.save_dir, progress)
+            got = p.receive_message(ch, self.guard, self.save_dir, progress, peer=pairing.stable_id, book=self.book)
         except p.ProtocolError as exc:
             # 인증된 상대에게는 이유를 알려 준다(태그 실패면 전송 자체가 안 됨).
             if exc.code != "auth_failed":
@@ -302,22 +339,41 @@ class Node:
                 except OSError:
                     pass
             raise
-        if got.header.get("type") == "unpair":
+        kind = got.header.get("type")
+        if kind == "unpair":
             # 상대가 페어링을 취소했다(폰에서 확인 코드가 다르다고 고름). 이 PC에서도 지우고 나서 답한다.
             self.unpair(pairing.stable_id)
             p.send_reply(ch, True)
             self.on_event("peer_unpaired", {"id": pairing.stable_id, "name": pairing.name})
             return
-        p.send_reply(ch, True)
+        if kind == "hello":
+            p.send_reply(ch, True, **self._hello_reply(pairing.stable_id, got.header))
+            return
+        if got.dup:  # 이미 받은 글(응답이 사라져 다시 옴): 기록·알림 없이 받았다고만 답한다
+            p.send_reply(ch, True)
+            return
         who = {"peer": pairing.name, "peer_id": pairing.stable_id, "peer_kind": pairing.kind}
         if got.path is None:
             text = got.header["text"]
             item = self.history.add("in", "text", text=text, **who)
+            if "xfer" in got.header:
+                self.book.finish(pairing.stable_id, got.header["xfer"])  # 답하기 전에: 응답이 사라져도 두 번 받지 않게
+            p.send_reply(ch, True)
             # 기록에는 긴 글의 앞부분만 남으므로 화면(클립보드 복사)에는 전체 글을 따로 넘긴다.
             self.on_event("received", {**item, "full_text": text})
         else:
             item = self.history.add("in", "file", name=got.path.name, path=str(got.path), size=got.path.stat().st_size, **who)
+            p.send_reply(ch, True)
             self.on_event("received", item)
+
+    def _hello_reply(self, peer: str, header: dict) -> dict:
+        """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
+        reply = {"caps": ["xfer"], "cloud": False, "have": 0, "done": False}
+        xfer, size = header.get("xfer"), header.get("size")
+        if resume.valid_xfer(xfer) and isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            reply["done"] = self.book.is_done(peer, xfer)
+            reply["have"] = 0 if reply["done"] else self.book.have(peer, xfer, size)
+        return reply
 
     # ---------- 페어링 ----------
     def begin_pairing(self) -> str:
@@ -383,43 +439,159 @@ class Node:
             self.pairings.pop(stable_id, None)
             self._save_pairings()
         self.history.clear_peer(stable_id)
+        self.outbox.drop_peer(stable_id)
+        self.book.forget_peer(stable_id)
+        self._caps.pop(stable_id, None)
 
     # ---------- 보내기 (수신 중지와 상관없이 된다) ----------
+    def _open(self, pairing: store.Pairing) -> socket.socket:
+        sock = socket.create_connection((pairing.ip, pairing.port), timeout=10, source_address=(self.me.ip, 0))
+        sock.settimeout(p.SOCKET_TIMEOUT)
+        for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, opt, SOCK_BUF)
+            except OSError:
+                pass
+        return sock
+
     def _connect(self, stable_id: str) -> tuple[socket.socket, store.Pairing]:
         pairing = self.pairings.get(stable_id)
         if pairing is None:
             raise RuntimeError(t("err.pair_first"))
         if self.me is None:
-            raise RuntimeError(t("err.tailscale_down"))
-        sock = socket.create_connection((pairing.ip, pairing.port), timeout=10, source_address=(self.me.ip, 0))
-        sock.settimeout(p.SOCKET_TIMEOUT)
-        return sock, pairing
+            raise p.ProtocolError("tailscale_down")
+        try:
+            return self._open(pairing), pairing
+        except OSError:
+            # 상대 주소가 바뀌었는지 보고, 바뀌었으면 새 주소로 한 번 더
+            if not self._refresh_ips():
+                raise
+            pairing = self.pairings[stable_id]
+            return self._open(pairing), pairing
 
     @staticmethod
     def _send_key(pairing: store.Pairing) -> bytes:
         send_info, _ = p.direction_infos(pairing.kind, pairing.role)
         return p.derive_key(pairing.secret, send_info)
 
-    def send_text(self, stable_id: str, text: str) -> None:
+    def _hello(self, stable_id: str, xfer: str | None = None, size: int | None = None) -> dict:
+        """상대에게 hello를 묻는다. 예전 기기(unsupported)면 caps가 빈 응답을 만든다. 능력은 잠시 기억한다."""
         sock, pairing = self._connect(stable_id)
+        legacy = {"caps": [], "cloud": False, "have": 0, "done": False}
+        remember = time.monotonic()
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
-            p.send_text(ch, self.me.name, text)
+            try:
+                reply = p.send_hello(ch, self.me.name, xfer, size)
+            except p.ProtocolError as exc:
+                if exc.code not in ("unsupported", "disconnected"):
+                    raise
+                reply = legacy
+                if exc.code == "disconnected":
+                    remember -= CAPS_TTL_SEC - 60  # 끊김은 잠깐만 예전 기기로 친다(진짜 망 끊김일 수도)
+            except ConnectionError:
+                # 예전 Android(1.5)는 hello에 unsupported로 답한 뒤 남은 프레임을 읽지 않고 닫는다.
+                # 그 리셋(RST)에 답이 묻혀 사라질 수 있으므로, 연결은 됐는데 끊기면 예전 기기로 보고 예전 방식으로 보낸다.
+                # (새 기기였다면 예전 방식도 받는다. 이번 한 번 이어받기를 못 쓸 뿐이다.)
+                reply = legacy
+                remember -= CAPS_TTL_SEC - 60
+        caps = reply.get("caps")
+        caps = frozenset(x for x in caps if isinstance(x, str)) if isinstance(caps, list) else frozenset()
+        self._caps[stable_id] = (remember, caps)
+        reply["caps"] = caps
+        return reply
+
+    def _known_caps(self, stable_id: str) -> frozenset[str] | None:
+        cached = self._caps.get(stable_id)
+        if cached is None or time.monotonic() - cached[0] > CAPS_TTL_SEC:
+            return None
+        return cached[1]
+
+    def deliver(self, job: outbox.Job, on_progress=None) -> None:
+        """보낼 곳 목록의 한 건을 한 번 보낸다(실패하면 예외, 다시 시도는 Outbox가 정한다).
+        job의 xfer·packed·size·mtime_ns는 여기서 바뀔 수 있다(Outbox가 다음 시도에 이어받는다)."""
+        try:
+            if job.kind == "text":
+                self._deliver_text(job)
+            else:
+                self._deliver_file(job, on_progress)
+        except Exception:
+            self._caps.pop(job.peer_id, None)  # 상대가 바뀌었을 수 있다(앱 업데이트 등)
+            raise
+
+    def _deliver_text(self, job: outbox.Job) -> None:
+        caps = self._known_caps(job.peer_id)
+        if caps is None:
+            caps = self._hello(job.peer_id)["caps"]
+        sock, pairing = self._connect(job.peer_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            p.send_text(ch, self.me.name, job.text or "", job.xfer if "xfer" in caps else None)
             p.read_reply(ch)
-        self.on_event("sent", self.history.add("out", "text", text=text, peer=pairing.name, peer_id=stable_id,
-                                               peer_kind=pairing.kind))
+        self.on_event("sent", self.history.add("out", "text", text=job.text or "", peer=pairing.name,
+                                               peer_id=job.peer_id, peer_kind=pairing.kind))
+
+    def _source(self, job: outbox.Job) -> tuple[Path, Path]:
+        """(보낼 파일, 기록에 남길 경로). 폴더는 처음 한 번 zip으로 묶어 두고 다시 시도 때도 같은 zip을 쓴다.
+        파일이 대기 중에 바뀌었으면(크기·수정 시각) 새 xfer로 처음부터 보내게 한다."""
+        src = Path(job.path or "")
+        if job.kind == "folder":
+            if not src.is_dir():
+                raise outbox.LocalFileError(t("err.source_missing", name=src.name))
+            packed = Path(job.packed) if job.packed else None
+            if packed is None or not packed.is_file():
+                self.on_event("packing", {"name": src.name, "peer": job.peer_id})
+                packed = _pack_folder(src, self.outbox.work_dir / job.id)
+                job.packed = str(packed)
+            target = packed
+        else:
+            if not src.is_file():
+                raise outbox.LocalFileError(t("err.source_missing", name=src.name))
+            target = src
+        st = target.stat()
+        if (st.st_size, st.st_mtime_ns) != (job.size, job.mtime_ns):
+            job.size, job.mtime_ns, job.xfer = st.st_size, st.st_mtime_ns, p.new_xfer()
+        return target, Path(job.record or job.path or target)
+
+    def _deliver_file(self, job: outbox.Job, on_progress) -> None:
+        path, record = self._source(job)
+        size = job.size
+        info = self._hello(job.peer_id, job.xfer, size)
+        if "xfer" in info["caps"] and info.get("done") is True:
+            pairing = self.pairings[job.peer_id]  # 이미 다 받았다(응답만 사라졌었다)
+        else:
+            have = info.get("have")
+            offset = have if isinstance(have, int) and not isinstance(have, bool) and 0 <= have <= size else 0
+
+            def progress(done: int, total: int) -> None:
+                self.on_event("progress", {"dir": "out", "done": done, "total": total, "name": path.name,
+                                           "peer": job.peer_id})
+                if on_progress:
+                    on_progress(done, total)
+
+            sock, pairing = self._connect(job.peer_id)
+            with sock:
+                ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+                if "xfer" in info["caps"]:
+                    p.send_file_xfer(ch, self.me.name, path, job.xfer, offset, progress)
+                else:
+                    p.send_file(ch, self.me.name, path, progress)
+                p.read_reply(ch)
+        self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(record), size=size,
+                                               peer=pairing.name, peer_id=job.peer_id, peer_kind=pairing.kind))
+
+    # 한 번만 보내는 길(테스트·명령 없이 바로 보낼 때). 화면은 보낼 곳 목록(self.outbox)을 쓴다.
+    def send_text(self, stable_id: str, text: str) -> None:
+        self.deliver(outbox.Job(id="direct", peer_id=stable_id, kind="text", text=text, xfer=p.new_xfer()))
 
     def send_file(self, stable_id: str, path: Path, record_path: Path | None = None) -> None:
         """record_path: 기록에 남길 원본 경로(폴더를 임시 zip으로 묶어 보낼 때 원래 폴더)."""
-        sock, pairing = self._connect(stable_id)
+        st = Path(path).stat()
+        self.deliver(outbox.Job(id="direct", peer_id=stable_id, kind="file", path=str(path), xfer=p.new_xfer(),
+                                record=str(record_path) if record_path else None, size=st.st_size,
+                                mtime_ns=st.st_mtime_ns))
 
-        def progress(done: int, total: int) -> None:
-            self.on_event("progress", {"dir": "out", "done": done, "total": total, "name": path.name})
 
-        with sock:
-            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
-            p.send_file(ch, self.me.name, path, progress)
-            p.read_reply(ch)
-        self.on_event("sent", self.history.add("out", "file", name=path.name, path=str(record_path or path),
-                                               size=path.stat().st_size,
-                                               peer=pairing.name, peer_id=stable_id, peer_kind=pairing.kind))
+def _pack_folder(folder: Path, out_dir: Path) -> Path:
+    import bridge  # bridge는 Windows 셸 기능(단축키·바로 가기)을 함께 들고 있어 쓸 때만 불러온다
+    return bridge.pack_folder(folder, out_dir)

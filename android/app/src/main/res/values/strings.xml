@@ -66,17 +66,12 @@
     <string name="chat_send">Send</string>
     <string name="chat_connected">Connected</string>
     <string name="chat_connected_status">Connected · %1$s</string>
-    <string name="chat_sending_files">Sending file %1$d of %2$d… %3$d%%</string>
-    <string name="busy">Still working on the previous task.</string>
     <string name="cant_open_file">Can\'t open the file (it may have been moved or deleted).</string>
     <string name="tap_to_open">%1$s · Tap to open</string>
     <string name="sent_file_to_pc">This is a file you sent to the PC.</string>
     <string name="long_text_more">… (%1$d characters · tap to copy all)</string>
     <string name="share_nothing">Nothing to send.</string>
     <string name="share_pair_first">Pair with a PC in TailHop first.</string>
-    <string name="share_sending">Sending to PC…</string>
-    <string name="share_text_sent">Text sent.</string>
-    <string name="share_failed">Couldn\'t send: %1$s</string>
     <string name="err_auth_failed">Authentication failed.</string>
     <string name="err_disconnected">The connection was cut off.</string>
     <string name="err_not_tailhop">Not a TailHop connection.</string>
@@ -119,10 +114,6 @@
     <string name="err_file_too_large">The file is too large (max 4 GB).</string>
     <string name="err_file_open">Can\'t open the file.</string>
     <string name="err_file_changed">The file size changed while sending.</string>
-    <plurals name="share_files_sent">
-        <item quantity="one">Sent %d file.</item>
-        <item quantity="other">Sent %d files.</item>
-    </plurals>
     <string name="pair_confirm_title">Compare the confirmation code</string>
     <string name="pair_confirm_message">%1$s (%2$s)\n\nConfirmation code: %3$s\n\nIs this the same code shown on your PC? Connect only if it matches. If it doesn\'t, this may not be your PC.</string>
     <string name="pair_confirm_yes">It matches, connect</string>
@@ -139,5 +130,42 @@
     <plurals name="share_confirm_files">
         <item quantity="one">%d file:</item>
         <item quantity="other">%d files:</item>
+    </plurals>
+    <!-- 1.7.0 전송 신뢰성·보내기 목록·백그라운드 받기 -->
+    <string name="err_resume_lost">The partial file to resume from is gone. It must be sent again from the start.</string>
+    <string name="err_hash_mismatch">The received file doesn\'t match the original (SHA-256 mismatch).</string>
+    <string name="err_bad_xfer">Invalid transfer info (xfer, offset or checksum).</string>
+    <string name="err_file_gone">Can\'t read the file anymore. It may have been deleted, or the app that shared it no longer allows access. Share it again.</string>
+    <string name="err_unpaired">This PC is no longer connected.</string>
+    <string name="notif_channel_send">Sending</string>
+    <string name="notif_channel_send_failed">Send failures</string>
+    <string name="send_notif_sending">Sending %1$s… %2$d%%</string>
+    <string name="send_cancel_all">Cancel all</string>
+    <string name="send_failed_title">Couldn\'t send to %1$s</string>
+    <string name="send_queued">Added to the send list. You can follow it in the notification.</string>
+    <string name="outbox_text">Text</string>
+    <string name="outbox_sending">Sending… %1$d%%</string>
+    <string name="outbox_queued">Waiting to send</string>
+    <string name="outbox_retry_in">Not sent yet · Retrying in %1$s</string>
+    <string name="outbox_failed">Not sent: %1$s</string>
+    <string name="outbox_gave_up">Couldn\'t send for 24 hours. %1$s</string>
+    <string name="outbox_retry_now">Try now</string>
+    <string name="outbox_send_again">Send again</string>
+    <string name="outbox_cancel">Cancel sending</string>
+    <string name="outbox_remove">Remove</string>
+    <string name="close">Close</string>
+    <string name="menu_background">Always receive in the background</string>
+    <string name="battery_title">Keep receiving in the background?</string>
+    <string name="battery_message">To receive from your PC without opening TailHop, and to finish sends that are waiting, let TailHop ignore battery optimization. TailHop only waits for connections from your own paired devices and uses very little battery.</string>
+    <string name="battery_allow">Allow</string>
+    <string name="battery_later">Later</string>
+    <string name="send_failed_text" translatable="false">%1$s · %2$s</string>
+    <plurals name="send_notif_waiting">
+        <item quantity="one">%d item waiting to send · It goes as soon as the PC is reachable</item>
+        <item quantity="other">%d items waiting to send · They go as soon as the PC is reachable</item>
+    </plurals>
+    <plurals name="send_notif_more">
+        <item quantity="one">%d more waiting</item>
+        <item quantity="other">%d more waiting</item>
     </plurals>
 </resources>

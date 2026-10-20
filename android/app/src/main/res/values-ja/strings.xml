@@ -61,17 +61,12 @@
     <string name="chat_send">送信</string>
     <string name="chat_connected">接続済み</string>
     <string name="chat_connected_status">接続済み · %1$s</string>
-    <string name="chat_sending_files">ファイル %1$d/%2$d を送信中… %3$d%%</string>
-    <string name="busy">前の処理を実行中です。</string>
     <string name="cant_open_file">ファイルを開けません（移動または削除された可能性があります）。</string>
     <string name="tap_to_open">%1$s · タップして開く</string>
     <string name="sent_file_to_pc">PC に送ったファイルです。</string>
     <string name="long_text_more">…（%1$d 文字 · タップで全文コピー）</string>
     <string name="share_nothing">送る内容がありません。</string>
     <string name="share_pair_first">先に TailHop で PC とペアリングしてください。</string>
-    <string name="share_sending">PC に送信中…</string>
-    <string name="share_text_sent">テキストを送信しました。</string>
-    <string name="share_failed">送信に失敗しました: %1$s</string>
     <string name="err_auth_failed">認証に失敗しました。</string>
     <string name="err_disconnected">接続が途中で切れました。</string>
     <string name="err_not_tailhop">TailHop の接続ではありません。</string>
@@ -114,9 +109,6 @@
     <string name="err_file_too_large">ファイルが大きすぎます（最大 4GB）。</string>
     <string name="err_file_open">ファイルを開けません。</string>
     <string name="err_file_changed">送信中にファイルのサイズが変わりました。</string>
-    <plurals name="share_files_sent">
-        <item quantity="other">ファイルを %d 件送信しました。</item>
-    </plurals>
     <string name="pair_confirm_title">確認コードの照合</string>
     <string name="pair_confirm_message">%1$s (%2$s)\n\n確認コード: %3$s\n\nPC に表示されたコードと同じですか？同じときだけ接続してください。違う場合は自分の PC ではない可能性があります。</string>
     <string name="pair_confirm_yes">同じ・接続する</string>
@@ -131,5 +123,39 @@
     <string name="err_tagged_node">タグ付きの Tailscale デバイス（サーバー・共有デバイスなど）とは接続しません。</string>
     <plurals name="share_confirm_files">
         <item quantity="other">ファイル %d 件:</item>
+    </plurals>
+    <!-- 1.7.0 전송 신뢰성·보내기 목록·백그라운드 받기 -->
+    <string name="err_resume_lost">再開できる途中のファイルがありません。最初から送り直す必要があります。</string>
+    <string name="err_hash_mismatch">受信したファイルが元のファイルと一致しません（SHA-256 不一致）。</string>
+    <string name="err_bad_xfer">転送情報（xfer・offset・チェックサム）の形式が正しくありません。</string>
+    <string name="err_file_gone">ファイルを読み取れなくなりました。削除されたか、共有元のアプリがアクセスを終了した可能性があります。もう一度共有してください。</string>
+    <string name="err_unpaired">このPCとの接続は解除されています。</string>
+    <string name="notif_channel_send">送信</string>
+    <string name="notif_channel_send_failed">送信失敗</string>
+    <string name="send_notif_sending">%1$s を送信中… %2$d%%</string>
+    <string name="send_cancel_all">すべてキャンセル</string>
+    <string name="send_failed_title">%1$s に送信できませんでした</string>
+    <string name="send_queued">送信リストに追加しました。進行状況は通知で確認できます。</string>
+    <string name="outbox_text">テキスト</string>
+    <string name="outbox_sending">送信中… %1$d%%</string>
+    <string name="outbox_queued">送信待ち</string>
+    <string name="outbox_retry_in">未送信 · %1$s 後に再試行</string>
+    <string name="outbox_failed">送信できませんでした: %1$s</string>
+    <string name="outbox_gave_up">24時間送信できませんでした。%1$s</string>
+    <string name="outbox_retry_now">今すぐ再試行</string>
+    <string name="outbox_send_again">もう一度送信</string>
+    <string name="outbox_cancel">送信をキャンセル</string>
+    <string name="outbox_remove">削除</string>
+    <string name="close">閉じる</string>
+    <string name="menu_background">バックグラウンドで常に受信</string>
+    <string name="battery_title">バックグラウンドでも受信を続けますか？</string>
+    <string name="battery_message">TailHop を開かなくても PC から受信し、待機中の送信を最後まで送るには、TailHop をバッテリー最適化の対象外にしてください。ペアリングした自分のデバイスからの接続だけを待つので、バッテリーはほとんど使いません。</string>
+    <string name="battery_allow">許可</string>
+    <string name="battery_later">後で</string>
+    <plurals name="send_notif_waiting">
+        <item quantity="other">送信待ち %d 件 · PC に接続でき次第送信します</item>
+    </plurals>
+    <plurals name="send_notif_more">
+        <item quantity="other">ほか %d 件待機中</item>
     </plurals>
 </resources>

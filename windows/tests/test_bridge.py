@@ -41,6 +41,23 @@ class ParseArgsTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(bridge.ArgError):
                 bridge.parse_args(argv)
 
+    def test_wait_flags(self):
+        req = bridge.parse_args(["--text", "x"])
+        self.assertEqual((req.wait, req.timeout), (True, bridge.DEFAULT_WAIT))  # 1.7.0: 기본은 도착까지 기다림
+        req = bridge.parse_args(["--no-wait", "--timeout", "7.5", "a.txt"])
+        self.assertEqual((req.wait, req.timeout), (False, 7.5))
+        for argv in (["--timeout"], ["--timeout", "abc"], ["--timeout", "-1"], ["--timeout", "999999"]):
+            with self.subTest(argv=argv), self.assertRaises(bridge.ArgError):
+                bridge.parse_args(argv)
+
+    def test_old_cli_request_does_not_wait(self):
+        """1.6 명령줄이 보낸 요청(wait 없음)은 예전처럼 넘기기만 한다."""
+        req = bridge.request_from_json({"paths": [], "text": "x", "to": None, "list": False})
+        self.assertFalse(req.wait)
+        for bad in ({"wait": "yes"}, {"timeout": True}, {"timeout": -3}):
+            with self.subTest(bad=bad), self.assertRaises(bridge.ArgError):
+                bridge.request_from_json({"paths": [], "text": None, "to": None, "list": False, **bad})
+
     def test_request_json_round_trip_and_validation(self):
         req = bridge.Request(paths=["C:\\x"], text="hi", to="pc", list_devices=False)
         self.assertEqual(bridge.request_from_json(req.to_json()), req)

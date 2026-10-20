@@ -5,7 +5,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 받기 서비스(specialUse, 1.7.0): dataSync는 Android 15+에서 하루 6시간 제한·부팅 시 시작 금지라 쓰지 않는다 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 보내기 서비스: 사용자가 보낸 것을 끝까지 올리는 동안만 돈다 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Tailscale 주소가 바뀌는 것을 네트워크 콜백으로 안다(주기적으로 깨지 않게) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 앱을 열지 않아도 받고 보내도록 배터리 최적화 제외를 묻는다. 스토어가 아닌 직접 설치 앱이다 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -63,11 +71,21 @@
         <service
             android:name=".ReceiverService"
             android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Waits on this device's Tailscale address for text and files that the user sends from their own paired PCs (TailHop). Only paired devices are accepted; nothing is fetched or synced on a schedule." />
+        </service>
+
+        <service
+            android:name=".SendService"
+            android:exported="false"
             android:foregroundServiceType="dataSync" />
 
         <receiver android:name=".CopyReceiver" android:exported="false" />
         <receiver android:name=".PauseReceiver" android:exported="false" />
         <receiver android:name=".ResumeReceiver" android:exported="false" />
+        <receiver android:name=".SendCancelReceiver" android:exported="false" />
 
         <!-- Android 12 이하: 앱에서 고른 언어를 AppCompat이 저장·적용한다 -->
         <service

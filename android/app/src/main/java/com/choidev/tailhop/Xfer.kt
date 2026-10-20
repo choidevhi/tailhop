@@ -1,0 +1,76 @@
+package com.choidev.tailhop
+
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.MessageDigest
+
+/**
+ * 전송 신뢰성 확장(docs/PROTOCOL.md §11, 1.7.0)의 형식 검사·만들기. 안드로이드 의존성 없음(JVM 단위 테스트).
+ * 선(wire) 형식은 §3 그대로이고 헤더에 `xfer`·`offset`을, 파일 끝에 SHA-256 트레일러 프레임을 더한다.
+ */
+object Xfer {
+    /** 조각·끝난 xfer를 기억하는 시간이자 보내는 쪽이 포기하기까지의 시간(§11.2, §11.3). */
+    const val KEEP_MS = 24L * 3600 * 1000
+
+    /** 이 기기가 아는 확장(hello 응답의 caps). 클라우드(§12)를 더하면 "cloud"를 넣는다. */
+    val CAPS: List<String> = listOf("xfer")
+
+    private val XFER_RE = Regex("[0-9a-f]{32}")
+    private val SHA_RE = Regex("[0-9a-f]{64}")
+
+    fun isValid(x: Any?): Boolean = x is String && XFER_RE.matches(x)
+
+    /** 보내기 한 건의 xfer(32자 hex 난수). 다시 보낼 때는 같은 값을 쓴다. */
+    fun newXfer(): String = Protocol.newId()
+
+    /** 헤더 값이 JSON null이면 없는 것으로 본다(PC 구현과 같다). */
+    fun field(h: JSONObject, name: String): Any? = if (h.isNull(name)) null else h.opt(name)
+
+    /** JSON 정수(bool·실수 아님)만 Long으로. */
+    fun jsonLong(v: Any?): Long? = (v as? Number)?.takeIf { v is Int || v is Long }?.toLong()
+
+    /** file 헤더의 offset: 없으면 0(PC와 같다), 있으면 0 ≤ offset ≤ size 인 정수여야 한다. 어기면 bad_xfer. */
+    fun offset(h: JSONObject, size: Long): Long {
+        if (!h.has("offset")) return 0
+        val o = jsonLong(h.opt("offset"))
+        if (o == null || o < 0 || o > size) throw ProtocolException("bad_xfer")
+        return o
+    }
+
+    fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+
+    fun sha256(): MessageDigest = MessageDigest.getInstance("SHA-256")
+
+    /** 트레일러 프레임 평문: `{"sha256":"<64자 hex>"}`. */
+    fun trailer(digest: ByteArray): ByteArray =
+        JSONObject().put("sha256", hex(digest)).toString().toByteArray(Charsets.UTF_8)
+
+    /** 트레일러에서 SHA-256(소문자 64자 hex)을 읽는다. 형식이 틀리면 bad_xfer. */
+    fun parseTrailer(raw: ByteArray): String {
+        val sha = try { JSONObject(String(raw, Charsets.UTF_8)).opt("sha256") } catch (e: Exception) {
+            throw ProtocolException("bad_xfer")
+        }
+        if (sha !is String || !SHA_RE.matches(sha)) throw ProtocolException("bad_xfer")
+        return sha
+    }
+
+    /** hello 응답(§11.1). have는 끝난 xfer면 0. */
+    fun helloReply(have: Long, done: Boolean, cloud: Boolean = false): JSONObject = JSONObject()
+        .put("ok", true).put("caps", JSONArray(CAPS)).put("cloud", cloud)
+        .put("have", if (done) 0L else have).put("done", done)
+
+    /** 상대의 hello 응답(보내는 쪽). 모르는 caps 값은 그대로 두고 쓰는 쪽에서 무시한다. */
+    data class Hello(val caps: Set<String>, val cloud: Boolean, val have: Long, val done: Boolean) {
+        val xfer: Boolean get() = "xfer" in caps
+    }
+
+    fun parseHello(reply: JSONObject): Hello {
+        val arr = reply.optJSONArray("caps")
+        val caps = HashSet<String>()
+        if (arr != null) for (i in 0 until arr.length()) (arr.opt(i) as? String)?.let { caps += it }
+        return Hello(caps, reply.opt("cloud") == true, jsonLong(reply.opt("have")) ?: 0L, reply.opt("done") == true)
+    }
+
+    /** 이어 보낼 위치: 상대가 알린 have가 0..size 밖이면 처음부터(0). */
+    fun resumeAt(hello: Hello, size: Long): Long = if (hello.have in 0..size) hello.have else 0L
+}

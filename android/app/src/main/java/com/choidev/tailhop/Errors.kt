@@ -51,6 +51,12 @@ object Errors {
         "file_changed" to R.string.err_file_changed,
         "disk_full" to R.string.err_disk_full,
         "tagged_node" to R.string.err_tagged_node,
+        // 1.7.0 전송 신뢰성(§11.4)과 보내기 목록(이 폰 안에서만 쓰는 코드)
+        "resume_lost" to R.string.err_resume_lost,
+        "hash_mismatch" to R.string.err_hash_mismatch,
+        "bad_xfer" to R.string.err_bad_xfer,
+        "file_gone" to R.string.err_file_gone,
+        "unpaired" to R.string.err_unpaired,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

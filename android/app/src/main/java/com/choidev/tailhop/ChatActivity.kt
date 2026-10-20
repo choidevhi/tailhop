@@ -10,6 +10,7 @@ import android.text.Editable
 import android.text.SpannableString
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.format.DateUtils
 import android.text.format.Formatter
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
@@ -20,7 +21,6 @@ import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
-import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,7 +31,11 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.util.Calendar
 
-/** 한 PC와의 대화방. */
+/**
+ * 한 PC와의 대화방. 보내기는 보낼 곳 목록(Outbox)에 넣기만 하고 SendService가 보낸다(1.7.0).
+ * 아직 못 보낸 건은 대화 끝에 흐린 말풍선(보내는 중 n% / 대기 · n초 뒤 다시 시도 / 실패: 이유)으로 보이고,
+ * 탭하거나 길게 누르면 다시 시도·취소를 고른다.
+ */
 class ChatActivity : AppCompatActivity() {
     companion object { const val EXTRA_IP = "ip" }
 
@@ -40,13 +44,10 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var dot: ImageView
     private lateinit var textBox: EditText
     private lateinit var sendBtn: View
-    private lateinit var progress: ProgressBar
-    private lateinit var progressText: TextView
     private lateinit var chat: RecyclerView
     private lateinit var empty: View
     private val adapter = ChatAdapter()
     private val ui = Handler(Looper.getMainLooper())
-    @Volatile private var busy = false
 
     private val historyListener: () -> Unit = { ui.post { reloadChat() } }
 
@@ -56,7 +57,12 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private val ticker = object : Runnable {
-        override fun run() { updateHeader(); ui.postDelayed(this, 1500) }
+        override fun run() {
+            updateHeader()
+            // "n초 뒤 다시 시도"가 흘러가게 대기 말풍선만 다시 그린다.
+            if (adapter.pending.isNotEmpty()) adapter.notifyItemRangeChanged(adapter.items.size, adapter.pending.size)
+            ui.postDelayed(this, 1000)
+        }
     }
 
     private fun pairing(): Pairing? = Store.get(this, ip)
@@ -70,8 +76,6 @@ class ChatActivity : AppCompatActivity() {
         dot = findViewById(R.id.dot)
         textBox = findViewById(R.id.textBox)
         sendBtn = findViewById(R.id.sendBtn)
-        progress = findViewById(R.id.progress)
-        progressText = findViewById(R.id.progressText)
         chat = findViewById(R.id.chat)
         empty = findViewById(R.id.empty)
 
@@ -91,19 +95,28 @@ class ChatActivity : AppCompatActivity() {
             val t = textBox.text.toString()
             val p = pairing() ?: return@setOnClickListener
             if (t.isBlank()) return@setOnClickListener
-            runNet {
-                Net.sendText(applicationContext, t, p)
-                runOnUiThread { textBox.setText("") }
+            if (t.toByteArray(Charsets.UTF_8).size > Protocol.MAX_TEXT) {
+                toast(getString(R.string.failed, getString(R.string.err_text_too_long))); return@setOnClickListener
             }
+            Outbox.enqueueText(this, p.pcIp, t)
+            SendService.start(this)
+            textBox.setText("")
         }
         History.addListener(historyListener)
+        Outbox.addListener(historyListener)
     }
 
-    override fun onDestroy() { History.removeListener(historyListener); super.onDestroy() }
+    override fun onDestroy() {
+        History.removeListener(historyListener)
+        Outbox.removeListener(historyListener)
+        super.onDestroy()
+    }
+
     override fun onResume() {
         super.onResume()
         if (pairing() == null) { finish(); return }
         Store.setCurrent(this, ip)
+        SendService.resumeIfNeeded(this)
         updateHeader(); reloadChat(); updateSendEnabled(); ui.post(ticker)
     }
     override fun onPause() { super.onPause(); ui.removeCallbacks(ticker) }
@@ -129,7 +142,7 @@ class ChatActivity : AppCompatActivity() {
         m.show()
     }
 
-    private fun updateSendEnabled() { sendBtn.isEnabled = !busy && textBox.text.isNotBlank() }
+    private fun updateSendEnabled() { sendBtn.isEnabled = textBox.text.isNotBlank() }
 
     private fun updateHeader() {
         val p = pairing() ?: return
@@ -143,46 +156,24 @@ class ChatActivity : AppCompatActivity() {
 
     private fun reloadChat() {
         val items = History.forDevice(this, ip).reversed()
+        val pending = Outbox.forDevice(this, ip)
+        val total = items.size + pending.size
         val atBottom = !chat.canScrollVertically(1)
-        val grew = items.size > adapter.items.size
+        val grew = total > adapter.itemCount
         adapter.name = pairing()?.pcName ?: "PC"
         adapter.items = items
+        adapter.pending = pending
         adapter.notifyDataSetChanged()
-        if (items.isNotEmpty() && (grew || atBottom)) chat.scrollToPosition(items.size - 1)
-        empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        chat.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
+        if (total > 0 && (grew || atBottom)) chat.scrollToPosition(total - 1)
+        empty.visibility = if (total == 0) View.VISIBLE else View.GONE
+        chat.visibility = if (total == 0) View.GONE else View.VISIBLE
     }
 
+    /** 고른 파일들을 보낼 곳 목록에 넣는다. 읽기 권한은 위에서 영구로 받아 두었고, 서비스 시작에도 실어 넘긴다. */
     private fun sendFiles(uris: List<Uri>) {
         val p = pairing() ?: return
-        runNet {
-            uris.forEachIndexed { i, u ->
-                Net.sendFile(applicationContext, u, { sent, total ->
-                    val pct = if (total > 0) sent * 100 / total else 100
-                    runOnUiThread {
-                        progressText.visibility = View.VISIBLE
-                        progressText.text = getString(R.string.chat_sending_files, i + 1, uris.size, pct.toInt())
-                    }
-                }, p)
-            }
-        }
-    }
-
-    private fun runNet(work: () -> Unit) {
-        if (busy) { toast(getString(R.string.busy)); return }
-        busy = true
-        updateSendEnabled()
-        progress.visibility = View.VISIBLE
-        Thread {
-            val err = try { work(); null } catch (e: Exception) { getString(R.string.failed, Errors.text(this, e)) }
-            runOnUiThread {
-                busy = false
-                progress.visibility = View.INVISIBLE
-                progressText.visibility = View.GONE
-                err?.let { toast(it) }
-                updateSendEnabled()
-            }
-        }.start()
+        Outbox.enqueueFiles(this, p.pcIp, uris.map { it.toString() })
+        SendService.start(this, uris)
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
@@ -208,8 +199,37 @@ class ChatActivity : AppCompatActivity() {
         Clip.copy(this, History.fullText(this, item))
     }
 
+    /** 못 보낸 건의 상태 한 줄. */
+    private fun pendingStatus(j: OutboxJob): String {
+        val now = System.currentTimeMillis()
+        return when {
+            j.failed -> getString(R.string.outbox_failed, SendService.reason(this, j))
+            j.state == OutboxJob.SENDING -> getString(R.string.outbox_sending,
+                if (j.size > 0) (Outbox.progressOf(j.id) * 100 / j.size).toInt().coerceIn(0, 100) else 0)
+            j.attempts > 0 && j.nextAt > now -> getString(R.string.outbox_retry_in,
+                DateUtils.formatElapsedTime((j.nextAt - now + 999) / 1000))
+            else -> getString(R.string.outbox_queued)
+        }
+    }
+
+    /** 못 보낸 건을 누름: 마지막 실패 이유와 다시 시도·취소. 보내는 중이면 취소만. */
+    private fun pendingMenu(j: OutboxJob) {
+        val b = AlertDialog.Builder(this).setTitle(SendService.what(this, j))
+        if (j.error != null) b.setMessage(SendService.reason(this, j))
+        if (j.state != OutboxJob.SENDING) {
+            b.setPositiveButton(if (j.failed) R.string.outbox_send_again else R.string.outbox_retry_now) { _, _ ->
+                SendService.retry(this, j.id)
+            }
+        }
+        b.setNegativeButton(if (j.failed) R.string.outbox_remove else R.string.outbox_cancel) { _, _ -> SendService.cancel(this, j.id) }
+        b.setNeutralButton(R.string.close, null)
+        b.show()
+    }
+
     private inner class ChatAdapter : RecyclerView.Adapter<ChatAdapter.VH>() {
         var items: List<HistoryItem> = emptyList()
+        /** 대화 끝에 붙는 아직 못 보낸 건(넣은 순서). */
+        var pending: List<OutboxJob> = emptyList()
         var name = "PC"
 
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
@@ -222,7 +242,7 @@ class ChatActivity : AppCompatActivity() {
             val time: TextView = v.findViewById(R.id.time)
         }
 
-        override fun getItemCount() = items.size
+        override fun getItemCount() = items.size + pending.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
             VH(LayoutInflater.from(parent.context).inflate(R.layout.item_bubble, parent, false))
 
@@ -232,13 +252,32 @@ class ChatActivity : AppCompatActivity() {
             return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) && c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
         }
 
+        /** 보낸 쪽(오른쪽) 말풍선 모양. */
+        private fun outStyle(h: VH, out: Boolean) {
+            val dm = h.itemView.resources.displayMetrics
+            val gravity = if (out) Gravity.END else Gravity.START
+            (h.bubble.layoutParams as LinearLayout.LayoutParams).gravity = gravity
+            (h.time.layoutParams as LinearLayout.LayoutParams).gravity = gravity
+            if (out) {
+                h.bubble.setBackgroundResource(R.drawable.bg_bubble_out)
+                h.bubble.setPadding((14 * dm.density).toInt(), (9 * dm.density).toInt(), (14 * dm.density).toInt(), (9 * dm.density).toInt())
+            } else {
+                h.bubble.background = null
+                h.bubble.setPadding(0, (2 * dm.density).toInt(), 0, (2 * dm.density).toInt())
+            }
+        }
+
         override fun onBindViewHolder(h: VH, pos: Int) {
+            if (pos >= items.size) { bindPending(h, pending[pos - items.size]); return }
             val it = items[pos]
             val prev = items.getOrNull(pos - 1)
             val next = items.getOrNull(pos + 1)
             val ctx = h.itemView.context
             val out = !it.incoming
             val dm = ctx.resources.displayMetrics
+            h.bubble.alpha = 1f
+            h.sub.setTextColor(ContextCompat.getColor(ctx, R.color.secondary))
+            h.sub.maxLines = Int.MAX_VALUE
 
             val newDay = prev == null || !sameDay(prev.ts, it.ts)
             h.date.visibility = if (newDay) View.VISIBLE else View.GONE
@@ -252,16 +291,7 @@ class ChatActivity : AppCompatActivity() {
             h.time.visibility = if (lastInGroup) View.VISIBLE else View.GONE
             h.time.text = Lang.time(ctx, it.ts)
 
-            val gravity = if (out) Gravity.END else Gravity.START
-            (h.bubble.layoutParams as LinearLayout.LayoutParams).gravity = gravity
-            (h.time.layoutParams as LinearLayout.LayoutParams).gravity = gravity
-            if (out) {
-                h.bubble.setBackgroundResource(R.drawable.bg_bubble_out)
-                h.bubble.setPadding((14 * dm.density).toInt(), (9 * dm.density).toInt(), (14 * dm.density).toInt(), (9 * dm.density).toInt())
-            } else {
-                h.bubble.background = null
-                h.bubble.setPadding(0, (2 * dm.density).toInt(), 0, (2 * dm.density).toInt())
-            }
+            outStyle(h, out)
             val maxW = (dm.widthPixels * (if (out) 0.75f else 0.85f)).toInt()
             h.body.maxWidth = maxW - (if (it.isText) 0 else (76 * dm.density).toInt())
 
@@ -286,6 +316,34 @@ class ChatActivity : AppCompatActivity() {
                 h.bubble.setOnClickListener { _ -> if (out) toast(ctx.getString(R.string.sent_file_to_pc)) else open(it) }
                 h.bubble.setOnLongClickListener(null)
             }
+        }
+
+        /** 아직 못 보낸 건: 흐린 보낸 쪽 말풍선 + 상태 줄(실패면 빨강). */
+        private fun bindPending(h: VH, j: OutboxJob) {
+            val ctx = h.itemView.context
+            val dm = ctx.resources.displayMetrics
+            h.date.visibility = View.GONE
+            h.who.visibility = View.GONE
+            h.time.visibility = View.GONE
+            outStyle(h, true)
+            h.bubble.alpha = if (j.failed) 1f else 0.6f
+            h.body.maxWidth = (dm.widthPixels * 0.75f).toInt() - (if (j.isText) 0 else (76 * dm.density).toInt())
+            h.fileIcon.visibility = if (j.isText) View.GONE else View.VISIBLE
+            if (j.isText) {
+                h.body.text = (j.text ?: "").take(HistoryCodec.TEXT_INLINE)
+                h.body.maxLines = 10
+                h.body.ellipsize = TextUtils.TruncateAt.END
+            } else {
+                h.body.text = j.name ?: ctx.getString(R.string.file_default)
+                h.body.maxLines = 2
+                h.body.ellipsize = TextUtils.TruncateAt.MIDDLE
+            }
+            h.sub.visibility = View.VISIBLE
+            h.sub.maxLines = 3
+            h.sub.text = pendingStatus(j)
+            h.sub.setTextColor(ContextCompat.getColor(ctx, if (j.failed) R.color.red else R.color.secondary))
+            h.bubble.setOnClickListener { _ -> pendingMenu(j) }
+            h.bubble.setOnLongClickListener { _ -> pendingMenu(j); true }
         }
     }
 }

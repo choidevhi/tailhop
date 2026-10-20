@@ -113,19 +113,21 @@ class ShareActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * 확인을 누르면 보낼 곳 목록(Outbox)에 넣고 바로 닫는다. 보내기는 SendService가 하고(PC가 꺼져 있으면 다시 시도),
+     * 진행은 알림·대화방에 보인다. 파일 읽기 권한은 서비스 시작 요청에 실어 넘긴다 — 이 화면이 끝나면 화면이 받은 권한은 사라진다.
+     */
     private fun send(target: Pairing, text: String?, uris: List<Uri>) {
         Store.setCurrent(this, target.pcIp) // 사용자가 고른 기기를 다음 기본값으로
-        toast(getString(R.string.share_sending))
-        val app = applicationContext
-        val res = this // 토스트 문장은 이 화면의 언어로
-        Thread {
-            val msg = try {
-                if (text != null) Net.sendText(app, text, target) else uris.forEach { Net.sendFile(app, it, null, target) }
-                if (text != null) res.getString(R.string.share_text_sent)
-                else res.resources.getQuantityString(R.plurals.share_files_sent, uris.size, uris.size)
-            } catch (e: Exception) { res.getString(R.string.share_failed, Errors.text(res, e)) }
-            runOnUiThread { toast(msg); finish() }
-        }.start()
+        if (text != null) {
+            if (text.toByteArray(Charsets.UTF_8).size > Protocol.MAX_TEXT) {
+                toast(getString(R.string.failed, getString(R.string.err_text_too_long))); finish(); return
+            }
+            Outbox.enqueueText(this, target.pcIp, text)
+        } else Outbox.enqueueFiles(this, target.pcIp, uris.map { it.toString() })
+        SendService.start(this, uris)
+        toast(getString(R.string.send_queued))
+        finish()
     }
 
     private fun toast(s: String) = Toast.makeText(applicationContext, s, Toast.LENGTH_LONG).show()

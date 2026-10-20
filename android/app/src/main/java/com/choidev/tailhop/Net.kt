@@ -3,6 +3,8 @@ package com.choidev.tailhop
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -27,10 +29,11 @@ object Net {
 
     fun deviceName(): String = Protocol.cleanDeviceName(Build.MODEL ?: "Android").ifEmpty { "Android" }
 
-    private fun connect(host: String, port: Int): Socket {
+    private fun connect(host: String, port: Int, token: SendToken? = null): Socket {
         // IP 리터럴만 허용(DNS 조회 없음).
         if (!Protocol.isTailscaleIp(host)) throw ProtocolException("not_ts_host")
         val s = Socket()
+        token?.attach(s)
         try {
             s.connect(InetSocketAddress(InetAddress.getByName(host), port), 10_000)
             s.soTimeout = Protocol.SOCKET_TIMEOUT_MS
@@ -100,22 +103,42 @@ object Net {
         Protocol.openClient(BufferedInputStream(s.getInputStream()), BufferedOutputStream(s.getOutputStream(), 64 * 1024),
             Protocol.KIND_MSG, Protocol.deriveKey(p.secret, Protocol.INFO_PHONE_TO_PC))
 
-    private fun paired(ctx: Context) = Store.load(ctx) ?: throw ProtocolException("pair_first")
+    /** 보내기 전 능력·이어 보낼 위치 확인(§11.1). 예전 기기(hello를 모름)면 null — 예전 방식으로만 보낸다. */
+    fun hello(p: Pairing, xfer: String?, size: Long?, token: SendToken? = null): Xfer.Hello? {
+        val h = header("hello")
+        if (xfer != null && size != null) h.put("xfer", xfer).put("size", size)
+        val reply = try {
+            connect(p.pcIp, p.pcPort, token).use { s ->
+                val ch = msgChannel(p, s)
+                ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
+                ch.send(ByteArray(0), last = true)
+                token?.tick()
+                readReply(ch)
+            }
+        } catch (e: ProtocolException) {
+            // 1.6 이하 PC는 unsupported로, 1.4 이하는 코드 없이 한국어 문장으로 거부한다.
+            if (e.code == "unsupported" || e.code == "pc_refused" || e.code == "pc_refused_reason") return null
+            throw e
+        }
+        return Xfer.parseHello(reply)
+    }
 
-    fun sendText(ctx: Context, text: String, target: Pairing? = null) {
+    /** 텍스트 한 건. xfer는 상대가 hello에서 "xfer"를 알렸을 때만(상대가 중복을 무시한다). 기록은 부른 쪽이 남긴다. */
+    fun sendText(p: Pairing, text: String, xfer: String?, token: SendToken? = null) {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size > Protocol.MAX_TEXT) throw ProtocolException("text_too_long")
         if (text.isEmpty()) throw ProtocolException("text_empty")
-        val p = target ?: paired(ctx)
-        val h = header("text").put("text", text).toString().toByteArray(Charsets.UTF_8)
+        val hj = header("text").put("text", text)
+        if (xfer != null) hj.put("xfer", xfer)
+        val h = hj.toString().toByteArray(Charsets.UTF_8)
         if (h.size > Protocol.MAX_FRAME - Protocol.TAG) throw ProtocolException("text_too_long")
-        connect(p.pcIp, p.pcPort).use { s ->
+        connect(p.pcIp, p.pcPort, token).use { s ->
             val ch = msgChannel(p, s)
             ch.send(h, last = false)
             ch.send(ByteArray(0), last = true)
+            token?.tick()
             readReply(ch)
         }
-        History.add(ctx, HistoryItem(Protocol.newId(), System.currentTimeMillis(), false, true, text, null, bytes.size.toLong(), null, p.pcIp))
     }
 
     data class FileMeta(val name: String, val size: Long)
@@ -139,24 +162,49 @@ object Net {
         return FileMeta(name ?: uri.lastPathSegment ?: "file", size ?: throw ProtocolException("size_unknown"))
     }
 
-    private fun readFully(input: InputStream, buf: ByteArray): Int {
+    /**
+     * 파일의 수정 시각(ms). 문서 provider는 last_modified, MediaStore는 date_modified(초). 알 수 없으면 null —
+     * 그때는 크기만으로 바뀌었는지 본다(§11.3).
+     */
+    fun lastModified(ctx: Context, uri: Uri): Long? {
+        val cols = listOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED to 1L, MediaStore.MediaColumns.DATE_MODIFIED to 1000L)
+        for ((col, scale) in cols) {
+            try {
+                ctx.contentResolver.query(uri, arrayOf(col), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val i = c.getColumnIndex(col)
+                        if (i >= 0 && !c.isNull(i)) return c.getLong(i) * scale
+                    }
+                }
+            } catch (e: Exception) { } // 그 열이 없는 provider는 예외를 던지기도 한다
+        }
+        return null
+    }
+
+    /** 보낼 파일을 연다. 공유한 앱의 권한이 끝났거나 파일이 지워졌으면 file_gone(다시 시도하지 않는다). */
+    fun openSource(ctx: Context, uri: Uri): InputStream = try {
+        ctx.contentResolver.openInputStream(uri) ?: throw ProtocolException("file_gone")
+    } catch (e: ProtocolException) { throw e } catch (e: Exception) { throw ProtocolException("file_gone") }
+
+    private fun readFully(input: InputStream, buf: ByteArray, max: Int = buf.size): Int {
         var n = 0
-        while (n < buf.size) {
-            val r = input.read(buf, n, buf.size - n)
+        while (n < max) {
+            val r = input.read(buf, n, max - n)
             if (r < 0) break
             n += r
         }
         return n
     }
 
-    /** 파일을 1 MiB 단위로 스트리밍해 보낸다(전체를 메모리에 올리지 않음). */
-    fun sendFile(ctx: Context, uri: Uri, onProgress: ((Long, Long) -> Unit)? = null, target: Pairing? = null) {
-        val meta = fileMeta(ctx, uri)
+    /**
+     * 예전 방식(§4 file, xfer 없음): 1 MiB 단위로 스트리밍하고 마지막 데이터 프레임에 last=1. 끊기면 상대는 전부 버린다.
+     * hello를 모르는 PC(1.6 이하)에만 쓴다.
+     */
+    fun sendFileLegacy(ctx: Context, uri: Uri, meta: FileMeta, p: Pairing, token: SendToken? = null,
+                       onProgress: ((Long, Long) -> Unit)? = null) {
         if (meta.size > Protocol.MAX_FILE) throw ProtocolException("file_too_large")
-        val p = target ?: paired(ctx)
-        val input = ctx.contentResolver.openInputStream(uri) ?: throw ProtocolException("file_open")
-        input.use { src ->
-            connect(p.pcIp, p.pcPort).use { s ->
+        openSource(ctx, uri).use { src ->
+            connect(p.pcIp, p.pcPort, token).use { s ->
                 val ch = msgChannel(p, s)
                 val h = header("file").put("name", meta.name.take(255)).put("size", meta.size)
                 ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
@@ -171,6 +219,7 @@ object Net {
                     if (sent > meta.size || (nxtLen == 0 && sent != meta.size))
                         throw ProtocolException("file_changed")
                     ch.send(cur, last = nxtLen == 0, len = curLen)
+                    token?.tick()
                     onProgress?.invoke(sent, meta.size)
                     if (nxtLen == 0) break
                     val t = cur; cur = nxt; nxt = t; curLen = nxtLen
@@ -178,7 +227,77 @@ object Net {
                 readReply(ch)
             }
         }
-        History.add(ctx, HistoryItem(Protocol.newId(), System.currentTimeMillis(), false, false, null,
-            meta.name, meta.size, uri.toString(), p.pcIp))
+    }
+
+    /**
+     * §11.2: offset부터 데이터 프레임(모두 last=0, 빈 프레임 없음)을 보내고 끝에 파일 전체의 SHA-256 트레일러를 last=1로 붙인다.
+     * 상대가 이미 가진 앞부분(offset 바이트)은 이 폰에서 읽어 해시만 이어 간다 — 연결하기 전에 해서 상대가 기다리다 끊지 않게.
+     * 보내는 중 파일이 바뀌면 트레일러 없이 끊는다(상대는 조각만 남긴다).
+     */
+    fun sendFileXfer(ctx: Context, uri: Uri, meta: FileMeta, p: Pairing, xfer: String, offset: Long,
+                     token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null) {
+        if (meta.size > Protocol.MAX_FILE) throw ProtocolException("file_too_large")
+        if (offset < 0 || offset > meta.size) throw ProtocolException("bad_xfer")
+        val md = Xfer.sha256()
+        val buf = ByteArray(Protocol.CHUNK)
+        openSource(ctx, uri).use { src ->
+            var left = offset
+            while (left > 0) {
+                val n = readFully(src, buf, minOf(left, buf.size.toLong()).toInt())
+                if (n == 0) throw ProtocolException("file_changed")
+                md.update(buf, 0, n)
+                left -= n
+                token?.tick()
+                if (token?.cancelled == true) throw ProtocolException("disconnected")
+            }
+            connect(p.pcIp, p.pcPort, token).use { s ->
+                val ch = msgChannel(p, s)
+                val h = header("file").put("name", meta.name.take(255)).put("size", meta.size)
+                    .put("xfer", xfer).put("offset", offset)
+                ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
+                var sent = offset
+                while (true) {
+                    val n = readFully(src, buf)
+                    if (n == 0) break
+                    sent += n
+                    if (sent > meta.size) throw ProtocolException("file_changed")
+                    md.update(buf, 0, n)
+                    ch.send(buf, last = false, len = n)
+                    token?.tick()
+                    onProgress?.invoke(sent, meta.size)
+                }
+                if (sent != meta.size) throw ProtocolException("file_changed")
+                ch.send(Xfer.trailer(md.digest()), last = true)
+                token?.tick()
+                readReply(ch)
+            }
+        }
     }
 }
+
+/**
+ * 보내기 한 번의 취소·감시 손잡이. cancel()은 열린 소켓을 닫아 막혀 있는 쓰기·읽기를 바로 끝낸다.
+ * lastActivity는 SendService가 오래 멈춘 연결(상대가 사라져 TCP 쓰기가 막힘)을 끊는 데 쓴다.
+ */
+class SendToken {
+    @Volatile var cancelled = false
+        private set
+    @Volatile private var socket: Socket? = null
+    @Volatile var lastActivity = System.currentTimeMillis()
+        private set
+
+    fun attach(s: Socket) {
+        socket = s
+        tick()
+        if (cancelled) close()
+    }
+
+    fun tick() { lastActivity = System.currentTimeMillis() }
+
+    /** 사용자가 취소: 결과를 버린다. */
+    fun cancel() { cancelled = true; close() }
+
+    /** 감시가 끊음: 실패(다시 시도)로 처리된다. */
+    fun close() { try { socket?.close() } catch (e: Exception) { } }
+}
+

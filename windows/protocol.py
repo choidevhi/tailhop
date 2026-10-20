@@ -63,6 +63,13 @@ _FILENAME_BAD = re.compile(f'[{_INVISIBLE}<>:"/\\\\|?*]')
 _NAME_BAD = re.compile(f"[{_INVISIBLE}]")
 
 
+class FileChanged(ValueError):
+    """보내는 사이 파일이 바뀌었다(크기). 보낼 곳 목록은 새 xfer로 처음부터 다시 보낸다."""
+
+    def __init__(self) -> None:
+        super().__init__(i18n.t("err.file_changed"))
+
+
 class ProtocolError(Exception):
     """상대가 규칙을 어겼거나 인증에 실패했다.
 
@@ -358,10 +365,145 @@ def unique_path(folder: Path, name: str) -> Path:
     return path
 
 
+_XFER_RE = re.compile(r"[0-9a-f]{32}")
+_SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _valid_xfer(value: object) -> bool:
+    return isinstance(value, str) and _XFER_RE.fullmatch(value) is not None
+
+
+def new_xfer() -> str:
+    return os.urandom(16).hex()
+
+
+def _open_part(folder: Path, name: str) -> tuple[Path, Path, BinaryIO]:
+    """(최종 경로, .part 경로, 열린 .part). .part는 배타적으로 만든다.
+    다른 수신이 같은 이름을 먼저 잡았으면 다음 번호로(남의 .part는 건드리지 않는다)."""
+    for _ in range(100):
+        final = unique_path(folder, name)
+        part = final.with_name(final.name + ".part")
+        try:
+            return final, part, open(part, "xb")
+        except FileExistsError:
+            continue
+    raise ProtocolError("storage")
+
+
+def _hash_prefix(path: Path, length: int) -> "hashlib._Hash":
+    """파일 앞 length 바이트의 SHA-256 진행 상태(이어받기·이어 보내기 때 이미 있는 부분)."""
+    digest = hashlib.sha256()
+    left = length
+    with open(path, "rb") as src:
+        while left > 0:
+            block = src.read(min(CHUNK, left))
+            if not block:
+                raise ProtocolError("resume_lost")
+            digest.update(block)
+            left -= len(block)
+    return digest
+
+
+class _NetDrop(Exception):
+    """받는 중 연결이 끊기거나 시간 초과(조각을 남겨 둘 실패)."""
+
+
+def _recv_data(ch: Channel) -> tuple[bytes, bool]:
+    try:
+        return ch.recv()
+    except ProtocolError as exc:
+        if exc.code == "disconnected":
+            raise _NetDrop() from exc
+        raise
+    except OSError as exc:  # 시간 초과·연결 리셋
+        raise _NetDrop() from exc
+
+
+def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, peer: str, book) -> Path:
+    """§11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 파일 전체를 확인한다.
+    끊기면 조각을 남기고(book.keep), 규칙 위반·해시 불일치면 지운다(book.drop)."""
+    size, xfer, offset = header["size"], header["xfer"], header.get("offset", 0)
+    if not _is_int(offset) or not 0 <= offset <= size:
+        raise ProtocolError("bad_xfer")
+    if free_bytes(save_dir) < size - offset + DISK_RESERVE:
+        raise ProtocolError("disk_full")
+
+    if offset > 0:
+        entry = book.claim(peer, xfer, size, offset)
+        if entry is None:
+            raise ProtocolError("resume_lost")
+        final, part = entry.final, entry.part
+        try:
+            out = open(part, "r+b")
+            out.truncate(offset)
+            out.seek(offset)
+            digest = _hash_prefix(part, offset)
+        except (OSError, ProtocolError) as exc:
+            book.drop(peer, xfer, part)
+            raise ProtocolError("resume_lost") from exc
+    else:
+        final, part, out = _open_part(save_dir, sanitize_filename(header["name"]))
+        book.begin(peer, xfer, size, part, final)
+        digest = hashlib.sha256()
+
+    got = offset
+    try:
+        with out:
+            while True:
+                data, last = _recv_data(ch)
+                if last:
+                    trailer = data
+                    break
+                if not data:
+                    raise ProtocolError("bad_xfer")
+                got += len(data)
+                if got > size:
+                    raise ProtocolError("file_too_big")
+                out.write(data)
+                digest.update(data)
+                if on_progress:
+                    on_progress(got, size)
+        if got != size:
+            raise ProtocolError("file_incomplete")
+        try:
+            sha = json.loads(bytes(trailer).decode("utf-8")).get("sha256")
+        except (UnicodeDecodeError, ValueError, AttributeError) as exc:
+            raise ProtocolError("bad_xfer") from exc
+        if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
+            raise ProtocolError("bad_xfer")
+        if not hmac.compare_digest(sha, digest.hexdigest()):
+            raise ProtocolError("hash_mismatch")
+        final = unique_path(save_dir, final.name) if final.exists() else final
+        part.rename(final)
+    except _NetDrop as exc:
+        book.keep(peer, xfer, part)
+        raise ProtocolError("disconnected") from exc
+    except BaseException:
+        book.drop(peer, xfer, part)
+        raise
+    book.finish(peer, xfer)
+    return final
+
+
 @dataclass
 class Received:
     header: dict
     path: Path | None = None
+    dup: bool = False  # 이미 받은 xfer를 다시 받음(응답이 사라져 상대가 다시 보냄). 기록·알림하지 않는다
+
+
+# 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello)
+_EMPTY_BODY = ("unpair", "hello")
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _recv_empty_end(ch: Channel, code: str = "bad_header") -> None:
+    body, last = ch.recv()
+    if body or not last:
+        raise ProtocolError(code)
 
 
 def receive_message(
@@ -369,8 +511,12 @@ def receive_message(
     guard: ReplayGuard,
     save_dir: Path,
     on_progress: Callable[[int, int], None] | None = None,
+    peer: str = "",
+    book=None,
 ) -> Received:
-    """헤더와 본문을 받아 검증한다. 파일은 .part로 받은 뒤 검증되면 이름을 바꾼다."""
+    """헤더와 본문을 받아 검증한다. 파일은 .part로 받은 뒤 검증되면 이름을 바꾼다.
+
+    peer·book(resume.ResumeBook): §11 확장(hello, xfer 이어받기·중복 무시)을 쓸 때. book이 없으면 예전 v1만 받는다."""
     raw, last = ch.recv()
     if last:
         raise ProtocolError("no_body")
@@ -378,45 +524,37 @@ def receive_message(
         header = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError("bad_header") from exc
-    if not isinstance(header, dict) or header.get("v") != 1 or header.get("type") not in ("text", "file", "unpair"):
+    known = ("text", "file", "unpair") + (("hello",) if book is not None else ())
+    if not isinstance(header, dict) or header.get("v") != 1 or header.get("type") not in known:
         raise ProtocolError("unsupported")
     guard.check_and_add(header.get("id"), header.get("ts"))
 
-    if header["type"] == "unpair":
-        # 상대가 페어링을 취소했다(폰에서 확인 코드를 거절함, §6). 본문 없이 빈 last 프레임 하나.
-        body, last = ch.recv()
-        if body or not last:
-            raise ProtocolError("bad_header")
+    if header["type"] in _EMPTY_BODY:
+        # unpair: 상대가 페어링을 취소했다(§6). hello: 능력·이어받기 위치 확인(§11.1). 응답은 부른 쪽이 만든다.
+        _recv_empty_end(ch)
         return Received(header)
+
+    xfer = header.get("xfer")
+    if xfer is not None and (book is None or not _valid_xfer(xfer)):
+        raise ProtocolError("bad_xfer")
 
     if header["type"] == "text":
         text = header.get("text")
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_TEXT:
             raise ProtocolError("bad_text")
-        body, last = ch.recv()
-        if body or not last:
-            raise ProtocolError("bad_text_format")
-        return Received(header)
+        _recv_empty_end(ch, "bad_text_format")
+        return Received(header, dup=xfer is not None and book.is_done(peer, xfer))
 
     size = header.get("size")
-    if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= MAX_FILE \
-            or not isinstance(header.get("name"), str):
+    if not _is_int(size) or not 0 <= size <= MAX_FILE or not isinstance(header.get("name"), str):
         raise ProtocolError("bad_file_info")
     save_dir.mkdir(parents=True, exist_ok=True)
+    if xfer is not None:
+        return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book))
+
     if free_bytes(save_dir) < size + DISK_RESERVE:
         raise ProtocolError("disk_full")
-    name = sanitize_filename(header["name"])
-    # .part는 배타적으로 만든다. 다른 수신이 같은 이름을 먼저 잡았으면 다음 번호로(남의 .part는 건드리지 않는다).
-    for _ in range(100):
-        final = unique_path(save_dir, name)
-        part = final.with_name(final.name + ".part")
-        try:
-            out = open(part, "xb")
-            break
-        except FileExistsError:
-            continue
-    else:
-        raise ProtocolError("storage")
+    final, part, out = _open_part(save_dir, sanitize_filename(header["name"]))
     got = 0
     try:
         with out:
@@ -440,10 +578,20 @@ def receive_message(
     return Received(header, final)
 
 
-def send_text(ch: Channel, sender: str, text: str) -> None:
+def send_hello(ch: Channel, sender: str, xfer: str | None = None, size: int | None = None) -> dict:
+    """§11.1: 상대의 능력(caps)과, xfer를 주면 이어 보낼 위치(have)·이미 끝났는지(done)를 묻는다.
+    예전 기기는 unsupported로 거부한다(ProtocolError)."""
+    fields = {} if xfer is None else {"xfer": xfer, "size": size}
+    ch.send(json.dumps(new_header("hello", sender, **fields)).encode("utf-8"), last=False)
+    ch.send(b"", last=True)
+    return read_reply(ch)
+
+
+def send_text(ch: Channel, sender: str, text: str, xfer: str | None = None) -> None:
     if len(text.encode("utf-8")) > MAX_TEXT:
         raise ValueError(i18n.t("err.text_too_long"))
-    ch.send(json.dumps(new_header("text", sender, text=text)).encode("utf-8"), last=False)
+    fields = {"text": text} if xfer is None else {"text": text, "xfer": xfer}
+    ch.send(json.dumps(new_header("text", sender, **fields)).encode("utf-8"), last=False)
     ch.send(b"", last=True)
 
 
@@ -465,7 +613,41 @@ def send_file(ch: Channel, sender: str, path: Path, on_progress: Callable[[int, 
                 break
             chunk = nxt
     if sent != size:
-        raise ValueError(i18n.t("err.file_changed"))
+        raise FileChanged()
+
+
+def send_file_xfer(ch: Channel, sender: str, path: Path, xfer: str, offset: int = 0,
+                   on_progress: Callable[[int, int], None] | None = None, kind: str = "file", **fields) -> None:
+    """§11.2: offset부터 데이터 프레임(last=0)을 보내고 끝에 파일 전체의 SHA-256 트레일러(last=1)를 붙인다.
+    이미 보낸 앞부분(offset)은 이 PC에서 다시 읽어 해시만 이어 간다. 보내는 중 파일이 바뀌면 ValueError."""
+    size = path.stat().st_size
+    if size > MAX_FILE:
+        raise ValueError(i18n.t("err.file_too_large"))
+    if not 0 <= offset <= size:
+        raise FileChanged()
+    try:
+        digest = _hash_prefix(path, offset)
+    except ProtocolError as exc:
+        raise FileChanged() from exc
+    header = new_header(kind, sender, name=path.name, size=size, xfer=xfer, offset=offset, **fields)
+    ch.send(json.dumps(header).encode("utf-8"), last=False)
+    sent = offset
+    with open(path, "rb") as src:
+        src.seek(offset)
+        while True:
+            block = src.read(CHUNK)
+            if not block:
+                break
+            sent += len(block)
+            if sent > size:  # 보내는 사이 커졌다: last 없이 끊어 상대가 조각만 남기게 한다
+                raise FileChanged()
+            digest.update(block)
+            ch.send(block, last=False)
+            if on_progress:
+                on_progress(sent, size)
+    if sent != size:
+        raise FileChanged()
+    ch.send(json.dumps({"sha256": digest.hexdigest()}).encode("utf-8"), last=True)
 
 
 def read_reply(ch: Channel) -> dict:

@@ -43,13 +43,6 @@
         </LinearLayout>
     </FrameLayout>
 
-    <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent" android:layout_height="3dp" android:layout_marginStart="24dp"
-        android:layout_marginEnd="24dp" android:indeterminate="true"
-        android:indeterminateTint="@color/label" android:visibility="invisible" />
-    <TextView android:id="@+id/progressText" android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:gravity="center" android:textSize="12sp" android:textColor="@color/secondary" android:visibility="gone" />
-
     <LinearLayout android:id="@+id/composer" android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="4dp"
         android:layout_marginBottom="10dp" android:background="@drawable/bg_composer" android:elevation="3dp"
