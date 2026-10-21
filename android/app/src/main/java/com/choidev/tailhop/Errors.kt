@@ -86,6 +86,10 @@ object Errors {
         "bad_name" to R.string.err_bad_name,
         "store_password" to R.string.err_store_password,
         "store_state" to R.string.err_store_state,
+        // 2.3.0 모든 기기 동기화(§19.4). sync_space는 화면용, mirror_damaged는 이 폰 안에서만 쓰는 코드(사본을 풀 수 없음)
+        "sync_vault" to R.string.err_sync_vault,
+        "sync_space" to R.string.err_sync_space,
+        "mirror_damaged" to R.string.err_mirror_damaged,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

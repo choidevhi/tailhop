@@ -37,6 +37,7 @@ import lightbox
 import media
 import player
 import migrate
+import mirror
 import settings_ui
 import store_ui
 import outbox
@@ -54,7 +55,7 @@ from node import PAIR_WINDOW_SEC, Node
 APP_NAME = "TailHop"
 CHAT_FILTERS = {"all": "chat.filter_all", "text": "chat.filter_text", "media": "chat.filter_media",
                 "file": "chat.filter_file"}
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.3.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -1745,6 +1746,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_cloud_window(local=True)
         elif kind == "cloud_sent":
             self._flash(t("flash.cloud_sent", name=data["name"]))
+        elif kind == "sync_changed":  # 동기화 사본이 바뀌었다(§19.3)
+            win = self.cloud_window
+            if win is not None and win.winfo_exists():
+                win.on_sync_changed(data)
+            if self.settings_window is not None and self.settings_window.winfo_exists():
+                self.settings_window.refresh_sync()
         elif kind == "store_changed":  # 강한 잠금: 잠기거나(Windows 잠금·쓰지 않음) 다른 기기에서 열었다
             if data.get("state") != cloudstore.OPEN:
                 win = self.cloud_window
@@ -1881,6 +1888,13 @@ def selftest(out: Path) -> int:
             up.commit()
             result["store"] = b"".join(st.read(st.node_at(["a.bin"], {}, "local"))) == b"hello"
             st.close()
+            copy = mirror.Mirror(Path(tmp) / "mirror", "selftest")  # 동기화 사본(§19.3): DPAPI로 잠근 열쇠
+            copy.apply("0" * 16, [mirror.Want("1" * 32, "a.bin", False, 5, 0, "2" * 32)],
+                       lambda _path, offset, length: b"hello"[offset:offset + length], lambda _path: b"")
+            copy.close()
+            again = mirror.Mirror(Path(tmp) / "mirror", "selftest")
+            result["mirror"] = b"".join(again.read(again.find("a.bin"))) == b"hello"
+            again.close()
         ff = media.ffmpeg_dir()
         result["ffmpeg"] = str(ff) if ff else ""
         if ff:
@@ -1891,7 +1905,7 @@ def selftest(out: Path) -> int:
     except Exception as exc:  # noqa: BLE001 - 결과 파일에 이유를 남긴다
         result["error"] = f"{type(exc).__name__}: {exc}"
     out.write_text(json.dumps(result, ensure_ascii=False), "utf-8")
-    return 0 if result.get("store") and result.get("ffmpeg_ok") else 1
+    return 0 if result.get("store") and result.get("mirror") and result.get("ffmpeg_ok") else 1
 
 
 def main() -> int:

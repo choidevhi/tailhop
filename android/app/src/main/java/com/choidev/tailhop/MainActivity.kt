@@ -48,8 +48,16 @@ class MainActivity : AppCompatActivity() {
         ReceiverService.start(this)
     }
 
+    /** 기기 줄의 용량(§19.1)을 마지막으로 그린 때의 기록 판. */
+    private var spacesShown = -1
+
     private val ticker = object : Runnable {
-        override fun run() { updateService(); ui.postDelayed(this, 1500) }
+        override fun run() {
+            updateService()
+            // PC들이 hello로 알린 용량이 바뀌었으면 기기 줄을 다시 그린다
+            if (PeerSpaces.shared.version != spacesShown) { spacesShown = PeerSpaces.shared.version; adapter.notifyDataSetChanged() }
+            ui.postDelayed(this, 1500)
+        }
     }
 
     private val onSwitch = { _: android.widget.CompoundButton, on: Boolean -> setReceiving(on, null) }
@@ -59,6 +67,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         applySystemBarInsets()
         Notifs.ensureChannels(this)
+        LocalSpace.init(this)
+        MirrorWork.schedule(this) // 기기 쪽 동기화의 주기 맞추기(§19.3, 이미 있으면 그대로)
         list = findViewById(R.id.devices)
         empty = findViewById(R.id.empty)
         svcState = findViewById(R.id.svcState)
@@ -89,6 +99,7 @@ class MainActivity : AppCompatActivity() {
         // 정해 둔 수신 중지 시간이 지났으면(알람이 늦거나 막혔어도) 여기서 다시 켠다.
         if (Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.OFF) ReceiverService.start(this)
         SendService.resumeIfNeeded(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
+        MirrorSync.request(this) // 앱을 엶: 동기화 사본을 맞춘다(허브마다 10분에 한 번까지, §19.3)
         reload(); ui.post(ticker)
         // 업데이트(1.9.0): 6시간에 한 번 조용히 확인. 설치 허용 설정에서 돌아왔으면 이어서 설치한다.
         updateRow()
@@ -123,6 +134,7 @@ class MainActivity : AppCompatActivity() {
             if (CloudMode.isOn(this)) m.menu.add(0, 6, 4, R.string.menu_cloud_collect)
                 .apply { isCheckable = true; isChecked = CloudMode.collectSetting(this@MainActivity) }
             m.menu.add(0, 7, 5, R.string.menu_update_check)
+            m.menu.add(0, 8, 6, R.string.menu_sync)
         }
         m.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -133,6 +145,7 @@ class MainActivity : AppCompatActivity() {
                 5 -> setCloud(!CloudMode.isOn(this))
                 6 -> setCollect(!CloudMode.collectSetting(this))
                 7 -> checkUpdate()
+                8 -> SyncSettings(this).show()
             }
             true
         }
@@ -323,6 +336,7 @@ class MainActivity : AppCompatActivity() {
             .setCancelable(false)
             .setPositiveButton(R.string.pair_confirm_yes) { _, _ ->
                 if (!pending.confirm { Store.save(applicationContext, it) }) return@setPositiveButton
+                MirrorWork.schedule(this)
                 ReceiverService.stop(this)
                 reload()
                 ui.postDelayed({ ReceiverService.start(this) }, 500)
@@ -383,6 +397,7 @@ class MainActivity : AppCompatActivity() {
             val name: TextView = v.findViewById(R.id.name)
             val preview: TextView = v.findViewById(R.id.preview)
             val time: TextView = v.findViewById(R.id.time)
+            val space: TextView = v.findViewById(R.id.space)
         }
         override fun getItemCount() = rows.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
@@ -400,6 +415,11 @@ class MainActivity : AppCompatActivity() {
             val fileIcon = if (last != null && !last.isText) fileIcon(ctx, h.preview.currentTextColor) else null
             h.preview.setCompoundDrawablesRelative(fileIcon, null, null, null)
             h.time.text = last?.let { Lang.shortTime(ctx, it.ts) } ?: ""
+            // 그 PC가 hello로 알린 용량(§19.1, 받았을 때만)
+            val sp = PeerSpaces.shared.get(p.pcIp)?.space
+            h.space.visibility = if (sp == null) View.GONE else View.VISIBLE
+            if (sp != null) h.space.text = ctx.getString(R.string.space_free_total,
+                android.text.format.Formatter.formatShortFileSize(ctx, sp.free), android.text.format.Formatter.formatShortFileSize(ctx, sp.total))
             h.itemView.setOnClickListener { openChat(p.pcIp) }
             h.itemView.setOnLongClickListener { deviceMenu(p); true }
         }
@@ -449,8 +469,12 @@ class MainActivity : AppCompatActivity() {
                     History.clearDevice(ctx, p.pcIp)
                     SendService.forgetDevice(ctx, p.pcIp)
                     val app = ctx.applicationContext
-                    Thread { Transfers.forgetPeer(app, p.pcIp) }.start() // 받다 만 조각 파일도 지운다
+                    // 받다 만 조각 파일과 그 PC의 동기화 사본(§19.3)도 지운다
+                    if (MirrorStatus.running == p.pcIp) MirrorSync.cancelRunning()
+                    Thread { Transfers.forgetPeer(app, p.pcIp); Mirror.delete(app, p.pcIp) }.start()
+                    PeerSpaces.shared.forget(p.pcIp)
                     Store.remove(ctx, p.pcIp)
+                    MirrorWork.schedule(ctx)
                     ReceiverService.stop(ctx)
                     if (Store.isPaired(ctx)) ReceiverService.start(ctx)
                     done()

@@ -123,6 +123,24 @@ object Thumbs {
 
     private fun decode(b: ByteArray): Bitmap? = try { BitmapFactory.decodeByteArray(b, 0, b.size) } catch (e: Exception) { null }
 
+    // ---------- 동기화 사본(2.3.0, §19.3) ----------
+
+    /**
+     * 이 폰의 동기화 사본에 든 허브 미리보기를 메모리로만 풀어 px 가까이 줄여 읽는다. 디스크 캐시에는 두지 않는다(평문이 남지 않게).
+     */
+    fun mirror(ctx: Context, ip: String, e: MirrorEntry, px: Int, job: Job): Bitmap? {
+        if (job.cancelled) return null
+        val bytes = Mirror.peek(ctx, ip)?.thumb(e) ?: return null
+        return try {
+            if (job.cancelled) return null
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+            var sample = 1
+            while (maxOf(o.outWidth, o.outHeight) / (sample * 2) >= px) sample *= 2
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        } catch (x: Exception) { null } finally { bytes.fill(0) }
+    }
+
     private fun diskDir(ctx: Context) = File(ctx.cacheDir, "thumbs")
 
     private fun diskFile(ctx: Context, key: String) = File(diskDir(ctx), Xfer.hex(Xfer.sha256().digest(key.toByteArray())) + ".jpg")

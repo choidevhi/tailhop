@@ -60,6 +60,8 @@ MISSING, NEW, LOCKED, OPEN = "missing", "new", "locked", "open"
 STORE_DIR = ".tailhop-store"  # 고른 폴더 안에서 저장소가 쓰는 단 하나의 하위 폴더
 OID_RE = re.compile(r"[0-9a-f]{32}")  # 객체·조각 파일 이름(평문 열에서 읽은 값은 늘 이것으로 확인한다)
 SWEEP_SEC = 3600
+SYNC_PAGE = 2000  # §19.2 sync_manifest 한 쪽
+SYNC_SET_MAX = 500
 
 
 def _is_link(path: Path) -> bool:
@@ -349,6 +351,9 @@ class Store:
         self.fails: dict[tuple[str, str], tuple[int, float]] = {}
         self.gates: dict[str, threading.Lock] = {}
         self.uploads: dict[str, Upload] = {}  # oid → 받는 중
+        self.changes = 0  # 항목이 바뀔 때마다 올린다(동기화 목록을 다시 만들지 정한다, §19.2)
+        self.sync_all = False
+        self._manifest: tuple[int, str, list[dict]] | None = None
         self.on_media = on_media  # 새 사진·영상이 들어오면(미리보기 만들기)
         self.on_open = on_open  # 저장소·잠긴 폴더가 열리면(밀린 미리보기 만들기)
         self.refresh()
@@ -602,6 +607,7 @@ class Store:
         self.rings = {MAIN: keys.primitive(handle)}
         self._load_ring(MAIN)
         self.state = OPEN
+        self.sync_all = self.secret_get("sync_all") == b"1"
         self._sweep()
         self.swept = self.clock()
         if self.on_open is not None:
@@ -624,10 +630,12 @@ class Store:
         self.rings.pop(ring, None)
 
     def _cache(self, node: Node) -> None:
+        self.changes += 1
         self.nodes[node.id] = node
         self.kids.setdefault(node.parent, {})[node.name] = node.id
 
     def _uncache(self, node: Node) -> None:
+        self.changes += 1
         self.nodes.pop(node.id, None)
         siblings = self.kids.get(node.parent)
         if siblings is not None and siblings.get(node.name) == node.id:
@@ -638,6 +646,7 @@ class Store:
                                              _node_ad(node.id, node.parent, node.ring))
 
     def _put_row(self, node: Node) -> None:
+        self.changes += 1  # meta만 바뀌어도(미리보기·동기화 표시·이름)
         self.db.execute("INSERT OR REPLACE INTO nodes VALUES(?, ?, ?, ?)",
                         (node.id, node.parent, node.ring, self._seal(node)))
 
@@ -1012,7 +1021,127 @@ class Store:
         roles = sorted((node.meta.get("v") or {}).keys())
         if roles:
             out["variants"] = roles
+        if self.sync_on(node):
+            out["sync"] = True
         return out
+
+    # ---------- 모든 기기 동기화(§19.2) ----------
+    def sync_on(self, node: Node) -> bool:
+        """이 항목이 동기화 대상인가: 자기 또는 가장 가까운 위 폴더의 표시(y), 없으면 저장소 전체 설정.
+        잠긴 폴더와 그 안, 휴지통은 늘 아니다."""
+        here = node
+        while True:
+            if here.ring != MAIN or here.vault:
+                return False
+            mark = here.meta.get("y")
+            if mark in (0, 1) and not isinstance(mark, bool):
+                return mark == 1
+            if here.parent == "":
+                return self.sync_all
+            parent = self.nodes.get(here.parent)
+            if parent is None:  # 휴지통(TRASH) 또는 읽을 수 없는 줄
+                return False
+            here = parent
+
+    def _inherited(self, node: Node) -> bool:
+        parent = self.nodes.get(node.parent)
+        if node.parent == "":
+            return self.sync_all
+        return parent is not None and self.sync_on(parent)
+
+    def set_sync_all(self, on: bool) -> None:
+        with self._mu:
+            self._require_open()
+            self.secret_put("sync_all", b"1" if on else b"0")
+            self.sync_all = bool(on)
+            self.changes += 1
+
+    def sync_set(self, paths: list[list[str]], on: bool, header: dict, peer: str) -> tuple[int, list[dict]]:
+        """고른 항목을 동기화 대상에 넣거나 뺀다. 폴더면 그 아래의 따로 단 표시는 지운다(폴더를 따르게).
+        (바뀐 수, 안 된 것[{"path","code"}])."""
+        changed, failed = 0, []
+        with self._mu:
+            self._require_open()
+            for parts in paths[:SYNC_SET_MAX]:
+                path = cloud.join_path(parts)
+                try:
+                    node = self._walk(parts, header, peer)
+                except p.ProtocolError as exc:
+                    failed.append({"path": path, "code": exc.code})
+                    continue
+                if node is None:
+                    failed.append({"path": path, "code": "bad_path"})
+                    continue
+                if not self._syncable(node):
+                    failed.append({"path": path, "code": "sync_vault"})
+                    continue
+                before = self.sync_on(node)
+                touched = []
+                if self._inherited(node) == on:
+                    if node.meta.pop("y", None) is not None:
+                        touched.append(node)
+                elif node.meta.get("y") != (1 if on else 0):
+                    node.meta["y"] = 1 if on else 0
+                    touched.append(node)
+                if node.is_dir:
+                    for nid, _parent, ring in self._subtree(node.id):
+                        kid = self.nodes.get(nid)
+                        if nid != node.id and ring == MAIN and kid is not None and kid.meta.pop("y", None) is not None:
+                            touched.append(kid)
+                if touched:
+                    with self.db:
+                        self.db.execute("BEGIN")
+                        for item in touched:
+                            self._put_row(item)
+                if touched or before != self.sync_on(node):
+                    changed += 1
+        return changed, failed
+
+    def _syncable(self, node: Node) -> bool:
+        here: Node | None = node
+        while here is not None:
+            if here.ring != MAIN or here.vault:
+                return False
+            if here.parent == "":
+                return True
+            here = self.nodes.get(here.parent)
+        return False  # 휴지통 안
+
+    def sync_manifest(self) -> tuple[str, list[dict]]:
+        """동기화 대상 전체 목록(경로 순서)과 그 요약값. 대상이 없으면 ("", []). 바뀌지 않았으면 만든 것을 다시 쓴다."""
+        with self._mu:
+            self._require_open()
+            if self._manifest is not None and self._manifest[0] == self.changes:
+                return self._manifest[1], self._manifest[2]
+            items: list[dict] = []
+            stack = [("", "", self.sync_all)]
+            while stack:
+                folder, prefix, inherited = stack.pop()
+                for name, nid in self.kids.get(folder, {}).items():
+                    node = self.nodes[nid]
+                    if node.ring != MAIN or node.vault:
+                        continue
+                    mark = node.meta.get("y")
+                    on = mark == 1 if mark in (0, 1) and not isinstance(mark, bool) else inherited
+                    path = prefix + name
+                    if node.is_dir:
+                        if on:
+                            items.append({"id": node.id, "path": path, "dir": True})
+                        stack.append((nid, path + "/", on))
+                        continue
+                    if not on or not node.meta.get("o"):
+                        continue
+                    entry = {"id": node.id, "path": path, "dir": False, "size": node.size, "mtime": node.mtime,
+                             "ver": node.meta["o"]}
+                    thumb = node.variant("thumb")
+                    if thumb:
+                        entry["thumb"], entry["tver"] = int(thumb["s"]), thumb["o"]
+                    items.append(entry)
+            items.sort(key=lambda x: x["path"])
+            digest = hashlib.sha256(json.dumps(items, separators=(",", ":"), ensure_ascii=False).encode()) \
+                .hexdigest()[:16] if items else ""
+            self._manifest = (self.changes, digest, items)
+            return digest, items
 
     def list_children(self, parts: list[str], header: dict, peer: str) -> list[dict]:
         with self._mu:

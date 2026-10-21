@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import io
+import json
 from dataclasses import dataclass
 
 from PIL import Image
@@ -21,6 +22,7 @@ THUMB_PX = 512  # 딸려 두는 미리보기의 긴 변
 DECODE_LIMIT = 200 * 1024 * 1024  # 미리보기를 만들려고 메모리에서 풀어 보는 원본 크기 상한
 MAX_PIXELS = 170_000_000
 VARIANTS = ("thumb", "screen", "play", "poster")
+SYNC_PAGE_BYTES = 600_000  # §19.2 목록 한 쪽의 글자 수 상한(프레임 1 MiB 안)
 
 
 def jpeg(image: Image.Image, px: int, limit: int = THUMB_MAX) -> bytes:
@@ -131,6 +133,28 @@ class Hub:
 
     def rename(self, items: list[tuple[list[str], str]], header: dict, peer: str) -> tuple[list[dict], list[dict]]:
         return self.store.rename(items, header, peer)
+
+    # ---------- 모든 기기 동기화(§19.2) ----------
+    def sync_set(self, paths: list[list[str]], on: bool, header: dict, peer: str) -> tuple[int, list[dict]]:
+        return self.store.sync_set(paths, on, header, peer)
+
+    def sync_all(self, on: bool) -> None:
+        self.store.set_sync_all(on)
+
+    def sync_digest(self) -> str:
+        return self.store.sync_manifest()[0]
+
+    def sync_page(self, cursor: int) -> tuple[str, list[dict], int | None]:
+        """한 쪽: 최대 SYNC_PAGE개, 응답이 한 프레임(1 MiB)을 넘지 않게 글자 수로도 자른다."""
+        digest, items = self.store.sync_manifest()
+        page, size, nxt = [], 0, cursor
+        while nxt < len(items) and len(page) < cs.SYNC_PAGE:
+            size += len(json.dumps(items[nxt], ensure_ascii=False).encode("utf-8")) + 2
+            if page and size > SYNC_PAGE_BYTES:
+                break
+            page.append(items[nxt])
+            nxt += 1
+        return digest, page, nxt if nxt < len(items) else None
 
     def put_target(self, dir_text: object, header: dict, peer: str) -> StoreTarget:
         folder, ring = self.store.folder_for_put(cloud.parse_path(dir_text), header, peer)

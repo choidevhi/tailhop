@@ -25,7 +25,7 @@ set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC%" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 "%ISCC%" installer\TailHop.iss
 if errorlevel 1 goto :failed
-echo Done: ..\dist\TailHop_Setup_2.2.1.exe
+echo Done: ..\dist\TailHop_Setup_2.3.0.exe
 exit /b 0
 :failed
 echo Build failed.

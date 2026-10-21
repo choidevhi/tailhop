@@ -15,6 +15,10 @@
             android:layout_marginTop="2dp" android:textSize="13sp" android:textColor="@color/secondary"
             android:maxLines="3" android:ellipsize="end" />
     </LinearLayout>
+    <!-- 2.3.0: 모든 기기 동기화 대상(§19.2 "sync":true) -->
+    <ImageView android:id="@+id/sync" android:layout_width="16dp" android:layout_height="16dp"
+        android:layout_marginStart="8dp" android:src="@drawable/ic_sync" android:tint="@color/secondary"
+        android:visibility="gone" android:contentDescription="@string/sync_badge_desc" />
     <ImageView android:id="@+id/trail" android:layout_width="18dp" android:layout_height="18dp"
         android:layout_marginStart="8dp" android:src="@drawable/ic_chevron_right" android:tint="@color/secondary"
         android:importantForAccessibility="no" />

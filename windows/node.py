@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import shutil
 import socket
 import threading
 import time
@@ -20,7 +21,9 @@ from typing import Callable
 
 import cloud
 import cloudstore as cs
+import devsync
 import hub as hubmod
+import mirror as mirrormod
 import media
 import outbox
 import protocol as p
@@ -43,6 +46,8 @@ DEFAULT_CLOUD_DIR = Path.home() / "TailHop Cloud"
 STORE_IDLE_MIN = 30  # 강한 잠금: 이만큼 쓰지 않으면 잠근다(설정에서 바꿈, 0이면 시간으로는 안 잠금)
 LOCK_POLL_SEC = 5
 STORE_RECHECK_SEC = 5  # 저장소가 열려 있지 않으면 이 간격으로 다시 본다(드라이브를 다시 꽂음 등)
+SYNC_NOTIFY_SEC = 30  # §19.2 허브: 동기화 대상이 바뀌었는지 이 간격으로 보고 기기들에 알린다
+SYNC_SET_BATCH = 500
 MOVE_BATCH = 200  # cloud_move 한 번에 보내는 경로 수(§16, 헤더가 한 프레임을 넘지 않게)
 
 
@@ -98,6 +103,10 @@ class Node:
         self._state: tuple | None = None
         self._stop = False
         self._announced: dict[str, float] = {}
+        self.peer_space: dict[str, tuple[int, int, float]] = {}  # 기기 → (남은, 전체, 받은 시각) §19.1
+        self.mirror_base = mirrormod.MIRROR_DIR if app_dir is None else self.app_dir / "Mirror"
+        self.syncer = devsync.Syncer(self, self.mirror_base)
+        self._notified_sync: str | None = None
 
     # ---------- 설정 ----------
     @property
@@ -257,10 +266,13 @@ class Node:
         threading.Thread(target=self._serve_forever, daemon=True).start()
         threading.Thread(target=self._presence_loop, daemon=True, name="tailhop-presence").start()
         threading.Thread(target=self._lock_loop, daemon=True, name="tailhop-lock").start()
+        threading.Thread(target=self._sync_notify_loop, daemon=True, name="tailhop-sync-notify").start()
         self.outbox.start()
+        self.syncer.start()
 
     def stop(self) -> None:
         self._stop = True
+        self.syncer.stop()
         self.outbox.stop()
         with self._lock:
             sock, self.listener = self.listener, None
@@ -367,6 +379,92 @@ class Node:
             for sid in waiting:
                 if online.get(sid):
                     self.outbox.wake(sid)
+
+    # ---------- 모든 기기 동기화·용량(2.3.0, §19) ----------
+    def space(self) -> dict:
+        """이 기기의 용량(§19.1): 허브면 저장소 드라이브, 아니면 동기화 사본 드라이브."""
+        st = self._store
+        where = st.root if st is not None and st.state == cs.OPEN else self.mirror_base
+        while not where.exists() and where.parent != where:
+            where = where.parent
+        try:
+            usage = shutil.disk_usage(where)
+        except OSError:
+            return {}
+        return {"free": usage.free, "total": usage.total}
+
+    def _remember_space(self, sid: str, raw: object) -> None:
+        if isinstance(raw, dict) and _uint(raw.get("free")) and _uint(raw.get("total")):
+            self.peer_space[sid] = (raw["free"], raw["total"], time.time())
+
+    def _hub_sync(self) -> str:
+        """허브의 동기화 요약값(열려 있고 대상이 있을 때만). 강한 잠금의 '쓴 시간'은 건드리지 않는다."""
+        st = self._store
+        if st is None or st.state != cs.OPEN:
+            return ""
+        try:
+            return st.sync_manifest()[0]
+        except p.ProtocolError:
+            return ""
+
+    def _hello_extra(self) -> dict:
+        extra = {"space": self.space()}
+        digest = self._hub_sync()
+        if digest:
+            extra["sync"] = digest
+        return extra
+
+    def _sync_notify_loop(self) -> None:
+        """허브: 동기화 대상이 바뀌면(30초마다 본다) 연결된 기기마다 hello를 보내 맞추게 한다(§19.2)."""
+        while not self._stop:
+            time.sleep(SYNC_NOTIFY_SEC)
+            digest = self._hub_sync()
+            if self._notified_sync is None or self._store is None or self._store.state != cs.OPEN:
+                self._notified_sync = digest  # 켠 직후·잠겨 있을 때는 알리기(announce)가 대신한다
+                continue
+            if digest == self._notified_sync:
+                continue
+            self._notified_sync = digest
+            for sid in list(self.pairings):
+                threading.Thread(target=self._quiet_hello, args=(sid, digest), daemon=True,
+                                 name="tailhop-sync-notify").start()
+
+    def _quiet_hello(self, sid: str, digest: str) -> None:
+        try:
+            self._hello(sid, sync_note=digest)
+        except Exception:  # noqa: BLE001 - 꺼져 있으면 켜질 때 알리기·15분 확인으로 맞춘다
+            pass
+
+    def sync_set(self, stable_id: str, paths: list[str], on: bool) -> tuple[int, list[dict]]:
+        """§19.2: 허브에서 고른 항목을 동기화 대상에 넣거나 뺀다(500개씩, 잠긴 폴더 안이면 그 열쇠도)."""
+        changed, failed = 0, []
+        for start in range(0, len(paths), SYNC_SET_BATCH):
+            batch = paths[start:start + SYNC_SET_BATCH]
+            tokens = sorted({self.token_for(stable_id, x) for x in batch} - {None})
+            fields: dict = {"paths": batch, "on": bool(on)}
+            if tokens:
+                fields["token"], fields["tokens"] = tokens[0], tokens[:16]
+            reply = self._cloud_request(stable_id, "sync_set", **fields)
+            changed += reply.get("changed") if _uint(reply.get("changed")) else 0
+            asked = set(batch)
+            failed += [x for x in reply.get("failed") or [] if isinstance(x, dict) and x.get("path") in asked
+                       and isinstance(x.get("code"), str)]
+        return changed, failed
+
+    def sync_all(self, stable_id: str, on: bool) -> None:
+        self._cloud_request(stable_id, "sync_set", all=bool(on))
+
+    def sync_manifest(self, stable_id: str, cursor: int = 0) -> dict:
+        return self._cloud_request(stable_id, "sync_manifest", cursor=cursor)
+
+    def set_sync_receive(self, on: bool) -> None:
+        """이 기기에 동기화 받기(§19.3). 끄면 모든 사본을 지운다."""
+        self.settings["sync_receive"] = bool(on)
+        self.save_settings()
+        if on:
+            self.syncer.poke()
+        else:
+            threading.Thread(target=self.syncer.wipe_all, daemon=True, name="tailhop-sync-wipe").start()
 
     def _admissible(self, ip: str) -> bool:
         if any(x.ip == ip for x in list(self.pairings.values())):
@@ -516,7 +614,10 @@ class Node:
             self.on_event("peer_unpaired", {"id": pairing.stable_id, "name": pairing.name})
             return
         if kind == "hello":
+            self._remember_space(pairing.stable_id, got.header.get("space"))
             p.send_reply(ch, True, **self._hello_reply(pairing.stable_id, got.header))
+            if isinstance(got.header.get("sync"), str):  # 허브가 동기화 대상이 바뀌었다고 알렸다(§19.2)
+                self.syncer.poke(pairing.stable_id)
             return
         if kind in p.CLOUD_REQUESTS:
             self._serve_cloud(conn, ch, hub, got.header, pairing)
@@ -558,9 +659,15 @@ class Node:
     def _hello_reply(self, peer: str, header: dict) -> dict:
         """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
         state = self.cloud_state
-        reply = {"caps": ["xfer", "cloud", "cloud2", "update", "move", "move2", "store", "rename", "store_unlock"],
+        reply = {"caps": ["xfer", "cloud", "cloud2", "update", "move", "move2", "store", "rename", "store_unlock",
+                          "sync"],
                  "cloud": state == cs.OPEN,
-                 "have": 0, "done": False}
+                 "have": 0, "done": False, "space": self.space()}
+        digest = self._hub_sync()
+        if digest:
+            reply["sync"] = digest  # §19.2
+        if state == cs.OPEN and self._store is not None and self._store.sync_all:
+            reply["sync_all"] = True
         if state != "off":
             reply["store"] = state  # §17: 켜져 있지만 열리지 않음(missing·new·locked)을 앱이 알 수 있게
             if self.settings.get("store_strong") is True:
@@ -582,6 +689,11 @@ class Node:
         kind, peer = header["type"], pairing.stable_id
         changed = True
         try:
+            if kind in ("sync_set", "sync_manifest"):
+                self._serve_sync(ch, hub, header, peer)
+                if kind == "sync_set":
+                    self.on_event("cloud_changed", {"peer": pairing.name, "path": ""})
+                return
             parts = cloud.parse_path(header.get("path", ""))
             if kind in ("cloud_list", "cloud_search"):
                 cursor = header.get("cursor", 0)
@@ -646,6 +758,31 @@ class Node:
             self._refuse(conn, ch, exc)
         except OSError:
             self._refuse(conn, ch, p.ProtocolError("cloud_denied"))
+
+    @staticmethod
+    def _serve_sync(ch: p.Channel, hub: hubmod.Hub, header: dict, peer: str) -> None:
+        """§19.2 sync_set·sync_manifest."""
+        if header["type"] == "sync_manifest":
+            cursor = header.get("cursor", 0)
+            if not _uint(cursor):
+                raise p.ProtocolError("bad_header")
+            digest, items, nxt = hub.sync_page(cursor)
+            p.send_reply(ch, True, digest=digest, items=items, next=nxt)
+            return
+        if "all" in header:
+            if not isinstance(header["all"], bool):
+                raise p.ProtocolError("bad_header")
+            hub.sync_all(header["all"])
+            p.send_reply(ch, True, changed=1, failed=[])
+            return
+        paths, on = header.get("paths"), header.get("on")
+        if not isinstance(paths, list) or not 1 <= len(paths) <= SYNC_SET_BATCH or not isinstance(on, bool):
+            raise p.ProtocolError("bad_header")
+        parts = [cloud.parse_path(x) for x in paths]
+        if any(not x for x in parts):
+            raise p.ProtocolError("bad_path")
+        changed, failed = hub.sync_set(parts, on, header, peer)
+        p.send_reply(ch, True, changed=changed, failed=failed)
 
     def _serve_store(self, conn: socket.socket, ch: p.Channel, header: dict, pairing: store.Pairing) -> None:
         """§18.3 store_unlock·store_lock: 강한 잠금인 저장소를 다른 기기에서 열거나 잠근다."""
@@ -817,6 +954,8 @@ class Node:
         self.outbox.drop_peer(stable_id)
         self.book.forget_peer(stable_id)
         self._caps.pop(stable_id, None)
+        self.peer_space.pop(stable_id, None)
+        threading.Thread(target=self.syncer.forget, args=(stable_id,), daemon=True, name="tailhop-sync-wipe").start()
 
     # ---------- 보내기 (수신 중지와 상관없이 된다) ----------
     def _open(self, pairing: store.Pairing) -> socket.socket:
@@ -849,15 +988,21 @@ class Node:
         send_info, _ = p.direction_infos(pairing.kind, pairing.role)
         return p.derive_key(pairing.secret, send_info)
 
-    def _hello(self, stable_id: str, xfer: str | None = None, size: int | None = None) -> dict:
-        """상대에게 hello를 묻는다. 예전 기기(unsupported)면 caps가 빈 응답을 만든다. 능력은 잠시 기억한다."""
+    def _hello(self, stable_id: str, xfer: str | None = None, size: int | None = None,
+               sync_note: str | None = None) -> dict:
+        """상대에게 hello를 묻는다. 예전 기기(unsupported)면 caps가 빈 응답을 만든다. 능력은 잠시 기억한다.
+        이 기기의 용량과(허브면) 동기화 값을 함께 알리고, 상대의 용량·동기화 값을 본다(§19).
+        sync_note: 허브가 대상이 바뀌었다고 알릴 때 그 값(비었으면 대상이 없어졌다)."""
         sock, pairing = self._connect(stable_id)
         legacy = {"caps": [], "cloud": False, "have": 0, "done": False}
         remember = time.monotonic()
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
             try:
-                reply = p.send_hello(ch, self.me.name, xfer, size)
+                extra = self._hello_extra()
+                if sync_note is not None:
+                    extra["sync"] = sync_note
+                reply = p.send_hello(ch, self.me.name, xfer, size, **extra)
             except p.ProtocolError as exc:
                 if exc.code not in ("unsupported", "disconnected"):
                     raise
@@ -874,6 +1019,8 @@ class Node:
         caps = frozenset(x for x in caps if isinstance(x, str)) if isinstance(caps, list) else frozenset()
         self._caps[stable_id] = (remember, caps)
         reply["caps"] = caps
+        self._remember_space(stable_id, reply.get("space"))
+        self.syncer.consider(stable_id, reply)
         return reply
 
     def _known_caps(self, stable_id: str) -> frozenset[str] | None:
@@ -1103,7 +1250,7 @@ class Node:
             roles = tuple(x for x in roles if x in hubmod.VARIANTS) if isinstance(roles, list) else ()
             items.append(cloud.Item(raw["name"], raw["dir"], raw["size"], raw["mtime"], raw.get("locked") is True,
                                     state if isinstance(state, str) else "", progress if _uint(progress) else 0,
-                                    roles))
+                                    roles, raw.get("sync") is True))
         nxt = reply.get("next")
         return items, nxt if _uint(nxt) and nxt > cursor else None
 

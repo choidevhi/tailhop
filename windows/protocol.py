@@ -569,7 +569,8 @@ class Received:
 
 # 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
 CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir", "cloud_thumb", "cloud_search",
-                  "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin", "cloud_move", "cloud_rename")
+                  "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin", "cloud_move", "cloud_rename",
+                  "sync_set", "sync_manifest")
 STORE_REQUESTS = ("store_unlock", "store_lock")  # 저장소가 잠겨 있어도 받는다(§18.3)
 CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
 _EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS + STORE_REQUESTS
@@ -674,10 +675,10 @@ def receive_message(
     return Received(header, final)
 
 
-def send_hello(ch: Channel, sender: str, xfer: str | None = None, size: int | None = None) -> dict:
+def send_hello(ch: Channel, sender: str, xfer: str | None = None, size: int | None = None, **extra) -> dict:
     """§11.1: 상대의 능력(caps)과, xfer를 주면 이어 보낼 위치(have)·이미 끝났는지(done)를 묻는다.
-    예전 기기는 unsupported로 거부한다(ProtocolError)."""
-    fields = {} if xfer is None else {"xfer": xfer, "size": size}
+    extra: 이 기기의 용량(space)·허브의 동기화 값(sync, §19). 예전 기기는 unsupported로 거부한다(ProtocolError)."""
+    fields = dict(extra) if xfer is None else {"xfer": xfer, "size": size, **extra}
     ch.send(json.dumps(new_header("hello", sender, **fields)).encode("utf-8"), last=False)
     ch.send(b"", last=True)
     return read_reply(ch)

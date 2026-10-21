@@ -15,6 +15,11 @@
             android:layout_gravity="top|end" android:layout_margin="6dp" android:padding="4dp"
             android:background="@drawable/bg_badge" android:tint="@color/onAccent" android:visibility="gone"
             android:importantForAccessibility="no" />
+        <!-- 2.3.0: 모든 기기 동기화 대상 -->
+        <ImageView android:id="@+id/syncBadge" android:layout_width="22dp" android:layout_height="22dp"
+            android:layout_gravity="bottom|end" android:layout_margin="6dp" android:padding="4dp"
+            android:background="@drawable/bg_badge" android:tint="@color/onAccent" android:src="@drawable/ic_sync"
+            android:visibility="gone" android:contentDescription="@string/sync_badge_desc" />
         <View android:id="@+id/selDim" android:layout_width="match_parent" android:layout_height="match_parent"
             android:background="@drawable/bg_sel_dim" android:visibility="gone" />
         <ImageView android:id="@+id/check" android:layout_width="22dp" android:layout_height="22dp"

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 홈의 기기 한 줄(유리 카드 안): 아이콘 칸(rounded-lg) + 상태 점, 이름·시각, 마지막 내용 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent" android:layout_height="68dp"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="68dp"
+    android:paddingTop="10dp" android:paddingBottom="10dp"
     android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="14dp" android:paddingEnd="16dp"
     android:baselineAligned="false"
     android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
@@ -24,5 +25,9 @@
         <TextView android:id="@+id/preview" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="2dp" android:textSize="13sp" android:textColor="@color/secondary"
             android:maxLines="1" android:ellipsize="end" android:drawablePadding="4dp" />
+        <!-- 2.3.0(§19.1): 그 PC가 알린 용량 "여유 X / 전체 Y"(받았을 때만) -->
+        <TextView android:id="@+id/space" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="2dp" android:textSize="12sp" android:textColor="@color/secondary"
+            android:maxLines="1" android:ellipsize="end" android:visibility="gone" />
     </LinearLayout>
 </LinearLayout>

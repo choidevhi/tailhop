@@ -22,7 +22,7 @@ import java.util.concurrent.Future
  * 디스크 캐시는 쓰지 않는다(잠긴 폴더 안 영상도 평문이 이 폰 디스크에 남지 않게). 처음 받은 머리(size·mtime)를 기억해 다음 범위마다
  * 함께 보낸다 — 그 사이 파일이 바뀌면 허브가 cloud_changed로 거부한다. close()는 진행 중인 연결을 모두 끊는다(SendToken).
  */
-class CloudVideo(private val p: Pairing, private val path: String, private val variant: String?) {
+class CloudVideo(private val p: Pairing, private val path: String, private val variant: String?) : VideoFeed {
     @Volatile private var head: CloudWire.Head? = null
     @Volatile private var closed = false
     private val live: MutableSet<SendToken> = Collections.synchronizedSet(HashSet())
@@ -57,14 +57,14 @@ class CloudVideo(private val p: Pairing, private val path: String, private val v
     }
 
     /** 재생을 끝냄: 받던 연결을 모두 끊고 미리 받기 스레드도 끝낸다. */
-    fun close() {
+    override fun close() {
         closed = true
         synchronized(live) { live.toList() }.forEach { it.cancel() }
         pool.shutdownNow()
     }
 
     @OptIn(UnstableApi::class)
-    fun factory(): DataSource.Factory = DataSource.Factory { Source(this) }
+    override fun factory(): DataSource.Factory = DataSource.Factory { Source(this) }
 
     /**
      * ExoPlayer의 DataSource: open(dataSpec)마다 그 위치부터 범위를 받아 메모리 버퍼에서 읽어 준다. 버퍼를 다 읽으면 미리 받아 둔
@@ -176,5 +176,77 @@ class CloudVideo(private val p: Pairing, private val path: String, private val v
         const val CHUNK = CloudRange.MAX_LEN.toLong()
         /** open 뒤 처음 받는 범위. */
         const val START = 1024L * 1024
+    }
+}
+
+/** 재생기에 넘길 영상 한 편(허브에서 범위로 받는 CloudVideo, 이 폰의 동기화 사본에서 읽는 MirrorVideo). */
+interface VideoFeed {
+    @OptIn(UnstableApi::class)
+    fun factory(): DataSource.Factory
+    fun close()
+}
+
+/**
+ * 동기화 사본(§19.3)의 영상: 암호화된 객체를 원하는 위치부터 1 MiB 청크씩 메모리로만 풀어 재생기에 넘긴다(평문을 디스크·캐시에 쓰지 않는다).
+ * 데이터를 쓰지 않고 허브가 꺼져 있어도 재생된다. close()는 파일을 닫는다(그 뒤 읽기는 오류).
+ */
+class MirrorVideo(private val reader: MirrorObject.Reader) : VideoFeed {
+    @Volatile private var closed = false
+
+    val size: Long get() = reader.size
+
+    /** pos부터 읽는다(재생기의 읽기 스레드들이 같이 쓰므로 하나씩). */
+    @Synchronized fun read(pos: Long, buf: ByteArray, off: Int, len: Int): Int {
+        if (closed) throw ProtocolException("disconnected")
+        return reader.read(pos, buf, off, len)
+    }
+
+    @OptIn(UnstableApi::class)
+    override fun factory(): DataSource.Factory = DataSource.Factory { Source(this) }
+
+    @Synchronized override fun close() {
+        closed = true
+        reader.close()
+    }
+
+    @OptIn(UnstableApi::class)
+    private class Source(private val v: MirrorVideo) : BaseDataSource(false) {
+        private var uri: Uri? = null
+        private var pos = 0L
+        private var left = 0L
+        private var opened = false
+
+        override fun open(dataSpec: DataSpec): Long {
+            uri = dataSpec.uri
+            transferInitializing(dataSpec)
+            val total = v.size
+            pos = dataSpec.position
+            if (pos > total) throw DataSourceException(PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
+            left = if (dataSpec.length == C.LENGTH_UNSET.toLong()) total - pos else minOf(dataSpec.length, total - pos)
+            opened = true
+            transferStarted(dataSpec)
+            return left
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (length == 0) return 0
+            if (left == 0L) return C.RESULT_END_OF_INPUT
+            val n = v.read(pos, buffer, offset, minOf(length.toLong(), left).toInt())
+            if (n < 0) return C.RESULT_END_OF_INPUT
+            pos += n
+            left -= n
+            bytesTransferred(n)
+            return n
+        }
+
+        override fun getUri(): Uri? = uri
+
+        override fun close() {
+            uri = null
+            if (opened) {
+                opened = false
+                transferEnded()
+            }
+        }
     }
 }

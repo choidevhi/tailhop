@@ -189,6 +189,8 @@ class CloudWindow(ctk.CTkToplevel):
         self.states: dict[str, str] = {}  # 기기별 상태: checking | on | off | old | unreachable
         self.state_errors: dict[str, str] = {}
         self.caps: dict[str, frozenset] = {}
+        self.sync_all: dict[str, bool] = {}  # 허브별 전체 동기화(hello "sync_all", §19.2)
+        self._menu_var: tk.BooleanVar | None = None
         self.items: list[cloud.Item] = []
         self.results: list[dict] | None = None  # 검색 중이면 검색 결과
         self.next_cursor: int | None = None
@@ -255,7 +257,18 @@ class CloudWindow(ctk.CTkToplevel):
         threading.Thread(target=run, daemon=True).start()
 
     def _src(self) -> Source:
-        return Source(self.node, self.source)
+        return Source(self.node, self.source, offline=self._offline())
+
+    def _offline(self) -> bool:
+        """허브가 꺼졌거나 닿지 않거나 잠겨 있는데 이 PC에 그 허브의 동기화 사본이 있다: 사본을 읽기 전용으로(§19.3)."""
+        return self.source != LOCAL and self.states.get(self.source) in ("unreachable", "store") \
+            and self.node.syncer.mirror(self.source) is not None
+
+    def _can_sync(self) -> bool:
+        if self._offline():
+            return False
+        return (self.source == LOCAL and self.node.cloud_state == "open") \
+            or "sync" in self.caps.get(self.source, frozenset())
 
     def _post(self, fn) -> None:
         self.app.events.put(("ui_call", {"fn": fn}))
@@ -320,6 +333,8 @@ class CloudWindow(ctk.CTkToplevel):
         self.transfer_label = ctk.CTkLabel(bottom, text="", font=font(11), text_color=SECONDARY, height=18,
                                            anchor="w")
         self.transfer_label.pack(fill="x")
+        self.sync_label = ctk.CTkLabel(bottom, text="", font=font(11), text_color=SECONDARY, height=18, anchor="w",
+                                       image=icon("monitor-smartphone", 13, SECONDARY), compound="left")
 
         self.list = ctk.CTkScrollableFrame(main, fg_color=MAIN_BG, corner_radius=0,
                                            scrollbar_button_color=BORDER, scrollbar_button_hover_color=SECONDARY)
@@ -337,14 +352,20 @@ class CloudWindow(ctk.CTkToplevel):
     def render_sources(self) -> None:
         for child in self.source_list.winfo_children():
             child.destroy()
-        rows = [(LOCAL, "laptop", t("cloud.this_pc"), store_ui.state_text(self.node.cloud_state)[0])]
+        own = self.node.space()
+        rows = [(LOCAL, "laptop", t("cloud.this_pc"), store_ui.state_text(self.node.cloud_state)[0],
+                 (own["free"], own["total"]) if own else None)]
         for sid, pairing in list(self.node.pairings.items()):
             state = self.states.get(sid, "checking")
-            rows.append((sid, KIND_ICON.get(pairing.kind, "smartphone"), pairing.name, t(STATE_TEXT[state])))
-        for sid, icon_name, name, detail in rows:
+            detail = t("sync.offline_copy") if state in ("unreachable", "store") and self.node.syncer.mirror(sid) \
+                else t(STATE_TEXT[state])
+            rows.append((sid, KIND_ICON.get(pairing.kind, "smartphone"), pairing.name, detail,
+                         self.node.peer_space.get(sid, (None, None))[:2]))
+        for sid, icon_name, name, detail, space in rows:
             selected = sid == self.source
+            known = space is not None and space[0] is not None
             row = ctk.CTkFrame(self.source_list, fg_color=SELECTED if selected else "transparent", corner_radius=6,
-                               height=50, cursor="hand2")
+                               height=64 if known else 50, cursor="hand2")
             row.pack(fill="x", padx=6, pady=1)
             row.pack_propagate(False)
             round_icon(row, icon_name, 30).pack(side="left", padx=(8, 10))
@@ -355,6 +376,9 @@ class CloudWindow(ctk.CTkToplevel):
             on = (sid == LOCAL and self.node.cloud_state == "open") or self.states.get(sid) == "on"
             ctk.CTkLabel(texts, text=detail, font=font(11), text_color=GREEN if on else SECONDARY, anchor="w",
                          height=15).pack(fill="x")
+            if known:  # 그 기기의 용량(§19.1)
+                ctk.CTkLabel(texts, text=t("sync.free", free=human_size(space[0])) + " / " + human_size(space[1]),
+                             font=font(10), text_color=SECONDARY, anchor="w", height=14).pack(fill="x")
             bind_tree(row, "<Button-1>", lambda _e, s=sid: self.open_source(s))
             if not selected:
                 bind_tree(row, "<Enter>", lambda _e, r=row: r.configure(fg_color=HOVER))
@@ -375,6 +399,7 @@ class CloudWindow(ctk.CTkToplevel):
                 else:
                     caps = info["caps"]
                     self.caps[s] = caps
+                    self.sync_all[s] = info.get("sync_all") is True
                     not_ready = info.get("store") in ("new", "locked", "missing")  # §17: 켜졌지만 저장소가 안 열림
                     self.states[s] = "old" if "cloud" not in caps else "on" if info.get("cloud") is True \
                         else "store" if not_ready else "off"
@@ -402,13 +427,20 @@ class CloudWindow(ctk.CTkToplevel):
         self.reload()
 
     def _has_cloud2(self) -> bool:
-        return self.source == LOCAL or "cloud2" in self.caps.get(self.source, frozenset())
+        return self.source == LOCAL or self._offline() or "cloud2" in self.caps.get(self.source, frozenset())
 
     def _render_tools(self) -> None:
         for child in self.tools.winfo_children():
             child.destroy()
         if not self._browsable():
             return
+        if self._offline():  # 사본은 읽기만
+            ghost_button(self.tools, "refresh-cw", self.check_sources).pack(side="right")
+            ghost_button(self.tools, "list" if self.view == "grid" else "layout-grid", self.toggle_view).pack(
+                side="right")
+            return
+        if self._can_sync():
+            ghost_button(self.tools, "monitor-smartphone", self.sync_menu).pack(side="right")
         if self.source == LOCAL:
             ghost_button(self.tools, "folder", self.open_local_folder).pack(side="right")
             ghost_button(self.tools, "trash-2", lambda: TrashWindow(self)).pack(side="right")
@@ -441,7 +473,8 @@ class CloudWindow(ctk.CTkToplevel):
         self.reload()
 
     def _browsable(self) -> bool:
-        return (self.source == LOCAL and self.node.cloud_state == "open") or self.states.get(self.source) == "on"
+        return (self.source == LOCAL and self.node.cloud_state == "open") or self.states.get(self.source) == "on" \
+            or self._offline()
 
     def toggle_view(self) -> None:
         self.view = "grid" if self.view == "list" else "list"
@@ -474,6 +507,7 @@ class CloudWindow(ctk.CTkToplevel):
             self._update_select_bar()
         self._render_crumbs()
         self._render_tools()
+        self.refresh_sync_status()
         self.items, self.results, self.next_cursor, self.shown, self.error = [], None, None, RENDER_PAGE, ""
         if not self._browsable():
             self._render_message()
@@ -637,7 +671,13 @@ class CloudWindow(ctk.CTkToplevel):
         for gone in [x for x in self.selected if x not in present]:  # 다른 곳에서 지워지거나 옮겨진 것
             del self.selected[gone]
         self._update_select_bar()
+        if self._offline():
+            self._offline_banner()
         if not entries:
+            if self._offline():
+                ctk.CTkLabel(self.list, text=t("cloud.no_results") if self.results is not None else t("cloud.empty"),
+                             font=font(13), text_color=SECONDARY).pack(pady=(80, 0))
+                return
             self._message(t("cloud.no_results") if self.results is not None else t("cloud.empty"))
             return
         if self.view == "grid":
@@ -683,7 +723,9 @@ class CloudWindow(ctk.CTkToplevel):
         texts = ctk.CTkFrame(row, fg_color="transparent")
         texts.pack(side="left", fill="x", expand=True)
         name = item.name if len(item.name) <= 60 else item.name[:57] + "…"
-        label = ctk.CTkLabel(texts, text=name, font=font(13), text_color=TEXT, anchor="w", height=18)
+        label = ctk.CTkLabel(texts, text=name + "  " if item.sync else name, font=font(13), text_color=TEXT, anchor="w",
+                             height=18, image=icon("monitor-smartphone", 14, GREEN) if item.sync else None,
+                             compound="right")  # 모든 기기에 동기화하는 항목은 이름 옆에 표시
         label.pack(fill="x", pady=(7 if where or item.locked else 14, 0))
         sub = where or self._locked_text(item)
         if sub:
@@ -728,8 +770,10 @@ class CloudWindow(ctk.CTkToplevel):
             label = ctk.CTkLabel(tile, text=name, font=font(12), text_color=TEXT, height=16)
             label.pack()
             sub = self._locked_text(item) or (human_size(item.size) if not item.is_dir else "")
-            ctk.CTkLabel(tile, text=sub, font=font(10), text_color=AMBER if item.locked else SECONDARY,
-                         height=14).pack()
+            ctk.CTkLabel(tile, text=(" " + sub) if item.sync else sub, font=font(10),
+                         text_color=AMBER if item.locked else SECONDARY, height=14,
+                         image=icon("monitor-smartphone", 12, GREEN) if item.sync else None,
+                         compound="left").pack()
             check = self._check_box(tile)
             bind_tree(tile, "<Enter>", lambda _e, f=full: self._paint(f, hover=True))
             bind_tree(tile, "<Leave>", lambda _e, f=full: self._paint(f, hover=self._hovering(f)))
@@ -968,13 +1012,18 @@ class CloudWindow(ctk.CTkToplevel):
             self._bar_button(t("cloud.move"), "folder-input", lambda: self.move_items(dict(self.selected)))
         if self._can_rename():
             self._bar_button(t("cloud.rename"), "file-text", lambda: RenameDialog(self, dict(self.selected)))
-        self._bar_button(t("cloud.delete"), "trash-2", self.delete_selected, danger=True)
+        if self._can_sync() and any(not x.locked for x in self.selected.values()):
+            off = all(x.sync for x in self.selected.values() if not x.locked)
+            self._bar_button(t("sync.remove") if off else t("sync.add"), "monitor-smartphone",
+                             lambda: self.sync_items(dict(self.selected), not off))
+        if not self._offline():
+            self._bar_button(t("cloud.delete"), "trash-2", self.delete_selected, danger=True)
         if not self.select_bar.winfo_ismapped():
             self.select_bar.pack(fill="x", padx=18, pady=(0, 6), before=self.list._parent_frame)
 
     def download_selected(self) -> None:
         files = [(item, full) for full, item in self.selected.items() if not item.is_dir]
-        if self.source != LOCAL:
+        if self.source != LOCAL and not self._offline():
             for item, full in files:
                 self.node.outbox.add_cloud_download(self.source, full, item.size, item.mtime)
             self.app.flash(t("cloud.queued_down_many", count=len(files)))
@@ -1054,6 +1103,121 @@ class CloudWindow(ctk.CTkToplevel):
 
         self._bg(lambda: src.move(paths, dest), done)
 
+    # ---------- 모든 기기 동기화(§19) ----------
+    def sync_items(self, chosen: dict[str, cloud.Item], on: bool) -> None:
+        """고른 항목을 모든 기기에 동기화하거나 뺀다(잠긴 폴더는 허브가 거부한다)."""
+        paths = [full for full, item in chosen.items() if not item.locked]
+        if not paths:
+            return
+        src = self._src()
+
+        def done(result, error) -> None:
+            if error is not None:
+                messagebox.showerror(t("cloud.title"), str(error), parent=self)
+            else:
+                changed, failed = result
+                self._report(len(paths) - len(failed), [(x["path"], str(p.ProtocolError(x["code"]))) for x in failed],
+                             "sync.added" if on else "sync.removed")
+            self.selected.clear()
+            self.anchor = None
+            self.reload()
+
+        self._bg(lambda: src.sync_set(paths, on), done)
+
+    def _sync_all_now(self) -> bool:
+        if self.source == LOCAL:
+            st = self.node.store()
+            return st is not None and st.state == "open" and st.sync_all
+        return self.sync_all.get(self.source, False)
+
+    def sync_menu(self) -> None:
+        menu = tk.Menu(self, tearoff=0)
+        self._menu_var = tk.BooleanVar(value=self._sync_all_now())
+        menu.add_checkbutton(label=t("sync.all_menu"), variable=self._menu_var,
+                             command=lambda: self.set_sync_all(bool(self._menu_var.get())))
+        menu.add_separator()
+        menu.add_command(label=t("sync.how"), state="disabled")
+        if self.source != LOCAL and self.node.syncer.enabled:
+            menu.add_command(label=t("sync.now"), command=lambda: self.node.syncer.poke(self.source))
+        menu.add_command(label=t("sync.settings"), command=self.app.open_settings)
+        menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+
+    def set_sync_all(self, on: bool) -> None:
+        src = self._src()
+
+        def done(_r, error) -> None:
+            if error is not None:
+                messagebox.showerror(t("cloud.title"), str(error), parent=self)
+                return
+            self.sync_all[self.source] = on
+            self.app.flash(t("sync.all_on") if on else t("sync.all_off"))
+            self.reload()
+
+        self._bg(lambda: src.sync_all(on), done)
+
+    def _offline_banner(self) -> None:
+        box = ctk.CTkFrame(self.list, fg_color=BUBBLE, corner_radius=8)
+        box.pack(fill="x", padx=6, pady=(4, 8))
+        ctk.CTkLabel(box, text=" " + t("sync.offline_banner", name=self._source_name(self.source)),
+                     image=icon("monitor-smartphone", 15, SECONDARY), compound="left", font=font(12),
+                     text_color=SECONDARY, anchor="w", justify="left", wraplength=560).pack(side="left", padx=12,
+                                                                                            pady=8)
+        if self.states.get(self.source) == "store" and "store_unlock" in self.caps.get(self.source, frozenset()):
+            ctk.CTkButton(box, text=t("store.ok_unlock"), command=self.unlock_remote_store, height=28,
+                          corner_radius=6, fg_color=INK, hover_color=INK_HOVER, text_color=INK_TEXT,
+                          font=font(12, "bold"), width=80).pack(side="right", padx=10)
+
+    def refresh_sync_status(self) -> None:
+        """아래 줄: 이 허브의 동기화 대상 수(이 PC가 허브면) 또는 이 PC 사본의 상태."""
+        text = self._sync_text()
+        self.sync_label.configure(text=(" " + text) if text else "")
+        if text and not self.sync_label.winfo_ismapped():
+            self.sync_label.pack(fill="x", before=self.transfer_label)
+        elif not text:
+            self.sync_label.pack_forget()
+
+    def _sync_text(self) -> str:
+        if self.source == LOCAL:
+            st = self.node.store()
+            if st is None or st.state != "open":
+                return ""
+            try:
+                _, items = st.sync_manifest()
+            except p.ProtocolError:
+                return ""
+            files = [x for x in items if not x["dir"]]
+            return t("sync.hub_line", count=len(files), size=human_size(sum(x["size"] for x in files))) if files \
+                else ""
+        if not self.node.syncer.enabled:
+            return ""
+        found = self.node.syncer.mirror(self.source)
+        status = self.node.syncer.status.get(self.source, {})
+        state = status.get("state")
+        if state == "syncing":
+            total = status.get("total") or 0
+            pct = int(status.get("done", 0) * 100 / total) if total else 0
+            return t("sync.syncing", pct=pct)
+        if found is None:
+            return ""
+        count, size = found.usage()
+        line = t("sync.copy_line", count=count, size=human_size(size))
+        if state == "space":
+            return line + " · " + t("err.sync_space")
+        if state == "error":
+            return line + " · " + str(p.ProtocolError(status.get("code") or "peer_refused"))
+        if found.synced_at:
+            line += " · " + t("sync.synced_at", when=dt.datetime.fromtimestamp(found.synced_at).strftime("%m-%d %H:%M"))
+        return line
+
+    def on_sync_changed(self, data: dict) -> None:
+        """사본이 바뀌었다(맞춤·지움): 상태 줄을 고치고, 사본을 보는 중이면 다시 읽는다."""
+        if data.get("peer_id") != self.source:
+            return
+        self.refresh_sync_status()
+        self.render_sources()
+        if self._offline() and self.node.syncer.status.get(self.source, {}).get("state") != "syncing":
+            self.reload()
+
     def _locked_text(self, item: cloud.Item) -> str:
         if not item.locked:
             return ""
@@ -1083,15 +1247,15 @@ class CloudWindow(ctk.CTkToplevel):
                 first = key not in self.thumb_waiting
                 self.thumb_waiting.setdefault(key, []).append((label, size))
                 if first:
-                    self._fetch_thumb(key, full, px)
+                    self._fetch_thumb(key, full, px, item)
         return holder
 
-    def _fetch_thumb(self, key: tuple, full: str, px: int) -> None:
+    def _fetch_thumb(self, key: tuple, full: str, px: int, item: cloud.Item | None = None) -> None:
         src = self._src()
 
         def work() -> None:
             try:
-                image = src.thumb(full, px)
+                image = src.thumb(full, px, item)
             except Exception:  # noqa: BLE001 - 만들 수 없으면 아이콘 그대로
                 image = None
             self.app.events.put(("ui_call", {"fn": lambda: self.winfo_exists() and self._thumb_ready(key, image)}))
@@ -1171,6 +1335,8 @@ class CloudWindow(ctk.CTkToplevel):
                                               key="play", video_only=True))
         if self.viewer is not None and self.viewer.winfo_exists():
             self.viewer.close()
+        if self._offline():  # 사본은 지울 수 없다
+            actions = [a for a in actions if a.key != "delete"]
         self.viewer = lightbox.Lightbox(self, shots, index, actions, self._post, self.app.icon_path)
 
     def _cached_thumb(self, item: cloud.Item, full: str):
@@ -1188,23 +1354,25 @@ class CloudWindow(ctk.CTkToplevel):
             if video:
                 if "poster" in item.variants:  # 허브가 만든 첫 장면(긴 변 1280)
                     return lightbox.decode(src.read_variant(full, "poster", 8 << 20))
-                return src.thumb(full, BIG_PX)
+                return src.thumb(full, BIG_PX, item)
+            if src.mirror() is not None and src._copy(full, item) is not None:
+                return lightbox.decode(src.read_bytes(full, FULL_LIMIT, item))  # 이 PC 사본의 원본(망을 쓰지 않는다)
             if "screen" in item.variants:  # 화면용(긴 변 2048): 원본보다 훨씬 작아 빨리 열린다
                 return lightbox.decode(src.read_variant(full, "screen", 16 << 20))
             try:
-                return lightbox.decode(src.read_bytes(full, FULL_LIMIT))
+                return lightbox.decode(src.read_bytes(full, FULL_LIMIT, item))
             except p.ProtocolError as exc:
                 if exc.code != "too_large":
                     raise
             except (OSError, ValueError):
                 pass  # Pillow가 못 푸는 형식(HEIC 등)이나 너무 큰 그림: 허브의 큰 미리보기
-            return src.thumb(full, BIG_PX)
+            return src.thumb(full, BIG_PX, item)
 
         return load
 
     @staticmethod
     def _hires(src: Source, item: cloud.Item, full: str):
-        return lambda: lightbox.decode(src.read_bytes(full, FULL_LIMIT))
+        return lambda: lightbox.decode(src.read_bytes(full, FULL_LIMIT, item))
 
     def _play(self, src: Source, start: str) -> None:
         """영상 재생(앱 안 재생기): 이 PC 안에서만 열리는 주소로 그때그때 복호화해 흘린다(재생용 720p가 있으면 그것을).
@@ -1232,7 +1400,7 @@ class CloudWindow(ctk.CTkToplevel):
 
         def open_clip() -> tuple[str, object]:
             server = self.player
-            url, key = server.register(src.stream(full, role))
+            url, key = server.register(src.stream(full, role, item))
             return url, lambda: server.forget(key)
 
         return open_clip
@@ -1276,6 +1444,12 @@ class CloudWindow(ctk.CTkToplevel):
             menu.add_command(label=t("vault.repin_menu"), command=lambda: self.ask_repin(item.name, full))
         if not item.is_dir:
             menu.add_command(label=t("cloud.download"), command=lambda: self.download(item, full))
+        if self._can_sync() and not item.locked:
+            menu.add_command(label=t("sync.remove") if item.sync else t("sync.add"),
+                             command=lambda: self.sync_items({full: item}, not item.sync))
+        if self._offline():
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+            return
         if self._can_move() and not (item.locked and item.is_dir):
             menu.add_command(label=t("cloud.move_menu"), command=lambda: self.move_items({full: item}))
         if self._can_rename():
@@ -1350,7 +1524,7 @@ class CloudWindow(ctk.CTkToplevel):
         PinDialog(self, "repin", name, done)
 
     def download(self, item: cloud.Item, full: str) -> None:
-        if self.source != LOCAL:
+        if self.source != LOCAL and not self._offline():
             self.node.outbox.add_cloud_download(self.source, full, item.size, item.mtime)
             self.app.flash(t("cloud.queued_down", name=item.name))
             return

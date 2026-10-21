@@ -31,6 +31,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -62,6 +63,10 @@ import java.util.concurrent.Executors
  * 폴더도 PIN으로 열고 들어간다). 고른 항목을 길게 눌러 끌면 고른 것 전부를 폴더 줄·칸이나 위 경로 조각에 놓아 옮긴다(MoveDrag).
  * "rename"이면 이름 바꾸기(하나는 이름 칸, 여럿은 방식 고르기와 미리보기 — RenameDialog). 강한 잠금(§18.3)으로 잠긴 PC는
  * 클라우드 비밀번호로 열고(저장하지 않는다), PC 줄을 길게 누르면 "지금 잠그기". 돌려도·폴드를 펴도 화면을 다시 만들지 않는다.
+ *
+ * 2.3.0(§19): 허브가 "sync"를 알리면 고른 것을 "모든 기기에 동기화"·"동기화 빼기"(sync_set), 더보기 메뉴의 "전체 동기화"(sync_all)와
+ * "지금 동기화". 대상 항목에는 작은 동기화 표시. 이 기기의 동기화 사본(Mirror)에 같은 경로·크기·수정 시각의 파일이 있으면 사진·영상을
+ * 사본에서 연다(메모리로만 푼다). 허브에 닿지 않으면 사본을 읽기 전용으로 보인다("오프라인 사본"). 위 막대에 허브의 용량(§19.1).
  */
 class CloudActivity : AppCompatActivity() {
     companion object {
@@ -88,6 +93,8 @@ class CloudActivity : AppCompatActivity() {
         private const val VIDEO_LIST_MAX = 400
         /** 이름 바꾸기 미리보기에 그리는 줄 수(나머지는 "외 n개"). */
         private const val PREVIEW_MAX = 100
+        /** 동기화 대상을 바꾼 뒤 이 폰이 한 번 더 맞춰 볼 때까지(허브는 30초 모아 알린다, §19.2). */
+        private const val SYNC_FOLLOW_MS = 40_000L
     }
 
     /** 끌어다 놓기(MoveDrag)의 표식: 이 앱 안에서 시작한 옮기기 끌기인지 알아본다. */
@@ -137,6 +144,9 @@ class CloudActivity : AppCompatActivity() {
     private lateinit var actMove: View
     private lateinit var actRename: View
     private lateinit var actMore: View
+    private lateinit var actSync: View
+    private lateinit var moreBtn: View
+    private lateinit var offlineBanner: View
     private val adapter = Rows()
     private val drag = DragSelect()
     private val moveDrag = MoveDrag()
@@ -175,6 +185,12 @@ class CloudActivity : AppCompatActivity() {
     /** 다중 선택(2.1.0): 고른 항목의 클라우드 경로(targetOf). 비면 선택 모드가 아니다. */
     private val selected = LinkedHashSet<String>()
     private var lightbox: Lightbox<Pic>? = null
+    /** 오프라인 사본(§19.3)을 보는 중: 허브에 닿지 않아 이 기기의 사본만 읽기 전용으로. */
+    private var offline = false
+    /** hello "sync_all"(§19.2): 그 허브의 "전체 동기화"가 켜져 있는지. */
+    private val pcSyncAll = HashSet<String>()
+    /** 지금 PC의 동기화 사본에서 다 받은 파일(경로 → 항목). 작업 스레드에서 바꾸고 어디서나 읽는다(통째로 갈아 끼운다). */
+    @Volatile private var mirror: Map<String, MirrorEntry> = emptyMap()
 
     private val searching: Boolean get() = query.isNotEmpty() || kind != FileKinds.ALL
     private val cloud2: Boolean get() = pc?.let { "cloud2" in (pcCaps[it.pcIp] ?: emptySet()) } == true
@@ -186,6 +202,21 @@ class CloudActivity : AppCompatActivity() {
     /** 2.2 허브(§17): cloud_get 범위(length)·딸린 버전(variant)을 안다 — 앱 안 영상 재생. */
     private val ranges: Boolean get() = pc?.let { "store" in (pcCaps[it.pcIp] ?: emptySet()) } == true
     private val selecting: Boolean get() = selected.isNotEmpty()
+    /** 2.3.0 허브(§19.2): 동기화 대상 바꾸기(오프라인 사본에서는 하지 않는다). */
+    private val canSync: Boolean get() = !offline && pc?.let { "sync" in (pcCaps[it.pcIp] ?: emptySet()) } == true
+    /** 격자·찾기·미리보기 화면을 쓸지(허브가 cloud2이거나, 사본에는 미리보기가 들어 있다). */
+    private val richUi: Boolean get() = cloud2 || offline
+
+    /** 맞추기가 끝나면(상태가 바뀜) 사본 목록을 다시 읽는다. 오프라인 사본을 보는 중이면 화면도. */
+    private val mirrorListener: () -> Unit = {
+        ui.post {
+            val p = pc
+            if (!isDestroyed && p != null && MirrorStatus.running == null) {
+                refreshMirror(p)
+                if (offline) load(reset = true, keep = true)
+            }
+        }
+    }
 
     private val outboxListener: () -> Unit = { ui.post { onJobsChanged() } }
 
@@ -243,6 +274,10 @@ class CloudActivity : AppCompatActivity() {
         actMove = findViewById(R.id.actMove)
         actRename = findViewById(R.id.actRename)
         actMore = findViewById(R.id.actMore)
+        actSync = findViewById(R.id.actSync)
+        moreBtn = findViewById(R.id.moreBtn)
+        offlineBanner = findViewById(R.id.offlineBanner)
+        LocalSpace.init(this)
 
         grid = getSharedPreferences("settings", MODE_PRIVATE).getBoolean(K_GRID, false)
         layout = GridLayoutManager(this, 1)
@@ -261,7 +296,12 @@ class CloudActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.backBtn).setOnClickListener { goBack() }
         findViewById<View>(R.id.refreshBtn).setOnClickListener {
-            if (pc == null) checkPcs() else { clearSelection(); load(reset = true, keep = true) }
+            val p = pc
+            when {
+                p == null -> checkPcs()
+                offline -> browse(p) // 허브에 다시 닿아 본다(닿지 않으면 사본으로 돌아온다)
+                else -> { clearSelection(); load(reset = true, keep = true) }
+            }
         }
         newFolderBtn.setOnClickListener { val p = pc; askNewFolder(path) { if (pc === p) load(reset = true, keep = true) } }
         findViewById<View>(R.id.selClose).setOnClickListener { clearSelection() }
@@ -271,6 +311,8 @@ class CloudActivity : AppCompatActivity() {
         findViewById<View>(R.id.actDownload).setOnClickListener { downloadSelected() }
         findViewById<View>(R.id.actDelete).setOnClickListener { deleteSelected() }
         actMore.setOnClickListener { moreSelected() }
+        actSync.setOnClickListener { syncSelected() }
+        moreBtn.setOnClickListener { hubMenu(it) }
         uploadBtn.setOnClickListener { pick.launch(arrayOf("*/*")) }
         emptyBtn.setOnClickListener { load(reset = true, keep = false) }
         viewBtn.setOnClickListener { setGrid(!grid) }
@@ -296,14 +338,18 @@ class CloudActivity : AppCompatActivity() {
             override fun handleOnBackPressed() { goBack() }
         })
         Outbox.addListener(outboxListener)
+        MirrorStatus.addListener(mirrorListener)
 
         val ip = savedInstanceState?.getString(S_IP) ?: intent.getStringExtra(EXTRA_IP)
+        // 클라우드 화면을 엶: 동기화 사본을 맞춘다(허브마다 10분에 한 번까지, §19.3).
+        MirrorSync.request(this, ip?.takeIf { Store.get(this, it) != null })
         fromPicker = savedInstanceState?.getBoolean(S_PICKER) ?: (intent.getStringExtra(EXTRA_IP) == null)
         val p = ip?.let { Store.get(this, it) }
         if (p != null) {
             pc = p
             path = savedInstanceState?.getString(S_PATH)?.takeIf { CloudPath.isValid(it) } ?: ""
             ensureCaps(p)
+            refreshMirror(p)
             load(reset = true, keep = false)
         } else {
             if (ip != null) fromPicker = true // 그 사이 연결 해제된 PC
@@ -354,6 +400,7 @@ class CloudActivity : AppCompatActivity() {
         drag.stop()
         moveDrag.stop()
         Outbox.removeListener(outboxListener)
+        MirrorStatus.removeListener(mirrorListener)
         ui.removeCallbacks(searchRun)
         io.shutdownNow()
         super.onDestroy()
@@ -367,7 +414,8 @@ class CloudActivity : AppCompatActivity() {
             pc != null && searching -> clearSearch(reload = true)
             pc != null && path.isNotEmpty() -> open(CloudPath.parent(path))
             pc != null && fromPicker -> {
-                pc = null; gen++; items = emptyList(); next = null; loadError = null; clearSelection(); checkPcs(); render()
+                pc = null; offline = false; mirror = emptyMap(); gen++; items = emptyList(); next = null; loadError = null
+                clearSelection(); checkPcs(); render()
             }
             else -> finish()
         }
@@ -375,10 +423,54 @@ class CloudActivity : AppCompatActivity() {
 
     private fun browse(p: Pairing) {
         pc = p
+        offline = false
         path = ""
         clearSearch(reload = false)
         ensureCaps(p)
+        refreshMirror(p)
         load(reset = true, keep = false)
+    }
+
+    /** 허브에 닿지 않을 때 이 기기의 동기화 사본을 읽기 전용으로 본다(§19.3). */
+    private fun browseOffline(p: Pairing) {
+        pc = p
+        offline = true
+        path = ""
+        clearSearch(reload = false)
+        clearSelection()
+        refreshMirror(p)
+        load(reset = true, keep = false)
+    }
+
+    /** 지금 PC 사본의 다 받은 파일을 다시 읽는다(작업 스레드에서 연다 — Keystore·디스크). */
+    private fun refreshMirror(p: Pairing) {
+        val app = applicationContext
+        io.execute {
+            val map = try {
+                Mirror.peek(app, p.pcIp)?.entries().orEmpty().asSequence().filter { !it.dir && it.complete }.associateBy { it.path }
+            } catch (e: Exception) { null }
+            ui.post {
+                if (isDestroyed || pc !== p) return@post
+                val now = map.orEmpty()
+                if (now == mirror) return@post
+                mirror = now
+                adapter.notifyDataSetChanged() // 사본에서 열 수 있게 된 미리보기를 다시 붙인다
+            }
+        }
+    }
+
+    /** 이 항목을 사본에서 열 수 있으면 그 항목(오프라인이면 경로만, 아니면 같은 크기·수정 시각일 때만, §19.3). */
+    private fun localOf(target: String, item: CloudItem): MirrorEntry? {
+        val e = mirror[target] ?: return null
+        return if (offline || MirrorTree.same(e, item)) e else null
+    }
+
+    /** 오프라인 사본으로 볼 수 있는 PC인지(사본 목록 파일이 있는지만 본다). */
+    private fun hasCopy(p: Pairing): Boolean = MirrorSettings.isOn(this) && Mirror.exists(this, p.pcIp)
+
+    /** 허브가 알린 용량 "여유 X / 전체 Y"(§19.1). 받은 적이 없으면 null. */
+    private fun spaceText(p: Pairing): String? = PeerSpaces.shared.get(p.pcIp)?.space?.let {
+        getString(R.string.space_free_total, Formatter.formatShortFileSize(this, it.free), Formatter.formatShortFileSize(this, it.total))
     }
 
     /** 그 폴더로 간다(규칙을 넘는 깊이·길이는 열지 않는다). 찾기는 비운다. */
@@ -437,6 +529,7 @@ class CloudActivity : AppCompatActivity() {
             pcCaps[p.pcIp] = h.caps
             h.store?.let { pcStore[p.pcIp] = it } ?: pcStore.remove(p.pcIp)
             if (h.strong) pcStrong += p.pcIp else pcStrong -= p.pcIp
+            if (h.syncAll) pcSyncAll += p.pcIp else pcSyncAll -= p.pcIp
         }
     }
 
@@ -458,12 +551,15 @@ class CloudActivity : AppCompatActivity() {
                 pcCaps[p.pcIp] = h.caps
                 h.store?.let { pcStore[p.pcIp] = it }
                 if (h.strong) pcStrong += p.pcIp else pcStrong -= p.pcIp
+                if (h.syncAll) pcSyncAll += p.pcIp else pcSyncAll -= p.pcIp
                 if (pc === p) { applyLayout(); render(); updateSelectionUi() }
             }
         }
     }
 
     private fun pcClicked(p: Pairing, st: PcState) {
+        // 허브에 닿지 않거나 저장소가 열리지 않았는데 이 기기에 사본이 있으면: 사본을 읽기 전용으로(§19.3)
+        if (noHub(p, st) && hasCopy(p)) { browseOffline(p); return }
         when (st) {
             PcState.ON -> browse(p)
             PcState.OFF -> toast(getString(R.string.cloud_pc_off_hint))
@@ -475,6 +571,10 @@ class CloudActivity : AppCompatActivity() {
             PcState.CHECKING -> { }
         }
     }
+
+    /** 허브의 클라우드를 지금 열 수 없는 상태(닿지 않음·저장소 없음·폰에서 열 수 없는 잠김). */
+    private fun noHub(p: Pairing, st: PcState): Boolean =
+        st == PcState.UNREACHABLE || st == PcState.STORE_MISSING || (st == PcState.STORE_LOCKED && !unlockable(p.pcIp))
 
     /** PC 줄을 길게 누름: 열기, 강한 잠금이면 "지금 잠그기"(§18.3 store_lock). */
     private fun pcMenu(p: Pairing, st: PcState) {
@@ -607,12 +707,29 @@ class CloudActivity : AppCompatActivity() {
         val q = query
         val k = kind
         val search = searching && cloud2
+        val off = offline
+        val app = applicationContext
         io.execute {
             val result = try {
-                if (search) Net.cloudSearch(p, dir, q, k, cursor) else SearchPage(Net.cloudList(p, dir, cursor), false)
+                when {
+                    // 오프라인 사본: 이 기기의 목록에서(한 번에 전부, 쪽 나눔 없음)
+                    off -> {
+                        val all = Mirror.peek(app, p.pcIp)?.entries().orEmpty()
+                        val got = if (q.isNotEmpty() || k != FileKinds.ALL) MirrorTree.search(all, dir, q, k) else MirrorTree.list(all, dir)
+                        SearchPage(CloudPage(got, null), false)
+                    }
+                    search -> Net.cloudSearch(p, dir, q, k, cursor)
+                    else -> SearchPage(Net.cloudList(p, dir, cursor), false)
+                }
             } catch (e: Exception) {
                 ui.post {
                     if (isDestroyed || g != gen) return@post
+                    // 허브에 닿지 않는다: 이 기기에 사본이 있으면 그것을 읽기 전용으로 보인다(§19.3).
+                    if (reset && !off && (e as? ProtocolException)?.code == "connect_failed" && hasCopy(p)) {
+                        loading = false
+                        browseOffline(p)
+                        return@post
+                    }
                     loading = false
                     if (reset) { items = emptyList(); next = null; loadError = Errors.text(this, e) }
                     else toast(getString(R.string.failed, Errors.text(this, e)))
@@ -688,7 +805,7 @@ class CloudActivity : AppCompatActivity() {
 
     /** 격자는 "cloud2" 허브에서만(미리보기가 있을 때). 칸 수는 화면 폭으로. */
     private fun applyLayout() {
-        val cols = if (grid && cloud2) CloudGrid.columns(resources.configuration.screenWidthDp) else 1
+        val cols = if (grid && richUi) CloudGrid.columns(resources.configuration.screenWidthDp) else 1
         if (layout.spanCount != cols) layout.spanCount = cols
         viewBtn.setImageResource(if (grid) R.drawable.ic_list else R.drawable.ic_grid)
         viewBtn.contentDescription = getString(if (grid) R.string.cloud_view_list else R.string.cloud_view_grid)
@@ -747,10 +864,13 @@ class CloudActivity : AppCompatActivity() {
     private fun render() {
         val p = pc
         val rows = ArrayList<Row>()
-        newFolderBtn.visibility = if (p == null) View.GONE else View.VISIBLE
-        uploadBtn.visibility = if (p == null) View.GONE else View.VISIBLE
+        // 오프라인 사본은 읽기 전용: 새 폴더·올리기·허브 메뉴를 숨긴다
+        newFolderBtn.visibility = if (p == null || offline) View.GONE else View.VISIBLE
+        uploadBtn.visibility = if (p == null || offline) View.GONE else View.VISIBLE
+        moreBtn.visibility = if (p != null && canSync) View.VISIBLE else View.GONE
+        offlineBanner.visibility = if (p != null && offline) View.VISIBLE else View.GONE
         crumbsRow.visibility = if (p == null) View.GONE else View.VISIBLE
-        val c2 = p != null && cloud2
+        val c2 = p != null && richUi
         searchBar.visibility = if (c2) View.VISIBLE else View.GONE
         kindScroll.visibility = if (c2) View.VISIBLE else View.GONE
         viewBtn.visibility = if (c2) View.VISIBLE else View.GONE
@@ -764,7 +884,14 @@ class CloudActivity : AppCompatActivity() {
             return
         }
         title.text = p.pcName
-        subtitle.text = if (loading && items.isEmpty()) getString(R.string.cloud_loading) else getString(R.string.cloud_title)
+        // 허브의 용량(§19.1, hello에서 받았을 때만)
+        val space = spaceText(p)
+        val sub = if (offline) getString(R.string.offline_banner) else getString(R.string.cloud_title)
+        subtitle.text = when {
+            loading && items.isEmpty() -> getString(R.string.cloud_loading)
+            space != null -> getString(R.string.cloud_file_meta, sub, space)
+            else -> sub
+        }
         renderCrumbs(p)
         val jobs = Outbox.cloudJobs(this, p.pcIp)
         uploadsHere = jobs.filter { it.kind == OutboxJob.CLOUD_UP && it.remote == path && !it.failed }.map { it.id }.toSet()
@@ -789,6 +916,7 @@ class CloudActivity : AppCompatActivity() {
             when {
                 err != null -> setEmpty(R.drawable.ic_cloud, getString(R.string.cloud_load_failed), err, true)
                 searching -> setEmpty(R.drawable.ic_search, emptyTitleText, "", false)
+                offline -> setEmpty(R.drawable.ic_cloud, getString(R.string.offline_empty), "", false)
                 else -> setEmpty(R.drawable.ic_folder, emptyTitleText, getString(R.string.cloud_empty_sub), false)
             }
             showEmpty(true)
@@ -876,6 +1004,8 @@ class CloudActivity : AppCompatActivity() {
         val p = pc ?: return
         when {
             !item.dir && FileKinds.previewable(item.kindOrGuess) -> openLightbox(item)
+            // 오프라인 사본은 이 앱 안에서만 연다(평문을 다른 앱·디스크로 내보내지 않는다)
+            !item.dir && offline -> toast(getString(R.string.offline_media_only))
             !item.dir -> fileMenu(item, target)
             item.busy -> toast(getString(R.string.err_vault_busy))
             item.stalled -> folderMenu(item, target) // 멈춘 잠그기: 들어갈 수 없다(이어서 잠그기·잠금 풀기만)
@@ -1201,6 +1331,7 @@ class CloudActivity : AppCompatActivity() {
      * 그 밖에는 지금처럼 고르고 끌면 범위 고르기(DragSelect).
      */
     private fun longPressed(v: View, item: CloudItem) {
+        if (offline) return // 오프라인 사본은 읽기 전용(고를 일이 없다)
         val key = targetOf(item)
         if (selecting && key in selected && moveDrag.start(v)) return
         drag.start(v, key)
@@ -1238,6 +1369,7 @@ class CloudActivity : AppCompatActivity() {
         selCount.text = getString(R.string.select_count, selected.size)
         actMove.visibility = if (canMove) View.VISIBLE else View.GONE
         actRename.visibility = if (canRename) View.VISIBLE else View.GONE
+        actSync.visibility = if (canSync) View.VISIBLE else View.GONE
         actMore.visibility = if (selected.size == 1) View.VISIBLE else View.GONE
     }
 
@@ -1297,6 +1429,83 @@ class CloudActivity : AppCompatActivity() {
         val x = selectedItems().singleOrNull() ?: return
         clearSelection()
         if (x.item.dir) folderMenu(x.item, x.target) else fileMenu(x.item, x.target)
+    }
+
+    // ---------- 모든 기기 동기화(2.3.0, §19.2) ----------
+
+    /** 고른 것을 모든 기기 동기화 대상에 넣거나 뺀다(고르는 창). */
+    private fun syncSelected() {
+        val p = pc ?: return
+        val sel = selectedItems()
+        if (!canSync || sel.isEmpty()) return
+        val paths = sel.map { it.target }
+        AlertDialog.Builder(this).setTitle(getString(R.string.select_count, sel.size))
+            .setItems(arrayOf(getString(R.string.sync_add), getString(R.string.sync_remove))) { _, which -> doSyncSet(p, paths, which == 0) }
+            .showSecure()
+    }
+
+    /**
+     * sync_set을 보내고(500개씩) 결과를 알린다("n개 넣음/뺌", 안 된 것은 이유별 개수 — 잠긴 폴더는 sync_vault 문장).
+     * 잠긴 폴더의 열쇠가 끝났으면 PIN을 묻고 다시. 허브는 30초 모아 기기들에 알리지만, 이 폰도 조금 뒤 한 번 맞춰 본다.
+     */
+    private fun doSyncSet(p: Pairing, paths: List<String>, on: Boolean) {
+        io.execute {
+            val r = try { Net.syncSet(p, paths, on) } catch (e: Exception) {
+                ui.post {
+                    if (isDestroyed) return@post
+                    toast(getString(R.string.failed, Errors.text(this, e)))
+                    if ((e as? ProtocolException)?.code == "vault_locked") {
+                        (Vault.lockedMount((e as? HubRefusal)?.reply) ?: vault.mountOf(p.pcIp, paths[0]))
+                            ?.let { m -> askOpen(m) { doSyncSet(p, paths, on) } }
+                    }
+                }
+                return@execute
+            }
+            ui.post {
+                if (isDestroyed) return@post
+                val reasons = CloudMove.failureCounts(MoveResult(emptyList(), r.failed))
+                    .map { (code, n) -> Errors.text(this, ProtocolException(code)) to n }
+                toast(summary(r.changed, if (on) R.string.sync_added_n else R.string.sync_removed_n, r.failed.size, reasons,
+                    R.string.sync_not_changed))
+                clearSelection()
+                if (pc === p) load(reset = true, keep = true)
+                MirrorSync.requestLater(this, p.pcIp, SYNC_FOLLOW_MS)
+            }
+        }
+    }
+
+    /** 위 막대의 더보기(허브가 "sync"를 알릴 때): 전체 동기화(켜짐 표시는 hello의 sync_all), 지금 동기화. */
+    private fun hubMenu(anchor: View) {
+        val p = pc ?: return
+        if (!canSync) return
+        val m = PopupMenu(this, anchor)
+        m.menu.add(0, 1, 0, R.string.sync_all).apply { isCheckable = true; isChecked = p.pcIp in pcSyncAll }
+        m.menu.add(0, 2, 1, R.string.sync_now)
+        m.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> setSyncAll(p, p.pcIp !in pcSyncAll)
+                2 -> if (!MirrorSettings.isOn(this)) toast(getString(R.string.sync_is_off)) else {
+                    MirrorSync.request(this, p.pcIp, MirrorSync.Why.MANUAL)
+                    toast(getString(R.string.sync_started))
+                }
+            }
+            true
+        }
+        m.show()
+    }
+
+    private fun setSyncAll(p: Pairing, on: Boolean) {
+        io.execute {
+            val err = try { Net.syncAll(p, on); null } catch (e: Exception) { e }
+            ui.post {
+                if (isDestroyed) return@post
+                if (err != null) { toast(getString(R.string.failed, Errors.text(this, err))); return@post }
+                if (on) pcSyncAll += p.pcIp else pcSyncAll -= p.pcIp
+                toast(getString(if (on) R.string.sync_all_on_done else R.string.sync_all_off_done))
+                if (pc === p) load(reset = true, keep = true)
+                MirrorSync.requestLater(this, p.pcIp, SYNC_FOLLOW_MS)
+            }
+        }
     }
 
     /** "n개 했음" + 실패가 있으면 "m개 못 함: 이유 (k), …"(많은 이유부터). */
@@ -1382,7 +1591,7 @@ class CloudActivity : AppCompatActivity() {
         val start = pics.indexOfFirst { it.item == item }
         if (start < 0) return
         lightbox?.close()
-        val lb = Lightbox(this, pics, start, cloudPics(p, cloud2, ranges))
+        val lb = Lightbox(this, pics, start, if (offline) mirrorPics(p) else cloudPics(p, cloud2, ranges))
         lb.onClosed = { if (lightbox === lb) lightbox = null }
         lightbox = lb
         lb.show()
@@ -1404,8 +1613,10 @@ class CloudActivity : AppCompatActivity() {
             Thumbs.cached(Thumbs.cloudKey(p.pcIp, t.target, t.item, CloudThumb.GRID_PX))
                 ?: Thumbs.cached(Thumbs.cloudKey(p.pcIp, t.target, t.item, CloudThumb.LIST_PX))
 
-        override fun load(t: Pic, job: Thumbs.Job, progress: (Long, Long) -> Unit): Lightbox.Picture? =
-            when (CloudView.first(t.item, video(t), FULL_MAX)) {
+        override fun load(t: Pic, job: Thumbs.Job, progress: (Long, Long) -> Unit): Lightbox.Picture? {
+            // 동기화 사본에 같은 파일이 있으면 거기서(§19.3, 데이터를 쓰지 않는다). 풀 수 없으면 허브에서.
+            localOf(t.target, t.item)?.let { e -> mirrorPicture(p, e, video(t))?.let { return it } }
+            return when (CloudView.first(t.item, video(t), FULL_MAX)) {
                 CloudView.First.SCREEN -> variant(t, CloudVariants.SCREEN, job, progress)
                 CloudView.First.POSTER -> variant(t, CloudVariants.POSTER, job, progress)
                 CloudView.First.ORIGINAL -> loadOriginal(t, job, progress)
@@ -1416,16 +1627,21 @@ class CloudActivity : AppCompatActivity() {
                     else Pictures.decode(Net.cloudThumb(p, t.target, CloudThumb.MAX_PX, job.token))?.let { Lightbox.Picture.plain(it) }
                 }
             }
-
-        override fun prefetch(t: Pic): Boolean = when (CloudView.first(t.item, video(t), FULL_MAX)) {
-            CloudView.First.SCREEN, CloudView.First.POSTER -> true
-            CloudView.First.ORIGINAL -> t.item.size <= PREFETCH_MAX
-            CloudView.First.THUMB -> c2
         }
 
-        override fun original(t: Pic) = CloudView.canUpgrade(t.item, video(t), FULL_MAX)
+        override fun prefetch(t: Pic): Boolean {
+            if (localOf(t.target, t.item) != null) return video(t) || t.item.size <= PREFETCH_MAX // 사본은 이 폰에서 푼다
+            return when (CloudView.first(t.item, video(t), FULL_MAX)) {
+                CloudView.First.SCREEN, CloudView.First.POSTER -> true
+                CloudView.First.ORIGINAL -> t.item.size <= PREFETCH_MAX
+                CloudView.First.THUMB -> c2
+            }
+        }
+
+        override fun original(t: Pic) = localOf(t.target, t.item) == null && CloudView.canUpgrade(t.item, video(t), FULL_MAX)
 
         override fun loadOriginal(t: Pic, job: Thumbs.Job, progress: (Long, Long) -> Unit): Lightbox.Picture? {
+            localOf(t.target, t.item)?.let { e -> mirrorPicture(p, e, false)?.let { return it } }
             val buf = GrowBuffer(maxOf(1024, t.item.size.toInt()))
             Net.cloudGet(p, t.target, 0, null, null, job.token, open = { head ->
                 if (head.size > FULL_MAX) throw ProtocolException("too_large") // 목록을 읽은 뒤 커졌다
@@ -1471,22 +1687,69 @@ class CloudActivity : AppCompatActivity() {
          * 함께 넘겨 이전·다음으로 갈 수 있게 한다. 예전 허브는 범위 요청을 몰라 이 화면에서 재생하지 않는다: 받기를 권한다.
          */
         override fun play(t: Pic) {
-            if (ranges) {
-                val vids = items.filter { !it.dir && it.kindOrGuess == FileKinds.VIDEO }.map { Pic(it, targetOf(it)) }
-                val at = vids.indexOfFirst { it.target == t.target }
-                val list = if (at < 0) listOf(t) else vids
-                val i = maxOf(0, at)
-                // 인텐트 크기 한도: 지금 것 둘레로 VIDEO_LIST_MAX개까지
-                val from = (i - VIDEO_LIST_MAX / 2).coerceIn(0, maxOf(0, list.size - VIDEO_LIST_MAX))
-                val sub = list.subList(from, minOf(list.size, from + VIDEO_LIST_MAX))
-                VideoActivity.start(this@CloudActivity, p.pcIp, sub.map { VideoActivity.Entry(it.target, it.item.name,
-                    CloudView.playVariant(it.item)) }, i - from)
-                return
-            }
+            // 사본에 있는 영상은 예전 허브에서도 이 폰에서 재생한다(§19.3)
+            if (ranges || localOf(t.target, t.item) != null) { playVideos(p, t); return }
             AlertDialog.Builder(this@CloudActivity).setTitle(t.item.name).setMessage(R.string.lightbox_video_msg)
                 .setPositiveButton(R.string.cloud_download) { _, _ -> download(t.item, t.target) }
                 .setNegativeButton(R.string.cancel, null).showSecure()
         }
+    }
+
+    /**
+     * 앱 안 재생기로 연다: 이 폴더(찾기 결과)의 영상 목록을 함께 넘겨 이전·다음으로 갈 수 있게 한다. 사본에 같은 파일이 있는 것은
+     * 사본에서 읽는다(local). 인텐트 크기 한도로 지금 것 둘레 VIDEO_LIST_MAX개까지.
+     */
+    private fun playVideos(p: Pairing, t: Pic) {
+        val vids = items.filter { !it.dir && it.kindOrGuess == FileKinds.VIDEO }.map { Pic(it, targetOf(it)) }
+        val at = vids.indexOfFirst { it.target == t.target }
+        val list = if (at < 0) listOf(t) else vids
+        val i = maxOf(0, at)
+        val from = (i - VIDEO_LIST_MAX / 2).coerceIn(0, maxOf(0, list.size - VIDEO_LIST_MAX))
+        val sub = list.subList(from, minOf(list.size, from + VIDEO_LIST_MAX))
+        VideoActivity.start(this, p.pcIp, sub.map { VideoActivity.Entry(it.target, it.item.name,
+            CloudView.playVariant(it.item), localOf(it.target, it.item) != null) }, i - from)
+    }
+
+    /**
+     * 사본의 그림(작업 스레드, 메모리로만 푼다): 영상은 미리보기, 사진은 FULL_MAX 이하면 원본, 크면 미리보기. 풀 수 없으면 null.
+     */
+    private fun mirrorPicture(p: Pairing, e: MirrorEntry, video: Boolean): Lightbox.Picture? = try {
+        val m = Mirror.peek(applicationContext, p.pcIp)
+        when {
+            m == null -> null
+            video || e.size > FULL_MAX -> m.thumb(e)?.let { Pictures.decode(it) }?.let { Lightbox.Picture.plain(it) }
+            else -> m.reader(e).use { r -> Pictures.picture(r.readAll(FULL_MAX), original = true) }
+        }
+    } catch (x: Exception) { null }
+
+    /** 오프라인 사본의 라이트박스 원천: 모두 사본에서(읽기 전용 — 받기·지우기 버튼 없음). 영상은 사본에서 재생한다. */
+    private fun mirrorPics(p: Pairing) = object : Lightbox.Source<Pic> {
+        override fun key(t: Pic) = t.target
+        override fun name(t: Pic) = t.item.name
+        override fun video(t: Pic) = t.item.kindOrGuess == FileKinds.VIDEO
+
+        override fun quick(t: Pic): Bitmap? =
+            Thumbs.cached(Thumbs.cloudKey(p.pcIp, t.target, t.item, CloudThumb.GRID_PX))
+                ?: Thumbs.cached(Thumbs.cloudKey(p.pcIp, t.target, t.item, CloudThumb.LIST_PX))
+
+        override fun load(t: Pic, job: Thumbs.Job, progress: (Long, Long) -> Unit): Lightbox.Picture? =
+            localOf(t.target, t.item)?.let { if (job.cancelled) null else mirrorPicture(p, it, video(t)) }
+
+        override fun prefetch(t: Pic): Boolean = video(t) || t.item.size <= PREFETCH_MAX
+
+        override fun info(t: Pic): Lightbox.Info {
+            val parent = CloudPath.parent(t.target)
+            val folder = if (parent.isEmpty()) p.pcName else p.pcName + " / " + parent.replace("/", " / ")
+            return Lightbox.Info(t.item.name, t.item.size, t.item.mtime, folder)
+        }
+
+        override fun bindThumb(t: Pic, view: ImageView, show: (Bitmap) -> Unit) {
+            if (wantsThumb(t.item)) bindThumbAt(view, t.target, t.item, CloudThumb.GRID_PX, show) else quick(t)?.let(show)
+        }
+
+        override fun actions(): List<Lightbox.Action<Pic>> = emptyList()
+
+        override fun play(t: Pic) = playVideos(p, t)
     }
 
     /** 라이트박스에서 지우기: 확인 뒤 지우고, 되면 그 장을 빼고 다음 것을 보인다(남은 게 없으면 닫힌다). 목록도 새로 읽는다. */
@@ -2220,8 +2483,12 @@ class CloudActivity : AppCompatActivity() {
      * 2.2 허브는 영상도 미리 만들어 둔다(§17.4) — 항목의 variants에 thumb이 있으면 잠긴 폴더 안 영상도 묻는다.
      */
     private fun wantsThumb(item: CloudItem): Boolean {
-        if (!cloud2 || item.dir || !FileKinds.previewable(item.kindOrGuess)) return false
+        if (item.dir || !FileKinds.previewable(item.kindOrGuess)) return false
         val p = pc ?: return false
+        // 2.3.0: 사본에 미리보기가 있으면 거기서(오프라인 사본은 그것뿐)
+        val local = localOf(targetOf(item), item)
+        if (offline || local?.tobj != null) return local?.tobj != null
+        if (!cloud2) return false
         return item.kindOrGuess == FileKinds.IMAGE || CloudVariants.THUMB in item.variants || vault.mountOf(p.pcIp, targetOf(item)) == null
     }
 
@@ -2234,7 +2501,15 @@ class CloudActivity : AppCompatActivity() {
         val key = Thumbs.cloudKey(p.pcIp, target, item, px)
         val inVault = vault.mountOf(p.pcIp, target) != null
         val app = applicationContext
-        Thumbs.bind(view, key, { job -> Thumbs.cloud(app, p, target, px, key, inVault, job) }, onBitmap)
+        val local = localOf(target, item)?.takeIf { it.tobj != null }
+        val off = offline
+        Thumbs.bind(view, key, { job ->
+            when {
+                local != null -> Thumbs.mirror(app, p.pcIp, local, px, job)
+                off -> null
+                else -> Thumbs.cloud(app, p, target, px, key, inVault, job)
+            }
+        }, onBitmap)
     }
 
     // ---------- 목록 어댑터 ----------
@@ -2290,6 +2565,7 @@ class CloudActivity : AppCompatActivity() {
             val sub: TextView = v.findViewById(R.id.sub)
             val trail: ImageView = v.findViewById(R.id.trail)
             val check: ImageView = v.findViewById(R.id.check)
+            val sync: ImageView = v.findViewById(R.id.sync)
         }
 
         inner class GridVH(v: View) : RecyclerView.ViewHolder(v) {
@@ -2300,6 +2576,7 @@ class CloudActivity : AppCompatActivity() {
             val sub: TextView = v.findViewById(R.id.sub)
             val selDim: View = v.findViewById(R.id.selDim)
             val check: ImageView = v.findViewById(R.id.check)
+            val syncBadge: ImageView = v.findViewById(R.id.syncBadge)
         }
 
         inner class TextVH(val text: TextView) : RecyclerView.ViewHolder(text)
@@ -2403,6 +2680,7 @@ class CloudActivity : AppCompatActivity() {
             holder.sub.setTextColor(ContextCompat.getColor(ctx, R.color.secondary))
             holder.trail.visibility = View.GONE
             holder.check.visibility = View.GONE
+            holder.sync.visibility = View.GONE
             holder.itemView.isActivated = false
             holder.itemView.contentDescription = null
             holder.itemView.setOnLongClickListener(null)
@@ -2412,7 +2690,9 @@ class CloudActivity : AppCompatActivity() {
                 is Row.Pc -> {
                     iconTile(holder.icon, R.drawable.ic_laptop)
                     holder.name.text = r.p.pcName
-                    holder.sub.text = getString(when (r.state) {
+                    // 허브에 닿지 않지만 이 기기에 사본이 있으면 열 수 있다(오프라인 사본, §19.3)
+                    val copy = noHub(r.p, r.state) && hasCopy(r.p)
+                    val state = if (copy && r.state == PcState.UNREACHABLE) getString(R.string.cloud_pc_offline_copy) else getString(when (r.state) {
                         PcState.CHECKING -> R.string.cloud_pc_checking
                         PcState.ON -> R.string.cloud_pc_on
                         PcState.OFF -> R.string.cloud_pc_off
@@ -2421,8 +2701,10 @@ class CloudActivity : AppCompatActivity() {
                         PcState.STORE_LOCKED -> if (unlockable(r.p.pcIp)) R.string.cloud_pc_store_strong else R.string.cloud_pc_store_locked
                         PcState.STORE_MISSING -> R.string.cloud_pc_store_missing
                     })
+                    // 그 PC가 알린 용량(§19.1)을 한 줄 더
+                    holder.sub.text = spaceText(r.p)?.let { state + "\n" + it } ?: state
                     val on = r.state == PcState.ON
-                    val open = on || (r.state == PcState.STORE_LOCKED && unlockable(r.p.pcIp))
+                    val open = on || (r.state == PcState.STORE_LOCKED && unlockable(r.p.pcIp)) || copy
                     holder.itemView.alpha = if (open || r.state == PcState.CHECKING) 1f else 0.55f
                     holder.trail.visibility = if (open) View.VISIBLE else View.GONE
                     holder.itemView.setOnClickListener { pcClicked(r.p, r.state) }
@@ -2449,6 +2731,8 @@ class CloudActivity : AppCompatActivity() {
                     }
                     holder.name.text = item.name
                     holder.sub.text = meta(item)
+                    // 모든 기기 동기화 대상(§19.2). 오프라인 사본은 모두 그것이라 표시하지 않는다
+                    holder.sync.visibility = if (item.sync && !offline) View.VISIBLE else View.GONE
                     holder.itemView.setOnClickListener { tapped(item) }
                     holder.itemView.setOnLongClickListener { v -> longPressed(v, item); true }
                     bindSel(holder, item)
@@ -2473,6 +2757,7 @@ class CloudActivity : AppCompatActivity() {
             h.icon.visibility = View.VISIBLE
             h.icon.setImageResource(itemIcon(item))
             h.badge.visibility = View.GONE
+            h.syncBadge.visibility = if (item.sync && !offline) View.VISIBLE else View.GONE
             when {
                 item.dir && item.locked -> { } // 자물쇠 아이콘 자체가 표시
                 item.kindOrGuess == FileKinds.VIDEO -> { h.badge.setImageResource(R.drawable.ic_video); h.badge.visibility = View.VISIBLE }

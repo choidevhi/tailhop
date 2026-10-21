@@ -18,8 +18,8 @@ android {
         applicationId = "com.choidev.tailhop"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "2.2.1"
+        versionCode = 15
+        versionName = "2.3.0"
     }
 
     signingConfigs {
@@ -80,6 +80,8 @@ dependencies {
     // 앱 안 영상 재생(2.2.0, Apache-2.0). 디스크 캐시 모듈(SimpleCache)은 쓰지 않는다 — CloudVideo가 메모리로만 받는다
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    // 기기 쪽 동기화의 주기 맞추기(2.3.0, Apache-2.0): 1시간, 배터리 부족 아님 + 비데이터 망. 포그라운드 서비스를 더하지 않는다
+    implementation("androidx.work:work-runtime:2.10.5")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

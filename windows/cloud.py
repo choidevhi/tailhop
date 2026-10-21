@@ -73,6 +73,7 @@ class Item:
     state: str = ""
     progress: int = 0
     variants: tuple[str, ...] = ()  # 허브가 만든 딸린 버전(§17.4: thumb·screen·poster·play). 받는 쪽 목록에서만
+    sync: bool = False  # 모든 기기 동기화 대상(§19.2). 받는 쪽 목록에서만
 
     def to_json(self) -> dict:
         return {"name": self.name, "dir": self.is_dir, "size": self.size, "mtime": self.mtime}

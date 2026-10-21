@@ -112,6 +112,8 @@ object Net {
     fun hello(p: Pairing, xfer: String?, size: Long?, token: SendToken? = null): Xfer.Hello? {
         val h = header("hello")
         if (xfer != null && size != null) h.put("xfer", xfer).put("size", size)
+        // 2.3.0(§19.1): 이 폰의 앱 전용 저장소 용량. 모르는 PC는 이 필드를 무시한다.
+        LocalSpace.now()?.let { h.put("space", it.json()) }
         val reply = try {
             connect(p.pcIp, p.pcPort, token).use { s ->
                 val ch = msgChannel(p, s)
@@ -125,7 +127,7 @@ object Net {
             if (e.code == "unsupported" || e.code == "pc_refused" || e.code == "pc_refused_reason") return null
             throw e
         }
-        return Xfer.parseHello(reply)
+        return Xfer.parseHello(reply).also { PeerSpaces.shared.put(p.pcIp, it.space) }
     }
 
     /** 본문 없는 요청(헤더 + 빈 last=1 프레임) 하나를 보내고 응답을 읽는다. */
@@ -228,6 +230,36 @@ object Net {
     fun storeLock(p: Pairing) {
         cloudCall { request(p, header("store_lock")) }
         VaultTokens.shared.dropTokens(p.pcIp)
+    }
+
+    /**
+     * §19.2 sync_set: 고른 항목을 모든 기기 동기화 대상에 넣거나(on) 뺀다. 500개씩 나눠 보낸다. 잠긴 폴더 안의 항목이면
+     * 이름 바꾸기처럼 그 열쇠들을 붙인다(허브가 그 자리를 알아보고 sync_vault로 답하게). 항목별 실패는 결과의 failed에 있다.
+     */
+    fun syncSet(p: Pairing, paths: List<String>, on: Boolean): SyncSet.Result = SyncSet.run(paths) { chunk ->
+        val h = header("sync_set")
+        SyncSet.fields(chunk, on).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
+        val toks = CloudMove.sourceTokens(chunk, null) { VaultTokens.shared.tokenFor(p.pcIp, it) }
+        if (toks.isNotEmpty()) h.put("token", toks[0])
+        if (toks.size > 1) h.put("tokens", JSONArray(toks))
+        try { cloudCall { SyncSet.parse(request(p, h)) } } catch (e: ProtocolException) {
+            forgetOnVaultLocked(p, chunk[0], e)
+            throw e
+        }
+    }
+
+    /** §19.2 sync_set {"all"}: 허브 저장소 전체를 동기화 대상으로 하거나 끈다(따로 단 표시는 그대로). */
+    fun syncAll(p: Pairing, on: Boolean): SyncSet.Result {
+        val h = header("sync_set")
+        SyncSet.allFields(on).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
+        return cloudCall { SyncSet.parse(request(p, h)) }
+    }
+
+    /** §19.2 sync_manifest: 동기화 대상 목록의 한 쪽(cursor부터). */
+    fun syncManifest(p: Pairing, cursor: Int, token: SendToken? = null): SyncManifest.Page {
+        val h = header("sync_manifest")
+        SyncManifest.fields(cursor).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
+        return cloudCall { SyncManifest.parse(request(p, h, token)) }
     }
 
     /** §15 cloud_search: path 폴더 아래에서 이름에 query가 든 것(kind로 거름). 잠긴 폴더 안에서 찾으면 그 열쇠를 붙인다. */

@@ -72,6 +72,7 @@ class ReceiverService : Service() {
         super.onCreate()
         guard = ReplayGuard(File(filesDir, "replay.txt"))
         Notifs.ensureChannels(this)
+        LocalSpace.init(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -274,17 +275,24 @@ class ReceiverService : Service() {
         } catch (x: Exception) { }
     }
 
-    /** §11.1 hello: 아는 확장과, xfer·size를 주면 받다 만 조각 길이(have)·이미 받았는지(done). 상태를 바꾸지 않는다. */
+    /**
+     * §11.1 hello: 아는 확장과, xfer·size를 주면 받다 만 조각 길이(have)·이미 받았는지(done). 상태를 바꾸지 않는다.
+     * 2.3.0(§19): 상대의 용량(space)을 기억하고 이 폰의 용량을 답에 싣는다. 허브가 헤더에 "sync"를 넣었으면(값이 비어도 —
+     * 대상이 없어짐) 그 허브와 맞추기를 예약한다(실제로 맞출지는 MirrorSync가 hello를 다시 해 본다).
+     */
     private fun hello(ch: Channel, header: JSONObject, dev: String): JSONObject {
         val (body, last) = ch.recv()
         if (body.isNotEmpty() || !last) throw ProtocolException("bad_header")
+        PeerSpaces.shared.put(dev, DeviceSpace.parse(header.opt("space")))
+        if (header.has("sync")) MirrorSync.request(this, dev, MirrorSync.Why.HUB)
         // xfer·size는 선택이다. 형식이 틀리면 거부하지 않고 조각이 없는 것으로 답한다(PC와 같다).
         val xfer = Xfer.field(header, "xfer")
         val size = Xfer.jsonLong(Xfer.field(header, "size"))?.takeIf { it in 0..Protocol.MAX_FILE }
         val cloud = CloudMode.isOn(this)
-        if (!Xfer.isValid(xfer) || size == null) return Xfer.helloReply(0, false, cloud)
+        val space = LocalSpace.now()
+        if (!Xfer.isValid(xfer) || size == null) return Xfer.helloReply(0, false, cloud, space)
         val (have, done) = Transfers.helloState(this, dev, xfer as String, size)
-        return Xfer.helloReply(have, done, cloud)
+        return Xfer.helloReply(have, done, cloud, space)
     }
 
     /** 헤더 뒤에 본문 없이 빈 last=1 프레임 하나만 오는 요청(hello와 같은 규칙). */

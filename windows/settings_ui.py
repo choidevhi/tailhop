@@ -4,7 +4,8 @@
 - 받기: 받기 켜기·1시간 멈춤, 받은 파일 저장 폴더(바꾸기·열기)
 - 클라우드: 이 PC를 클라우드로 쓰기, 저장 위치(아무 드라이브·외장 SSD), 암호화 상태(만들기·열기·비밀번호·리셋),
   받은 파일도 클라우드에 모으기
-- 기기: 연결된 기기(확인 코드, 연결 해제), 새 기기 연결
+- 모든 기기 동기화(2.3.0): 이 PC에 받기, 이 PC 용량, 허브마다 받은 사본(지금 동기화·사본 지우기)
+- 기기: 연결된 기기(확인 코드, 용량, 연결 해제), 새 기기 연결
 - 업데이트: 지금 버전, 연결된 PC가 내주는 새 버전(Tailscale로 받아 바로 설치), 이 PC가 내주는 업데이트
 설정 값은 큰 창(App)의 변수·함수를 그대로 써서 두 창이 늘 같은 상태를 보인다.
 """
@@ -49,6 +50,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.update_rows: ctk.CTkFrame | None = None
         self.update_note: ctk.CTkLabel | None = None
         self.update_bar: ctk.CTkProgressBar | None = None
+        self.sync_rows: ctk.CTkFrame | None = None
         self._build()
         self.after(30, lambda: apply_glass(self))
         if app.icon_path is not None:
@@ -63,6 +65,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self._general()
         self._receiving()
         self._cloud()
+        self._sync()
         self._devices()
         self._updates()
 
@@ -73,6 +76,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self._general()
         self._receiving()
         self._cloud()
+        self._sync()
         self._devices()
         self._updates()
         self.check_updates()
@@ -222,6 +226,66 @@ class SettingsWindow(ctk.CTkToplevel):
         self.app._change_cloud_dir()
         self.rebuild()
 
+    # ---------- 모든 기기 동기화(§19) ----------
+    def _sync(self) -> None:
+        box = self._section(t("sync.title"), t("sync.desc"))
+        receive = tk.BooleanVar(master=box, value=self.node.syncer.enabled)
+        self._switch(self._row(box, t("sync.receive_row"), t("sync.receive_hint")), receive,
+                     lambda v=receive: self._set_receive(v))
+        space = self.node.space()
+        if space:
+            self._row(box, t("sync.this_space"), t("sync.space", free=human_size(space["free"]),
+                                                    total=human_size(space["total"])))
+        self.sync_rows = ctk.CTkFrame(box, fg_color="transparent")
+        self.sync_rows.pack(fill="x", padx=2)  # 카드 테두리를 덮지 않게
+        self.refresh_sync()
+        self._end(box)
+
+    def refresh_sync(self) -> None:
+        """허브마다 받은 사본(개수·크기·마지막으로 맞춘 때·상태)과 지금 동기화·사본 지우기."""
+        if self.sync_rows is None or not self.sync_rows.winfo_exists():
+            return
+        for child in self.sync_rows.winfo_children():
+            child.destroy()
+        syncer = self.node.syncer
+        for sid, pairing in self.app._devices():
+            found = syncer.mirror(sid)
+            status = syncer.status.get(sid, {})
+            if found is None and not status:
+                continue
+            count, size = found.usage() if found is not None else (0, 0)
+            detail = t("sync.copy_line", count=count, size=human_size(size))
+            state = status.get("state")
+            if state == "syncing":
+                total = status.get("total") or 0
+                detail += " · " + t("sync.syncing", pct=int(status.get("done", 0) * 100 / total) if total else 0)
+            elif state in ("space", "locked", "offline"):
+                detail += " · " + t(f"sync.state_{state}")
+            elif state == "error":
+                detail += " · " + t("sync.state_error", code=status.get("code", ""))
+            row = self._row(self.sync_rows, pairing.name, detail)
+            if found is not None:
+                ctk.CTkButton(row, text=t("sync.wipe"), height=32, corner_radius=6, fg_color="transparent",
+                              hover_color=HOVER, text_color=RED, border_width=1, border_color=BORDER, font=font(12),
+                              width=80, command=lambda s=sid, n=pairing.name: self._wipe(s, n)).pack(side="right",
+                                                                                                    padx=(6, 0))
+            if syncer.enabled:
+                _button(row, t("sync.now"), lambda s=sid: syncer.poke(s), width=90).pack(side="right")
+
+    def _set_receive(self, var: tk.BooleanVar) -> None:
+        on = bool(var.get())
+        if not on and any(self.node.syncer.mirror(sid) for sid in self.node.pairings) \
+                and not messagebox.askyesno(t("sync.title"), t("sync.receive_off_confirm"), parent=self):
+            var.set(True)
+            return
+        self.node.set_sync_receive(on)
+        self.refresh_sync()
+
+    def _wipe(self, sid: str, name: str) -> None:
+        if not messagebox.askyesno(t("sync.title"), t("sync.wipe_confirm", name=name), parent=self):
+            return
+        threading.Thread(target=self.node.syncer.forget, args=(sid,), daemon=True, name="tailhop-sync-wipe").start()
+
     def _devices(self) -> None:
         box = self._section(t("settings.devices"), t("settings.devices_desc"))
         for sid, pairing in self.app._devices():
@@ -233,6 +297,10 @@ class SettingsWindow(ctk.CTkToplevel):
             ctk.CTkLabel(texts, text=pairing.name, font=font(13), text_color=TEXT, anchor="w").pack(fill="x")
             ctk.CTkLabel(texts, text=t("settings.device_detail", ip=pairing.ip, code=self.app.confirm_code(pairing)),
                          font=font(11), text_color=SECONDARY, anchor="w").pack(fill="x")
+            space = self.node.peer_space.get(sid)
+            if space is not None:  # 그 기기가 hello로 알린 용량(§19.1)
+                ctk.CTkLabel(texts, text=t("sync.space", free=human_size(space[0]), total=human_size(space[1])),
+                             font=font(11), text_color=SECONDARY, anchor="w").pack(fill="x")
             _button(row, t("devmenu.unpair"), lambda s=sid: self._unpair(s), width=80).pack(side="right")
         row = ctk.CTkFrame(box, fg_color="transparent")
         row.pack(fill="x", padx=20, pady=(4, 16))

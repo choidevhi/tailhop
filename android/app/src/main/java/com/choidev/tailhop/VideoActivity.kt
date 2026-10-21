@@ -68,8 +68,11 @@ import kotlin.math.roundToInt
  */
 @OptIn(UnstableApi::class)
 class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
-    /** 재생 목록의 한 편: 허브 경로, 이름, 딸린 버전(CloudVariants.PLAY 또는 null = 원본). */
-    data class Entry(val path: String, val name: String, val variant: String?)
+    /**
+     * 재생 목록의 한 편: 허브 경로, 이름, 딸린 버전(CloudVariants.PLAY 또는 null = 원본).
+     * local(2.3.0): 이 폰의 동기화 사본에 같은 파일이 있다 — 사본에서 읽는다(MirrorVideo, 데이터를 쓰지 않고 허브가 꺼져도).
+     */
+    data class Entry(val path: String, val name: String, val variant: String?, val local: Boolean = false)
 
     companion object {
         private const val E_IP = "ip"
@@ -77,6 +80,7 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
         private const val E_NAMES = "names"
         private const val E_VARIANTS = "variants"
         private const val E_INDEX = "index"
+        private const val E_LOCAL = "local"
         private const val S_POS = "pos"
         private const val S_PLAY = "play"
         private const val S_INDEX = "index"
@@ -96,6 +100,7 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
                 .putStringArrayListExtra(E_PATHS, ArrayList(entries.map { it.path }))
                 .putStringArrayListExtra(E_NAMES, ArrayList(entries.map { it.name }))
                 .putStringArrayListExtra(E_VARIANTS, ArrayList(entries.map { it.variant.orEmpty() }))
+                .putExtra(E_LOCAL, entries.map { it.local }.toBooleanArray())
                 .putExtra(E_INDEX, index))
         }
     }
@@ -139,7 +144,7 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
     private var entries: List<Entry> = emptyList()
     private var index = 0
     private var player: ExoPlayer? = null
-    private var video: CloudVideo? = null
+    private var video: VideoFeed? = null
     /** 화면이 가려질 때 기억한 자리·재생 중이었는지(돌아오면 이어서). */
     private var position = 0L
     private var playWhenReady = true
@@ -219,11 +224,13 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
         val paths = intent.getStringArrayListExtra(E_PATHS) ?: return emptyList()
         val names = intent.getStringArrayListExtra(E_NAMES) ?: return emptyList()
         val vars = intent.getStringArrayListExtra(E_VARIANTS) ?: return emptyList()
-        if (paths.size != names.size || paths.size != vars.size) return emptyList()
+        val local = intent.getBooleanArrayExtra(E_LOCAL) ?: BooleanArray(paths.size)
+        if (paths.size != names.size || paths.size != vars.size || paths.size != local.size) return emptyList()
         return paths.indices.mapNotNull { i ->
             val path = paths[i]
             val v = vars[i].ifEmpty { null }
-            if (path.isEmpty() || !CloudPath.isValid(path) || (v != null && v != CloudVariants.PLAY)) null else Entry(path, names[i], v)
+            if (path.isEmpty() || !CloudPath.isValid(path) || (v != null && v != CloudVariants.PLAY)) null
+            else Entry(path, names[i], if (local[i]) null else v, local[i])
         }
     }
 
@@ -378,10 +385,10 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
             ui.removeCallbacks(resumeOff)
             ui.postDelayed(resumeOff, 6000)
         }
-        val v = CloudVideo(pairing, e.path, e.variant)
+        val v: VideoFeed = (if (e.local) openLocal(e) else null) ?: CloudVideo(pairing, e.path, e.variant)
         video = v
-        // 주소는 재생기 안에서만 쓰인다(받기는 CloudVideo). 확장자는 추출기를 고르는 순서의 힌트.
-        val ext = if (e.variant == CloudVariants.PLAY) "ts" else e.name.substringAfterLast('.', "").lowercase().filter { it.isLetterOrDigit() }
+        // 주소는 재생기 안에서만 쓰인다(받기는 CloudVideo·MirrorVideo). 확장자는 추출기를 고르는 순서의 힌트.
+        val ext = if (e.variant == CloudVariants.PLAY && v is CloudVideo) "ts" else e.name.substringAfterLast('.', "").lowercase().filter { it.isLetterOrDigit() }
         val uri = Uri.Builder().scheme("tailhop").authority("cloud").appendPath(if (ext.isEmpty()) "video" else "video.$ext").build()
         val source = ProgressiveMediaSource.Factory(v.factory(), DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true))
             .createMediaSource(MediaItem.fromUri(uri))
@@ -434,6 +441,11 @@ class VideoActivity : AppCompatActivity(), VideoGestures.Listener {
         updatePlayIcon()
         ui.post(ticker)
     }
+
+    /** 동기화 사본의 그 파일(없어졌거나 풀 수 없으면 null — 허브에서 받는다). */
+    private fun openLocal(e: Entry): VideoFeed? = try {
+        Mirror.peek(this, pairing.pcIp)?.let { m -> m.find(e.path)?.let { MirrorVideo(m.reader(it)) } }
+    } catch (x: Exception) { null }
 
     /** 재생기를 놓는다: 연결을 먼저 끊어(받던 것이 바로 끝나게) 재생기가 오래 기다리지 않게 한다. */
     private fun stopPlayer() {

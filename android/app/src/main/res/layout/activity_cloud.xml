@@ -24,6 +24,9 @@
             android:contentDescription="@string/cloud_upload" />
         <ImageButton android:id="@+id/refreshBtn" style="@style/IconBtn" android:src="@drawable/ic_refresh"
             android:padding="11dp" android:contentDescription="@string/cloud_refresh" />
+        <!-- 2.3.0: 허브가 "sync"를 알릴 때만(전체 동기화·지금 동기화) -->
+        <ImageButton android:id="@+id/moreBtn" style="@style/IconBtn" android:src="@drawable/ic_more"
+            android:visibility="gone" android:contentDescription="@string/cloud_more" />
     </com.choidev.tailhop.GlassCard>
     <com.choidev.tailhop.GlassCard android:id="@+id/selBar" android:layout_width="match_parent" android:layout_height="56dp"
         android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="6dp"
@@ -75,6 +78,23 @@
             android:visibility="gone" android:contentDescription="@string/cloud_view_grid" />
     </com.choidev.tailhop.GlassCard>
 
+    <!-- 오프라인 사본(2.3.0, §19.3): 허브에 닿지 않을 때 이 기기의 암호화 사본을 읽기 전용으로 -->
+    <com.choidev.tailhop.GlassCard android:id="@+id/offlineBanner" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginStart="12dp" android:layout_marginEnd="12dp"
+        android:layout_marginTop="8dp" android:orientation="horizontal" android:gravity="center_vertical"
+        android:paddingStart="14dp" android:paddingEnd="14dp" android:paddingTop="10dp" android:paddingBottom="10dp"
+        android:visibility="gone">
+        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_cloud"
+            android:tint="@color/orange" android:importantForAccessibility="no" />
+        <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:orientation="vertical" android:layout_marginStart="12dp">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/offline_banner"
+                android:textSize="14sp" android:fontFamily="sans-serif-medium" android:textColor="@color/label" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/offline_banner_sub"
+                android:layout_marginTop="2dp" android:textSize="12sp" android:textColor="@color/secondary" />
+        </LinearLayout>
+    </com.choidev.tailhop.GlassCard>
+
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
         android:layout_marginTop="8dp">
         <com.choidev.tailhop.GlassCard android:id="@+id/listCard" android:layout_width="match_parent"
@@ -114,6 +134,11 @@
         <LinearLayout android:id="@+id/actRename" style="@style/ActBtn">
             <ImageView style="@style/ActIcon" android:src="@drawable/ic_pencil" />
             <TextView style="@style/ActLabel" android:text="@string/rename_action" />
+        </LinearLayout>
+        <!-- 2.3.0: 모든 기기에 동기화·동기화 빼기(허브가 "sync"를 알릴 때만) -->
+        <LinearLayout android:id="@+id/actSync" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_sync" />
+            <TextView style="@style/ActLabel" android:text="@string/sync_action" />
         </LinearLayout>
         <LinearLayout android:id="@+id/actDownload" style="@style/ActBtn">
             <ImageView style="@style/ActIcon" android:src="@drawable/ic_download" />

@@ -100,6 +100,8 @@ data class CloudItem(
     val path: String? = null,
     /** §17.4(2.2.0): 허브가 만든 딸린 버전(thumb·screen·poster·play 중 있는 것, CloudVariants.KNOWN만). */
     val variants: Set<String> = emptySet(),
+    /** §19.2(2.3.0): 모든 기기 동기화 대상인지(허브 목록의 "sync":true, 화면 표시용). 오프라인 사본의 항목은 늘 true. */
+    val sync: Boolean = false,
 ) {
     /** 종류(허브가 알렸으면 그것, 아니면 이름으로). 폴더는 other. */
     val kindOrGuess: String get() = if (dir) FileKinds.OTHER else kind ?: FileKinds.of(name)
@@ -175,7 +177,8 @@ object CloudListing {
             val pathOk = path != null && CloudPath.isVisiblePath(path) && path.isNotEmpty() && CloudPath.name(path) == name
             if (requirePath && !pathOk) continue
             val variants = if (dir) emptySet() else CloudVariants.parse(o.opt("variants"))
-            out += CloudItem(name, dir, size, mtime, kind, locked, state, progress, if (pathOk) path else null, variants)
+            out += CloudItem(name, dir, size, mtime, kind, locked, state, progress, if (pathOk) path else null, variants,
+                o.opt("sync") == true)
         }
         val nextRaw = Xfer.field(reply, "next")
         val next = if (nextRaw == null) null else Xfer.jsonLong(nextRaw)?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()
