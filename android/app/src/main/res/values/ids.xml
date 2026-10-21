@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 미리보기 칸에 붙인 일(Thumbs.Job) — 칸이 재활용될 때 취소한다 -->
+    <item name="thumb_job" type="id" />
+</resources>

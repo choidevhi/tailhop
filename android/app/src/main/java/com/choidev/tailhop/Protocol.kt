@@ -23,6 +23,9 @@ import javax.crypto.spec.SecretKeySpec
  */
 open class ProtocolException(val code: String, val detail: String? = null) : IOException(code)
 
+/** 상대가 아는 코드로 거부함. reply는 응답 JSON 전체(vault_wait의 retry처럼 코드에 덧붙은 값을 읽는다, §14.2). */
+class HubRefusal(code: String, val reply: org.json.JSONObject) : ProtocolException(code)
+
 /** GCM 태그 검사 실패. 받는 쪽은 응답 없이 바로 끊는다. */
 class AuthException : ProtocolException("auth_failed")
 

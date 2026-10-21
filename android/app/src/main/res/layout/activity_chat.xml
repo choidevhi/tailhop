@@ -21,9 +21,36 @@
                     android:textSize="12sp" android:textColor="@color/secondary" android:maxLines="1" android:ellipsize="end" />
             </LinearLayout>
         </LinearLayout>
+        <!-- 2.0.0: 사진·영상 모아 보기, 찾기 -->
+        <ImageButton android:id="@+id/mediaBtn" style="@style/IconBtn" android:src="@drawable/ic_image"
+            android:contentDescription="@string/chat_media" />
+        <ImageButton android:id="@+id/searchBtn" style="@style/IconBtn" android:src="@drawable/ic_search"
+            android:contentDescription="@string/chat_search" />
         <ImageButton android:id="@+id/moreBtn" style="@style/IconBtn" android:src="@drawable/ic_more"
             android:contentDescription="@string/more" />
     </com.choidev.tailhop.GlassCard>
+
+    <!-- 찾기(2.0.0): 글·파일 이름과 종류(전체·글·사진·영상·파일). 찾기 단추를 누를 때만 보인다 -->
+    <LinearLayout android:id="@+id/searchPanel" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:visibility="gone">
+        <com.choidev.tailhop.GlassCard android:layout_width="match_parent" android:layout_height="44dp"
+            android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+            android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="4dp">
+            <ImageView android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/ic_search"
+                android:tint="@color/secondary" android:importantForAccessibility="no" />
+            <EditText android:id="@+id/searchBox" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+                android:layout_marginStart="8dp" android:background="@null" android:hint="@string/chat_search_hint"
+                android:textSize="15sp" android:textColor="@color/label" android:inputType="text" android:imeOptions="actionSearch"
+                android:maxLength="100" android:singleLine="true" android:importantForAutofill="no" />
+            <ImageButton android:id="@+id/searchClose" style="@style/IconBtn" android:layout_width="36dp" android:layout_height="36dp"
+                android:padding="9dp" android:src="@drawable/ic_close" android:contentDescription="@string/search_clear" />
+        </com.choidev.tailhop.GlassCard>
+        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:scrollbars="none">
+            <LinearLayout android:id="@+id/kindChips" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="12dp" />
+        </HorizontalScrollView>
+    </LinearLayout>
 
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
         <androidx.recyclerview.widget.RecyclerView android:id="@+id/chat"
@@ -34,13 +61,13 @@
             android:orientation="vertical" android:gravity="center_horizontal"
             android:paddingStart="24dp" android:paddingEnd="24dp" android:paddingTop="28dp" android:paddingBottom="28dp"
             android:visibility="gone">
-            <ImageView android:layout_width="56dp" android:layout_height="56dp"
+            <ImageView android:id="@+id/emptyIcon" android:layout_width="56dp" android:layout_height="56dp"
                 android:padding="15dp" android:background="@drawable/bg_icon_tile" android:src="@drawable/ic_bubble"
                 android:tint="@color/label" android:importantForAccessibility="no" />
-            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            <TextView android:id="@+id/emptyTitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:layout_marginTop="18dp" android:textSize="22sp" android:textStyle="bold" android:letterSpacing="-0.01"
                 android:textColor="@color/label" android:text="@string/chat_empty_title" android:gravity="center" />
-            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            <TextView android:id="@+id/emptySub" android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:layout_marginTop="8dp" android:textSize="14sp" android:textColor="@color/secondary"
                 android:text="@string/chat_empty_sub" android:gravity="center" />
         </com.choidev.tailhop.GlassCard>

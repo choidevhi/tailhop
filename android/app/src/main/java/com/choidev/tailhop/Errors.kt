@@ -68,6 +68,11 @@ object Errors {
         "update_signer" to R.string.err_update_signer,
         "update_bad" to R.string.err_update_bad,
         "update_install" to R.string.err_update_install,
+        // 2.0.0 잠긴 폴더(§14.3)
+        "vault_locked" to R.string.err_vault_locked,
+        "vault_pin" to R.string.err_vault_pin,
+        "vault_wait" to R.string.err_vault_wait,
+        "vault_busy" to R.string.err_vault_busy,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")
@@ -78,6 +83,9 @@ object Errors {
     fun text(ctx: Context, e: Throwable): String = when (e) {
         is ProtocolException -> when {
             e.code == "pc_refused_reason" -> ctx.getString(R.string.err_pc_refused_reason, e.detail ?: "")
+            // 너무 많이 틀려 막힘: 허브가 알린 기다릴 시간(초)을 함께(§14.2)
+            e.code == "vault_wait" && e is HubRefusal && Vault.retrySeconds(e.reply) != null ->
+                ctx.getString(R.string.err_vault_wait_s, Vault.retrySeconds(e.reply)!!)
             else -> ids[e.code]?.let { ctx.getString(it) } ?: e.detail ?: ctx.getString(R.string.unknown_error)
         }
         else -> e.message ?: ctx.getString(R.string.unknown_error)

@@ -61,7 +61,8 @@ object Net {
     /** 거부 응답 → 예외. PC 1.5+는 고정 코드를 함께 보낸다 → 이 폰의 언어로. 예전 PC는 한국어 문장만 → 그대로 보여 준다. */
     private fun refusal(reply: JSONObject): ProtocolException {
         val code = reply.opt("code") as? String
-        if (Errors.knows(code)) return ProtocolException(code!!)
+        // 아는 코드는 응답 전체를 함께 둔다(vault_wait의 retry 같은 덧붙은 값, §14.2).
+        if (Errors.knows(code)) return HubRefusal(code!!, reply)
         val err = reply.optString("error", "").take(200)
         return if (err.isNotEmpty()) ProtocolException("pc_refused_reason", err) else ProtocolException("pc_refused")
     }
@@ -145,15 +146,88 @@ object Net {
     }
 
     /** §12.2 cloud_list: 폴더 path의 한 쪽(cursor부터). */
-    fun cloudList(p: Pairing, path: String, cursor: Int, token: SendToken? = null): CloudPage = cloudCall {
-        val h = header("cloud_list").put("path", path)
-        if (cursor > 0) h.put("cursor", cursor)
-        CloudListing.parse(request(p, h, token))
+    /**
+     * 잠긴 폴더(§14.2) 안을 가리키는 요청이면 그 폴더의 열쇠(token)를 헤더에 붙인다. 열쇠는 이 프로세스의 메모리에만 있다
+     * (VaultTokens.shared). 허브가 vault_locked로 거부하면(열쇠가 없거나 만료) 그 열쇠를 버린다 — 화면이 PIN을 다시 묻는다.
+     */
+    private inline fun <T> vaultCall(p: Pairing, path: String, h: JSONObject, block: (JSONObject) -> T): T {
+        VaultTokens.shared.tokenFor(p.pcIp, path)?.let { h.put("token", it) }
+        return try { cloudCall { block(h) } } catch (e: ProtocolException) {
+            if (e.code == "vault_locked") {
+                // 허브가 알려 준 잠긴 폴더 자리(§14.2)를 먼저 믿고, 없으면 이 폰이 아는 자리로. 그 열쇠는 버린다.
+                val m = Vault.lockedMount((e as? HubRefusal)?.reply) ?: VaultTokens.shared.mountOf(p.pcIp, path)
+                if (m != null) { VaultTokens.shared.learn(p.pcIp, m); VaultTokens.shared.drop(p.pcIp, m) }
+            }
+            throw e
+        }
     }
 
-    fun cloudMkdir(p: Pairing, path: String) { cloudCall { request(p, header("cloud_mkdir").put("path", path)) } }
+    fun cloudList(p: Pairing, path: String, cursor: Int, token: SendToken? = null): CloudPage {
+        val h = header("cloud_list").put("path", path)
+        if (cursor > 0) h.put("cursor", cursor)
+        return vaultCall(p, path, h) { CloudListing.parse(request(p, it, token)) }
+    }
 
-    fun cloudDel(p: Pairing, path: String) { cloudCall { request(p, header("cloud_del").put("path", path)) } }
+    fun cloudMkdir(p: Pairing, path: String) { vaultCall(p, path, header("cloud_mkdir").put("path", path)) { request(p, it) } }
+
+    fun cloudDel(p: Pairing, path: String) { vaultCall(p, path, header("cloud_del").put("path", path)) { request(p, it) } }
+
+    /** §15 cloud_search: path 폴더 아래에서 이름에 query가 든 것(kind로 거름). 잠긴 폴더 안에서 찾으면 그 열쇠를 붙인다. */
+    fun cloudSearch(p: Pairing, path: String, query: String, kind: String, cursor: Int, token: SendToken? = null): SearchPage {
+        val h = header("cloud_search")
+        CloudSearch.fields(path, query, kind, cursor).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
+        return vaultCall(p, path, h) { CloudSearch.parse(request(p, it, token)) }
+    }
+
+    /**
+     * §15 cloud_thumb: 파일의 JPEG 미리보기(긴 변 px). 첫 프레임(mime·w·h, last=0) 뒤 데이터 프레임(256 KiB 이하).
+     * 만들 수 없는 파일은 not_found. token(SendToken)을 취소하면 소켓을 닫아 바로 끝난다(목록에서 스크롤해 지나감).
+     */
+    fun cloudThumb(p: Pairing, path: String, px: Int, token: SendToken? = null): ByteArray {
+        val h = header("cloud_thumb").put("path", path).put("px", CloudThumb.px(px))
+        return vaultCall(p, path, h) { hh ->
+            connect(p.pcIp, p.pcPort, token).use { s ->
+                val ch = msgChannel(p, s)
+                ch.send(hh.toString().toByteArray(Charsets.UTF_8), last = false)
+                ch.send(ByteArray(0), last = true)
+                token?.tick()
+                val (raw, last) = try { ch.recv() } catch (e: ProtocolException) { throw e } catch (e: IOException) {
+                    throw ProtocolException("pc_forgot")
+                }
+                when (val first = CloudThumb.parseFirst(raw, last)) {
+                    is CloudThumb.First.Refused -> throw refusal(first.reply)
+                    is CloudThumb.First.Ok -> CloudThumb.readData(ch) { token?.tick() }
+                }
+            }
+        }
+    }
+
+    /** §14.2 cloud_lock: 폴더를 잠근다. 허브가 바로 복구 코드를 돌려주고 뒤에서 암호화한다. 복구 코드는 이때 한 번만 받는다. */
+    fun cloudLock(p: Pairing, path: String, pin: String): String =
+        cloudCall { Vault.parseRecovery(request(p, header("cloud_lock").put("path", path).put("pin", pin))) }
+
+    /** §14.2 cloud_open: PIN이나 복구 코드로 열쇠를 받아 이 프로세스에 둔다. */
+    fun cloudOpen(p: Pairing, path: String, pin: String?, recovery: String?): String {
+        val h = header("cloud_open").put("path", path)
+        if (recovery != null) h.put("recovery", recovery) else h.put("pin", pin)
+        val t = cloudCall { Vault.parseToken(request(p, h)) }
+        VaultTokens.shared.put(p.pcIp, path, t)
+        return t
+    }
+
+    /** §14.2 cloud_unlock: 잠금을 풀어 평문 폴더로 되돌린다(허브가 뒤에서). */
+    fun cloudUnlock(p: Pairing, path: String, pin: String) {
+        cloudCall { request(p, header("cloud_unlock").put("path", path).put("pin", pin)) }
+        VaultTokens.shared.forgetMount(p.pcIp, path)
+    }
+
+    /** §14.2 cloud_repin: 지금 PIN이나 복구 코드로 새 PIN을 정한다. */
+    fun cloudRepin(p: Pairing, path: String, pin: String?, recovery: String?, newPin: String) {
+        val h = header("cloud_repin").put("path", path).put("new_pin", newPin)
+        if (recovery != null) h.put("recovery", recovery) else h.put("pin", pin)
+        cloudCall { request(p, h) }
+        VaultTokens.shared.drop(p.pcIp, path) // PIN을 바꾸면 그 보관함의 열쇠는 모두 끝난다(§14.2)
+    }
 
     /**
      * §12.2 cloud_get: offset부터 받는다. 이어받을 때(조각이 있을 때)는 조각을 만들 때의 size·mtime을 함께 보내 허브가
@@ -161,11 +235,11 @@ object Net {
      * 조각을 만들거나 이어 쓸 위치로 연다. 다 받으면 머리를 돌려준다. 끊기면 쓴 데까지 남는다(부른 쪽이 다시 시도).
      */
     fun cloudGet(p: Pairing, path: String, offset: Long, size: Long?, mtime: Long?, token: SendToken? = null,
-                 open: (CloudWire.Head) -> OutputStream, onProgress: ((Long, Long) -> Unit)? = null): CloudWire.Head = cloudCall {
-        val h = header("cloud_get").put("path", path).put("offset", offset)
-        if (size != null) h.put("size", size)
-        if (mtime != null) h.put("mtime", mtime)
-        connect(p.pcIp, p.pcPort, token).use { s ->
+                 open: (CloudWire.Head) -> OutputStream, onProgress: ((Long, Long) -> Unit)? = null): CloudWire.Head {
+        val hh = header("cloud_get").put("path", path).put("offset", offset)
+        if (size != null) hh.put("size", size)
+        if (mtime != null) hh.put("mtime", mtime)
+        return vaultCall(p, path, hh) { h -> connect(p.pcIp, p.pcPort, token).use { s ->
             val ch = msgChannel(p, s)
             ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
             ch.send(ByteArray(0), last = true)
@@ -186,7 +260,7 @@ object Net {
                 }
             }
             head
-        }
+        } }
     }
 
     /**
@@ -350,7 +424,11 @@ object Net {
                 val ch = msgChannel(p, s)
                 val h = header(if (cloudDir != null) "cloud_put" else "file").put("name", meta.name.take(255)).put("size", meta.size)
                     .put("xfer", xfer).put("offset", offset)
-                if (cloudDir != null) h.put("dir", cloudDir)
+                if (cloudDir != null) {
+                    h.put("dir", cloudDir)
+                    // 잠긴 폴더(§14) 안으로 올리면 그 열쇠를 붙인다.
+                    VaultTokens.shared.tokenFor(p.pcIp, cloudDir)?.let { h.put("token", it) }
+                }
                 ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
                 var sent = offset
                 while (true) {

@@ -1,6 +1,7 @@
 package com.choidev.tailhop
 
 import android.content.Intent
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -13,6 +14,7 @@ import android.text.TextWatcher
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -23,10 +25,12 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.util.Calendar
@@ -46,8 +50,23 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var sendBtn: View
     private lateinit var chat: RecyclerView
     private lateinit var empty: View
+    private lateinit var emptyIcon: ImageView
+    private lateinit var emptyTitle: TextView
+    private lateinit var emptySub: TextView
+    private lateinit var searchPanel: View
+    private lateinit var searchBox: EditText
+    private lateinit var kindChips: LinearLayout
+    private lateinit var composer: View
     private val adapter = ChatAdapter()
+    private val media = MediaAdapter()
     private val ui = Handler(Looper.getMainLooper())
+
+    /** 찾기(2.0.0): 글·파일 이름과 종류(ChatFilter). */
+    private var query = ""
+    private var kind = ChatFilter.ALL
+    /** 사진·영상 모아 보기(격자). */
+    private var mediaMode = false
+    private val searchRun = Runnable { query = searchBox.text.toString(); reloadChat() }
 
     private val historyListener: () -> Unit = { ui.post { reloadChat() } }
 
@@ -78,12 +97,37 @@ class ChatActivity : AppCompatActivity() {
         sendBtn = findViewById(R.id.sendBtn)
         chat = findViewById(R.id.chat)
         empty = findViewById(R.id.empty)
+        emptyIcon = findViewById(R.id.emptyIcon)
+        emptyTitle = findViewById(R.id.emptyTitle)
+        emptySub = findViewById(R.id.emptySub)
+        searchPanel = findViewById(R.id.searchPanel)
+        searchBox = findViewById(R.id.searchBox)
+        kindChips = findViewById(R.id.kindChips)
+        composer = findViewById(R.id.composer)
 
         chat.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         chat.adapter = adapter
         chat.itemAnimator = null
 
-        findViewById<View>(R.id.backBtn).setOnClickListener { finish() }
+        findViewById<View>(R.id.backBtn).setOnClickListener { goBack() }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { goBack() }
+        })
+        findViewById<View>(R.id.searchBtn).setOnClickListener { openSearch() }
+        findViewById<View>(R.id.searchClose).setOnClickListener { closeSearch() }
+        findViewById<View>(R.id.mediaBtn).setOnClickListener { setMedia(!mediaMode) }
+        searchBox.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) { ui.removeCallbacks(searchRun); ui.postDelayed(searchRun, 250) }
+        })
+        searchBox.setOnEditorActionListener { v, _, _ ->
+            ui.removeCallbacks(searchRun)
+            searchRun.run()
+            getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.hideSoftInputFromWindow(v.windowToken, 0)
+            true
+        }
+        buildChips()
         findViewById<View>(R.id.moreBtn).setOnClickListener { showMenu(it) }
         findViewById<View>(R.id.plusBtn).setOnClickListener { pick.launch(arrayOf("*/*")) }
         textBox.addTextChangedListener(object : TextWatcher {
@@ -109,6 +153,7 @@ class ChatActivity : AppCompatActivity() {
     override fun onDestroy() {
         History.removeListener(historyListener)
         Outbox.removeListener(historyListener)
+        ui.removeCallbacks(searchRun)
         super.onDestroy()
     }
 
@@ -119,7 +164,108 @@ class ChatActivity : AppCompatActivity() {
         SendService.resumeIfNeeded(this)
         updateHeader(); reloadChat(); updateSendEnabled(); ui.post(ticker)
     }
-    override fun onPause() { super.onPause(); ui.removeCallbacks(ticker) }
+    override fun onPause() {
+        super.onPause()
+        ui.removeCallbacks(ticker)
+        Thumbs.cancelAll() // 보이지 않는 동안 미리보기 일을 하지 않게
+    }
+
+    // ---------- 찾기·모아 보기(2.0.0) ----------
+
+    private fun goBack() {
+        when {
+            mediaMode -> setMedia(false)
+            searchPanel.visibility == View.VISIBLE -> closeSearch()
+            else -> finish()
+        }
+    }
+
+    private fun openSearch() {
+        if (mediaMode) setMedia(false)
+        searchPanel.visibility = View.VISIBLE
+        searchBox.requestFocus()
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.showSoftInput(searchBox, 0)
+    }
+
+    private fun closeSearch() {
+        ui.removeCallbacks(searchRun)
+        searchBox.setText("")
+        ui.removeCallbacks(searchRun)
+        query = ""
+        kind = ChatFilter.ALL
+        updateChips()
+        searchPanel.visibility = View.GONE
+        getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.hideSoftInputFromWindow(searchBox.windowToken, 0)
+        reloadChat()
+    }
+
+    private fun kindLabel(k: String) = when (k) {
+        ChatFilter.TEXT -> R.string.chat_kind_text
+        ChatFilter.MEDIA -> R.string.chat_kind_media
+        ChatFilter.FILE -> R.string.chat_kind_file
+        else -> R.string.kind_all
+    }
+
+    /** 종류 칩(클라우드 화면과 같은 shadcn Toggle 모양). */
+    private fun buildChips() {
+        val d = resources.displayMetrics.density
+        for (k in ChatFilter.KINDS) {
+            kindChips.addView(TextView(this).apply {
+                tag = k
+                text = getString(kindLabel(k))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(ContextCompat.getColorStateList(context, R.color.chip_text))
+                setBackgroundResource(R.drawable.bg_chip_toggle)
+                setPadding((14 * d).toInt(), (7 * d).toInt(), (14 * d).toInt(), (7 * d).toInt())
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = (8 * d).toInt() }
+                setOnClickListener { kind = k; updateChips(); reloadChat() }
+            })
+        }
+        updateChips()
+    }
+
+    private fun updateChips() {
+        for (i in 0 until kindChips.childCount) kindChips.getChildAt(i).let { it.isSelected = it.tag == kind }
+    }
+
+    /** 모아 보기: 이 대화의 사진·영상을 격자로(미리보기는 이 폰의 파일에서 만든다). 입력창·찾기는 숨긴다. */
+    private fun setMedia(on: Boolean) {
+        mediaMode = on
+        if (on) {
+            searchPanel.visibility = View.GONE
+            chat.layoutManager = GridLayoutManager(this, CloudGrid.columns(
+                (resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt()))
+            chat.adapter = media
+        } else {
+            Thumbs.cancelAll()
+            chat.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
+            chat.adapter = adapter
+            if (ChatFilter.active(query, kind)) searchPanel.visibility = View.VISIBLE
+        }
+        composer.visibility = if (on) View.GONE else View.VISIBLE
+        // 모아 보기 격자는 유리 판 위에(칸의 회색 글자가 배경 오로라 위에 바로 놓이지 않게)
+        val d = resources.displayMetrics.density
+        (chat.layoutParams as ViewGroup.MarginLayoutParams).setMargins(
+            if (on) (12 * d).toInt() else 0, if (on) (8 * d).toInt() else 0, if (on) (12 * d).toInt() else 0, if (on) (12 * d).toInt() else 0)
+        chat.requestLayout()
+        if (on) chat.setBackgroundResource(R.drawable.bg_glass) else chat.background = null
+        chat.clipToOutline = on
+        val pad = (if (on) 6 * d else 0f).toInt()
+        chat.setPadding(pad, if (on) pad else (4 * d).toInt(), pad, if (on) pad else (8 * d).toInt())
+        findViewById<ImageView>(R.id.mediaBtn).setImageResource(if (on) R.drawable.ic_bubble else R.drawable.ic_image)
+        findViewById<View>(R.id.mediaBtn).contentDescription = getString(if (on) R.string.chat_back_to_chat else R.string.chat_media)
+        updateHeader()
+        reloadChat()
+    }
+
+    private fun setEmpty(icon: Int, title: Int, sub: Int?) {
+        emptyIcon.setImageResource(icon)
+        emptyTitle.setText(title)
+        emptySub.visibility = if (sub == null) View.GONE else View.VISIBLE
+        if (sub != null) emptySub.setText(sub)
+    }
 
     private fun showMenu(anchor: View) {
         val p = pairing() ?: return
@@ -151,15 +297,29 @@ class ChatActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.pcName).text = p.pcName
         // 이 폰의 수신 상태(보내기는 수신 중지와 상관없이 된다)
         val ok = Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.LISTENING
-        pairState.text = if (ok) getString(R.string.chat_connected)
+        pairState.text = if (mediaMode) getString(R.string.chat_media)
+        else if (ok) getString(R.string.chat_connected)
         else getString(R.string.chat_connected_status, ReceiverService.statusText(this))
         dot.setImageResource(if (ok) R.drawable.dot_green else R.drawable.dot_gray)
     }
 
     private fun reloadChat() {
-        val items = History.forDevice(this, ip).reversed()
-        val pending = Outbox.forDevice(this, ip)
+        if (mediaMode) {
+            media.items = ChatFilter.media(History.forDevice(this, ip))
+            media.notifyDataSetChanged()
+            val none = media.items.isEmpty()
+            if (none) setEmpty(R.drawable.ic_image, R.string.chat_media_empty, null)
+            empty.visibility = if (none) View.VISIBLE else View.GONE
+            chat.visibility = if (none) View.GONE else View.VISIBLE
+            return
+        }
+        val filtering = ChatFilter.active(query, kind)
+        val items = History.forDevice(this, ip).reversed().let { all -> if (filtering) all.filter { ChatFilter.matches(it, query, kind) } else all }
+        // 거르는 동안에는 아직 못 보낸 건을 숨긴다(찾은 기록만 보이게).
+        val pending = if (filtering) emptyList() else Outbox.forDevice(this, ip)
         val total = items.size + pending.size
+        if (filtering) setEmpty(R.drawable.ic_search, R.string.search_empty, null)
+        else setEmpty(R.drawable.ic_bubble, R.string.chat_empty_title, R.string.chat_empty_sub)
         val atBottom = !chat.canScrollVertically(1)
         val grew = total > adapter.itemCount
         adapter.name = pairing()?.pcName ?: "PC"
@@ -226,6 +386,48 @@ class ChatActivity : AppCompatActivity() {
         b.setNegativeButton(if (j.failed) R.string.outbox_remove else R.string.outbox_cancel) { _, _ -> SendService.cancel(this, j.id) }
         b.setNeutralButton(R.string.close, null)
         b.show()
+    }
+
+    /** 사진·영상 모아 보기의 격자(클라우드 격자와 같은 칸). 누르면 대화방에서처럼 연다(받은 파일만). */
+    private inner class MediaAdapter : RecyclerView.Adapter<MediaAdapter.VH>() {
+        var items: List<HistoryItem> = emptyList()
+
+        inner class VH(v: View) : RecyclerView.ViewHolder(v) {
+            val thumb: ImageView = v.findViewById(R.id.thumb)
+            val icon: ImageView = v.findViewById(R.id.icon)
+            val badge: ImageView = v.findViewById(R.id.badge)
+            val name: TextView = v.findViewById(R.id.name)
+            val sub: TextView = v.findViewById(R.id.sub)
+        }
+
+        override fun getItemCount() = items.size
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+            VH(LayoutInflater.from(parent.context).inflate(R.layout.item_cloud_grid, parent, false))
+
+        override fun onViewRecycled(holder: VH) { Thumbs.unbind(holder.thumb) }
+
+        override fun onBindViewHolder(h: VH, pos: Int) {
+            val it = items[pos]
+            val video = ChatFilter.isVideo(it)
+            Thumbs.unbind(h.thumb)
+            h.thumb.setImageDrawable(null)
+            h.icon.visibility = View.VISIBLE
+            h.icon.setImageResource(if (video) R.drawable.ic_video else R.drawable.ic_image)
+            h.badge.visibility = if (video) View.VISIBLE else View.GONE
+            h.badge.setImageResource(R.drawable.ic_video)
+            h.name.text = it.name ?: getString(R.string.file_default)
+            h.sub.text = Lang.shortTime(h.itemView.context, it.ts)
+            val uri = it.uri
+            if (uri != null) {
+                val px = CloudThumb.GRID_PX
+                val app = applicationContext
+                Thumbs.bind(h.thumb, Thumbs.localKey(uri, px), { job -> Thumbs.local(app, Uri.parse(uri), video, px, job) }) { bmp ->
+                    h.thumb.setImageBitmap(bmp)
+                    h.icon.visibility = View.GONE
+                }
+            }
+            h.itemView.setOnClickListener { _ -> if (it.incoming) open(it) else toast(getString(R.string.sent_file_to_pc)) }
+        }
     }
 
     private inner class ChatAdapter : RecyclerView.Adapter<ChatAdapter.VH>() {

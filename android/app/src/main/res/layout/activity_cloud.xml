@@ -24,13 +24,41 @@
             android:padding="11dp" android:contentDescription="@string/cloud_refresh" />
     </com.choidev.tailhop.GlassCard>
 
-    <!-- 지금 폴더까지의 경로(유리 알약). 조각을 누르면 그 폴더로 간다. 구분은 벡터 아이콘(ic_chevron_right) -->
-    <HorizontalScrollView android:id="@+id/crumbsScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
+    <!-- 찾기(2.0.0, §15 cloud_search): 허브가 "cloud2"를 알릴 때만 보인다. 이 폴더 아래까지 이름으로 찾는다 -->
+    <com.choidev.tailhop.GlassCard android:id="@+id/searchBar" android:layout_width="match_parent" android:layout_height="44dp"
         android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
-        android:background="@drawable/bg_glass" android:scrollbars="none" android:fillViewport="false">
-        <LinearLayout android:id="@+id/crumbs" android:layout_width="wrap_content" android:layout_height="40dp"
-            android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="10dp" />
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="12dp" android:paddingEnd="4dp"
+        android:visibility="gone">
+        <ImageView android:layout_width="18dp" android:layout_height="18dp" android:src="@drawable/ic_search"
+            android:tint="@color/secondary" android:importantForAccessibility="no" />
+        <EditText android:id="@+id/searchBox" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:layout_marginStart="8dp" android:background="@null" android:hint="@string/cloud_search_hint"
+            android:textSize="15sp" android:textColor="@color/label" android:inputType="text" android:imeOptions="actionSearch"
+            android:maxLength="100" android:singleLine="true" android:importantForAutofill="no" />
+        <ImageButton android:id="@+id/searchClear" style="@style/IconBtn" android:layout_width="36dp" android:layout_height="36dp"
+            android:padding="9dp" android:src="@drawable/ic_close" android:visibility="gone"
+            android:contentDescription="@string/search_clear" />
+    </com.choidev.tailhop.GlassCard>
+
+    <!-- 종류 고르기(전체·사진·영상·음악·문서·압축·기타). 칩은 코드가 만든다 -->
+    <HorizontalScrollView android:id="@+id/kindScroll" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" android:scrollbars="none" android:clipToPadding="false" android:visibility="gone">
+        <LinearLayout android:id="@+id/kindChips" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="12dp" />
     </HorizontalScrollView>
+
+    <!-- 지금 폴더까지의 경로(유리 알약)와 격자/목록 바꾸기. 조각을 누르면 그 폴더로 간다. 구분은 벡터 아이콘(ic_chevron_right) -->
+    <com.choidev.tailhop.GlassCard android:id="@+id/crumbsRow" android:layout_width="match_parent" android:layout_height="44dp"
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="0dp" android:paddingEnd="2dp">
+        <HorizontalScrollView android:id="@+id/crumbsScroll" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="match_parent" android:scrollbars="none" android:fillViewport="false">
+            <LinearLayout android:id="@+id/crumbs" android:layout_width="wrap_content" android:layout_height="match_parent"
+                android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="10dp" />
+        </HorizontalScrollView>
+        <ImageButton android:id="@+id/viewBtn" style="@style/IconBtn" android:padding="10dp" android:src="@drawable/ic_grid"
+            android:visibility="gone" android:contentDescription="@string/cloud_view_grid" />
+    </com.choidev.tailhop.GlassCard>
 
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
         android:layout_marginTop="8dp">

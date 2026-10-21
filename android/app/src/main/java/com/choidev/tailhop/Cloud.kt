@@ -88,13 +88,33 @@ object CloudPath {
 }
 
 /** 클라우드 목록의 한 항목(§12.2 cloud_list). mtime은 유닉스 ms. */
-data class CloudItem(val name: String, val dir: Boolean, val size: Long, val mtime: Long)
+data class CloudItem(
+    val name: String, val dir: Boolean, val size: Long, val mtime: Long,
+    /** §15(2.0.0): 허브가 알린 종류(없으면 null — FileKinds.of(name)으로 정한다). */
+    val kind: String? = null,
+    /** §14: 잠긴 폴더인지, state("locked"·"locking"·"unlocking"·"stalled")와 잠그는·푸는 중의 진행률(0–100). */
+    val locked: Boolean = false,
+    val state: String? = null,
+    val progress: Int? = null,
+    /** §15 검색 결과: 검색을 시작한 폴더 기준 상대 경로(마지막 조각 = name). 목록에서는 null. */
+    val path: String? = null,
+) {
+    /** 종류(허브가 알렸으면 그것, 아니면 이름으로). 폴더는 other. */
+    val kindOrGuess: String get() = if (dir) FileKinds.OTHER else kind ?: FileKinds.of(name)
+
+    /** 잠그거나 푸는 중(아직 열 수 없다). */
+    val busy: Boolean get() = state == "locking" || state == "unlocking"
+
+    /** 잠그기가 멈췄다(사용 중인 파일·허브를 다시 켬, §14.2): 들어갈 수 없고, PIN으로 열면 이어 잠그고 cloud_unlock으로 되돌린다. */
+    val stalled: Boolean get() = state == "stalled"
+}
 
 /** 목록 한 쪽: 항목과 다음 쪽 cursor(없으면 null). */
 data class CloudPage(val items: List<CloudItem>, val next: Int?)
 
 object CloudListing {
     const val PAGE = 500
+    private val VAULT_STATES = setOf("locked", "locking", "unlocking", "stalled")
 
     /** 폴더 먼저, 이름순(대소문자 무시). 같으면 원래 이름으로 한 번 더 — 쪽을 나눠도 순서가 흔들리지 않게. */
     val ORDER: Comparator<CloudItem> = compareBy<CloudItem> { !it.dir }
@@ -133,7 +153,7 @@ object CloudListing {
      * 허브의 목록 응답(클라이언트). 이름이 규칙에 맞지 않거나 형식이 틀린 항목은 버린다(허브가 걸러야 하지만 한 번 더).
      * items가 배열이 아니거나 next가 정수·null이 아니면 bad_reply.
      */
-    fun parse(reply: JSONObject): CloudPage {
+    fun parse(reply: JSONObject, requirePath: Boolean = false): CloudPage {
         val arr = reply.opt("items") as? JSONArray ?: throw ProtocolException("bad_reply")
         val out = ArrayList<CloudItem>()
         for (i in 0 until arr.length()) {
@@ -143,7 +163,16 @@ object CloudListing {
             val size = Xfer.jsonLong(o.opt("size")) ?: continue
             val mtime = Xfer.jsonLong(o.opt("mtime")) ?: continue
             if (!CloudPath.isListable(name) || size < 0) continue
-            out += CloudItem(name, dir, size, mtime)
+            // §15·§14의 선택 필드: 형식이 틀리면 없는 것으로 본다(locked만은 true일 때만 잠김).
+            val kind = (o.opt("kind") as? String)?.takeIf { it in FileKinds.KINDS }
+            val locked = dir && o.opt("locked") == true
+            val state = (o.opt("state") as? String)?.takeIf { locked && it in VAULT_STATES }
+            val progress = Xfer.jsonLong(o.opt("progress"))?.takeIf { locked && it in 0..100 }?.toInt()
+            // 검색 결과의 path: 규칙에 맞고, 보이는 이름들이고, 마지막 조각이 name이어야 한다.
+            val path = o.opt("path") as? String
+            val pathOk = path != null && CloudPath.isVisiblePath(path) && path.isNotEmpty() && CloudPath.name(path) == name
+            if (requirePath && !pathOk) continue
+            out += CloudItem(name, dir, size, mtime, kind, locked, state, progress, if (pathOk) path else null)
         }
         val nextRaw = Xfer.field(reply, "next")
         val next = if (nextRaw == null) null else Xfer.jsonLong(nextRaw)?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()
