@@ -283,7 +283,7 @@ def open_server(sock: socket.socket, prefix: bytes, dir_key: bytes) -> Channel:
     return Channel(sock, session_key(dir_key, prefix[5:21]), prefix, is_client=False)
 
 
-def new_header(kind: str, sender: str, **fields) -> dict:
+def new_header(kind: str, sender: str, /, **fields) -> dict:
     return {"v": 1, "type": kind, "id": os.urandom(16).hex(), "ts": int(time.time() * 1000), "from": sender, **fields}
 
 
@@ -507,6 +507,51 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
     return final
 
 
+def _receive_into_vault(ch: Channel, header: dict, target, on_progress, peer: str, book) -> Path:
+    """§14: 보관함 안으로 올리기. 이어받기는 하지 않는다(조각을 평문으로 남기지 않으려고). 끊기면 처음부터 다시 받는다."""
+    size, xfer, offset = header["size"], header["xfer"], header.get("offset", 0)
+    if offset != 0:
+        raise ProtocolError("resume_lost")
+    v = target.vault
+    name = cloud_name(sanitize_filename(header["name"]))
+    stem, dot, ext = name.rpartition(".")
+    rel_dir = target.rel_dir
+    rel = f"{rel_dir}/{name}" if rel_dir else name
+    n = 1
+    while rel in v.entries:  # 같은 이름이 있으면 번호를 붙인다(§12.2)
+        numbered = f"{stem} ({n}).{ext}" if dot and stem else f"{name} ({n})"
+        rel = f"{rel_dir}/{numbered}" if rel_dir else numbered
+        n += 1
+    writer = v.writer(rel, size, int(time.time() * 1000))
+    digest = hashlib.sha256()
+    got = 0
+    try:
+        while True:
+            data, last = ch.recv()
+            if last:
+                trailer = data
+                break
+            if not data:
+                raise ProtocolError("bad_xfer")
+            got += len(data)
+            writer.write(data)
+            digest.update(data)
+            if on_progress:
+                on_progress(got, size)
+        try:
+            sha = json.loads(bytes(trailer).decode("utf-8")).get("sha256")
+        except (UnicodeDecodeError, ValueError, AttributeError) as exc:
+            raise ProtocolError("bad_xfer") from exc
+        if not isinstance(sha, str) or not hmac.compare_digest(sha, digest.hexdigest()):
+            raise ProtocolError("hash_mismatch")
+        writer.commit()
+    except BaseException:
+        writer.abort()
+        raise
+    book.finish(peer, xfer)
+    return Path(rel.rsplit("/", 1)[-1])
+
+
 @dataclass
 class Received:
     header: dict
@@ -515,7 +560,8 @@ class Received:
 
 
 # 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
-CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir")
+CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir", "cloud_thumb", "cloud_search",
+                  "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin")
 CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
 _EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS
 
@@ -581,7 +627,10 @@ def receive_message(
     if header["type"] == "cloud_put":
         if xfer is None:
             raise ProtocolError("bad_xfer")  # 클라우드에 올리기는 이어받기·트레일러가 필수다(§12.2)
-        save_dir = cloud.put_target(header.get("dir", ""))
+        target = cloud.put_target(header.get("dir", ""), header)
+        if not isinstance(target, Path):  # 잠긴 폴더 안(§14): 평문을 디스크에 두지 않고 바로 암호화해 넣는다
+            return Received(header, _receive_into_vault(ch, header, target, on_progress, peer, book))
+        save_dir = target
     save_dir.mkdir(parents=True, exist_ok=True)
     if xfer is not None:
         return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book,

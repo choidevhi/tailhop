@@ -43,6 +43,8 @@ from ui import (MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, B
 from node import PAIR_WINDOW_SEC, Node
 
 APP_NAME = "TailHop"
+CHAT_FILTERS = {"all": "chat.filter_all", "text": "chat.filter_text", "media": "chat.filter_media",
+                "file": "chat.filter_file"}
 APP_VERSION = "1.9.1"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
@@ -132,6 +134,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         i18n.set_language(self.lang_var.get())
         self.active: dict[str, tuple[int, int, str]] = {}  # 보내는 중인 건: id: (보낸 바이트, 전체, 이름)
         self.pending_labels: dict[str, ctk.CTkLabel] = {}  # 대화방의 대기 말풍선 상태 줄(진행률만 바꿀 때)
+        self.chat_search_open = False
+        self.chat_filter = "all"
+        self.chat_grid = False  # 사진·영상만 모아 보는 그리드
+        self.thumb_tiles: dict[str, list[ctk.CTkLabel]] = {}  # 그리드 칸의 썸네일 자리(칸 크기에 맞춰 줄인다)
         self._render_pending = False
         self.qr_window: ctk.CTkToplevel | None = None
         self.cloud_window: cloud_ui.CloudWindow | None = None
@@ -279,6 +285,26 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.peer_detail.pack(anchor="w")
         self.device_menu_button = ghost_button(top, "ellipsis", self._open_device_menu)
         self.device_menu_button.pack(side="right")
+        self.media_button = ghost_button(top, "layout-grid" if not self.chat_grid else "list", self._toggle_chat_grid)
+        self.media_button.pack(side="right")
+        ghost_button(top, "search", self._toggle_chat_search).pack(side="right")
+
+        # 대화 찾기 줄(돋보기를 누르면 보인다): 글·파일 이름 찾기와 종류 거르기
+        self.search_row = ctk.CTkFrame(self.main, fg_color="transparent")
+        self.chat_query = ctk.CTkEntry(self.search_row, placeholder_text=t("chat.search"), height=32, corner_radius=6,
+                                       border_width=1, border_color=BORDER, fg_color=MAIN_BG, text_color=TEXT,
+                                       font=font(12), width=220)
+        self.chat_query.pack(side="left")
+        self.chat_query.bind("<KeyRelease>", lambda _e: self._render_history_soon())
+        labels = [t(CHAT_FILTERS[k]) for k in CHAT_FILTERS]
+        self.chat_filter_tabs = ctk.CTkSegmentedButton(
+            self.search_row, values=labels, command=self._chat_filter_changed, height=30, corner_radius=6,
+            font=font(11), fg_color=BUBBLE, selected_color=MAIN_BG, selected_hover_color=MAIN_BG,
+            unselected_color=BUBBLE, unselected_hover_color=HOVER, text_color=TEXT)
+        self.chat_filter_tabs.set(t(CHAT_FILTERS[self.chat_filter]))
+        self.chat_filter_tabs.pack(side="left", padx=10)
+        if self.chat_search_open:
+            self.search_row.pack(fill="x", padx=20, pady=(0, 6), after=top)
 
         # 아래 입력창 (먼저 아래에 고정)
         composer_area = ctk.CTkFrame(self.main, fg_color="transparent")
@@ -536,11 +562,22 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             child.destroy()
         self.pending_labels.clear()
         all_items = self._items_for(self.current) if self.current else []
+        filtering = self.chat_grid or self.chat_filter != "all" or bool(self._chat_query())
+        if filtering:
+            all_items = [x for x in all_items if self._chat_match(x)]
+        if self.chat_grid:
+            self._render_media_grid(all_items)
+            self._scroll_log(0.0)
+            return
         items = all_items[-self.visible_rows:]
         pending = [j for j in self.node.outbox.jobs_for(self.current) if j.kind not in cloud_ui.CLOUD_KINDS] \
-            if self.current else []
+            if self.current and not filtering else []
         if not items and not pending:
-            self._render_empty()
+            if filtering:
+                ctk.CTkLabel(self.log, text=t("chat.no_results"), font=font(13), text_color=SECONDARY).pack(pady=120)
+            else:
+                self._render_empty()
+            self._scroll_log(0.0)
             return
         hidden = len(all_items) - len(items)
         if hidden > 0:
@@ -556,7 +593,83 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._message(item, when)
         for job in pending:
             self._pending_message(job)
-        self.after(80, lambda: self.log._parent_canvas.yview_moveto(1.0 if scroll_to_end else 0.0))
+        self._scroll_log(1.0 if scroll_to_end else 0.0)
+
+    def _scroll_log(self, where: float) -> None:
+        """다시 그린 뒤 스크롤 범위를 지금 내용 크기로 고치고 옮긴다(줄어든 내용 아래 빈 곳을 보고 있지 않게)."""
+        def run() -> None:
+            canvas = self.log._parent_canvas
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.yview_moveto(where)
+
+        self.after(80, run)
+
+    # ---------- 대화 찾기·그리드 ----------
+    def _chat_query(self) -> str:
+        return self.chat_query.get().strip().casefold() if self.chat_search_open else ""
+
+    def _chat_match(self, item: dict) -> bool:
+        """찾는 글·종류에 맞는 기록인지. 긴 글은 기록에 남은 앞부분(2000자)에서 찾는다."""
+        is_text = item["kind"] == "text"
+        media = not is_text and thumbs.previewable(item.get("name", ""))
+        kind = "media" if self.chat_grid else self.chat_filter
+        if kind == "text" and not is_text or kind == "media" and not media or kind == "file" and (is_text or media):
+            return False
+        query = self._chat_query()
+        if not query:
+            return True
+        return query in (item.get("text") if is_text else item.get("name", "")).casefold()
+
+    def _toggle_chat_search(self) -> None:
+        self.chat_search_open = not self.chat_search_open
+        if self.chat_search_open:
+            self.search_row.pack(fill="x", padx=20, pady=(0, 6), after=self.main.winfo_children()[0])
+            self.chat_query.focus_set()
+        else:
+            self.search_row.pack_forget()
+        self._render_history()
+
+    def _chat_filter_changed(self, label: str) -> None:
+        self.chat_filter = next(k for k, v in CHAT_FILTERS.items() if t(v) == label)
+        self._render_history()
+
+    def _toggle_chat_grid(self) -> None:
+        self.chat_grid = not self.chat_grid
+        self.media_button.configure(image=icon("list" if self.chat_grid else "layout-grid", 18))
+        self._render_history(scroll_to_end=False)
+
+    def _render_media_grid(self, items: list[dict]) -> None:
+        """이 대화방의 사진·영상을 최근 것부터 칸으로 모아 보인다. 누르면 탐색기에서 보인다."""
+        items = [x for x in reversed(items) if Path(x.get("path") or "").is_file()][:300]
+        if not items:
+            ctk.CTkLabel(self.log, text=t("chat.no_media"), font=font(13), text_color=SECONDARY).pack(pady=120)
+            return
+        width = max(self.log.winfo_width(), 520)
+        cols = max(2, (width - 24) // 158)
+        grid = ctk.CTkFrame(self.log, fg_color="transparent")
+        grid.pack(fill="x", padx=6, pady=8)
+        for i, item in enumerate(items):
+            tile = ctk.CTkFrame(grid, fg_color=BUBBLE, corner_radius=8, width=146, height=146, cursor="hand2")
+            tile.grid(row=i // cols, column=i % cols, padx=6, pady=6)
+            tile.pack_propagate(False)
+            label = ctk.CTkLabel(tile, text="", image=icon("image", 28, SECONDARY))
+            label.place(relx=0.5, rely=0.5, anchor="center")
+            key = str(Path(item["path"]))
+            cached = self.thumb_images.get(key)
+            if cached is not None:
+                self._fit_tile(label, cached)
+            else:
+                self.thumb_tiles.setdefault(key, []).append(label)
+                self.thumbs.request(Path(item["path"]))
+            bind_tree(tile, "<Button-1>", lambda _e, it=item: self._open_history_item(it))
+
+    @staticmethod
+    def _fit_tile(label: ctk.CTkLabel, image: ctk.CTkImage) -> None:
+        w, h = image.cget("size")
+        scale = min(138 / max(1, w), 138 / max(1, h))
+        label.configure(image=ctk.CTkImage(light_image=image.cget("light_image"), dark_image=image.cget("dark_image"),
+                                           size=(max(1, int(w * scale)), max(1, int(h * scale)))))
 
     def _pending_status(self, job: outbox.Job) -> tuple[str, tuple]:
         """대기 말풍선 아래 줄: (문장, 색)."""
@@ -708,6 +821,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _on_thumb(self, src: str, out: Path | None) -> None:
         labels = [x for x in self.thumb_waiting.pop(src, []) if x.winfo_exists()]
+        tiles = [x for x in self.thumb_tiles.pop(src, []) if x.winfo_exists()]
         if out is None:
             for label in labels:
                 label.pack_forget()
@@ -729,6 +843,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         at_bottom = canvas.yview()[1] >= 0.98
         for label in labels:
             label.configure(image=image)
+        for tile in tiles:
+            self._fit_tile(tile, image)
         if labels and at_bottom:  # 맨 아래를 보고 있었으면 그림이 늘어난 만큼 따라 내려간다
             self.after(30, lambda: canvas.yview_moveto(1.0))
 

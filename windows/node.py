@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import Callable
 
 import cloud
+import hub as hubmod
 import outbox
 import protocol as p
 import resume
 import store
 import tsnet
 import updates
+import vault
 from i18n import t
 
 PC_PORT = p.DEFAULT_PC_PORT
@@ -62,6 +64,8 @@ class Node:
         self.history = store.History(self.app_dir)
         self.book = resume.ResumeBook(self.app_dir)
         self.shelf = updates.Shelf(self.app_dir)
+        self._vaults: vault.VaultManager | None = None
+        self._open_tokens: dict[tuple[str, str], str] = {}  # (허브 기기, 잠긴 폴더 경로): 그 허브가 준 열쇠
         self.outbox = outbox.Outbox(self.deliver, self.app_dir, on_event)
         self._caps: dict[str, tuple[float, frozenset[str]]] = {}
         self._ip_refreshed = 0.0
@@ -107,6 +111,16 @@ class Node:
 
     def cloud_folder(self) -> cloud.CloudFolder | None:
         return cloud.CloudFolder(self.cloud_dir) if self.cloud_on else None
+
+    def hub(self) -> hubmod.Hub | None:
+        """클라우드가 켜져 있으면 허브(평범한 폴더 + 잠긴 폴더). 보관함 관리자는 폴더마다 하나만 둔다(열쇠·막기 상태)."""
+        folder = self.cloud_folder()
+        if folder is None:
+            return None
+        if self._vaults is None or self._vaults.root != folder.root:
+            self._vaults = vault.VaultManager(folder.root)
+        self._vaults.close_expired()
+        return hubmod.Hub(folder, self._vaults)
 
     def set_cloud(self, on: bool | None = None, folder: str | None = None, collect: bool | None = None) -> None:
         if on is not None:
@@ -367,14 +381,15 @@ class Node:
             self.on_event("progress", {"dir": "in", "done": done, "total": total})
 
         self.outbox.wake(pairing.stable_id)  # 상대가 켜져 있다: 그 기기로 갈 대기를 깨운다
-        hub = self.cloud_folder()
+        hub = self.hub()
         save_dir = self.save_dir
         if hub is not None and self.cloud_collect:
-            hub.ensure()
-            save_dir = hub.root
+            hub.folder.ensure()
+            save_dir = hub.folder.root
         try:
             got = p.receive_message(ch, self.guard, save_dir, progress, peer=pairing.stable_id, book=self.book,
-                                    cloud=hub, cloud_names=save_dir != self.save_dir)
+                                    cloud=hubmod.HubAccess(hub, pairing.stable_id) if hub else None,
+                                    cloud_names=save_dir != self.save_dir)
         except p.ProtocolError as exc:
             # 인증된 상대에게는 이유를 알려 준다(태그 실패면 전송 자체가 안 됨).
             if exc.code != "auth_failed":
@@ -423,7 +438,7 @@ class Node:
 
     def _hello_reply(self, peer: str, header: dict) -> dict:
         """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
-        reply = {"caps": ["xfer", "cloud", "update"], "cloud": self.cloud_on, "have": 0, "done": False}
+        reply = {"caps": ["xfer", "cloud", "cloud2", "update"], "cloud": self.cloud_on, "have": 0, "done": False}
         offered = self.shelf.advert()
         if offered:
             reply["updates"] = offered
@@ -433,28 +448,59 @@ class Node:
             reply["have"] = 0 if reply["done"] else self.book.have(peer, xfer, size)
         return reply
 
-    def _serve_cloud(self, conn: socket.socket, ch: p.Channel, hub: cloud.CloudFolder, header: dict,
+    def _serve_cloud(self, conn: socket.socket, ch: p.Channel, hub: hubmod.Hub, header: dict,
                      pairing: store.Pairing) -> None:
-        """클라우드 요청에 답한다(목록·가져오기·지우기·폴더 만들기). 거부는 이유 코드와 함께."""
-        kind = header["type"]
+        """클라우드 요청에 답한다(§12, §14, §15). 거부는 이유 코드와 함께."""
+        kind, peer = header["type"], pairing.stable_id
+        changed = True
         try:
             parts = cloud.parse_path(header.get("path", ""))
-            if kind == "cloud_list":
+            if kind in ("cloud_list", "cloud_search"):
                 cursor = header.get("cursor", 0)
-                if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+                if not _uint(cursor):
                     raise p.ProtocolError("bad_header")
-                items, nxt = hub.list(parts, cursor)
-                p.send_reply(ch, True, items=[x.to_json() for x in items], next=nxt)
+                if kind == "cloud_list":
+                    items, nxt = hub.list(parts, cursor, header, peer)
+                    p.send_reply(ch, True, items=items, next=nxt)
+                else:
+                    query, what = header.get("query", ""), header.get("kind", "all")
+                    if not isinstance(query, str) or len(query) > 100 or what not in cloud.KIND_NAMES:
+                        raise p.ProtocolError("bad_header")
+                    items, nxt, partial = hub.search(parts, query.strip(), what, cursor, header, peer)
+                    p.send_reply(ch, True, items=items, next=nxt, partial=partial)
                 return
             if kind == "cloud_get":
-                self._serve_cloud_get(ch, hub, parts, header)
+                self._serve_cloud_get(ch, hub, parts, header, peer)
                 return
-            if kind == "cloud_mkdir":
-                hub.mkdir(parts)
+            if kind == "cloud_thumb":
+                px = header.get("px", 256)
+                if not _uint(px) or not 64 <= px <= 512:
+                    raise p.ProtocolError("bad_header")
+                data, w, h = hub.thumb(parts, px, header, peer)
+                ch.send(json.dumps({"ok": True, "mime": "image/jpeg", "w": w, "h": h}).encode("utf-8"), last=False)
+                ch.send(data, last=True)
+                return
+            if kind == "cloud_open":
+                token = hub.open(parts, header, peer)
+                p.send_reply(ch, True, token=token, ttl=vault.TOKEN_TTL)
+                return
+            if kind == "cloud_lock":
+                p.send_reply(ch, True, recovery=hub.lock(parts, header.get("pin")))
+            elif kind == "cloud_unlock":
+                hub.unlock(parts, header.get("pin"))
+                p.send_reply(ch, True)
+            elif kind == "cloud_repin":
+                hub.repin(parts, header)
+                p.send_reply(ch, True)
+                changed = False
+            elif kind == "cloud_mkdir":
+                hub.mkdir(parts, header, peer)
+                p.send_reply(ch, True)
             else:
-                hub.delete(parts)
-            p.send_reply(ch, True)
-            self.on_event("cloud_changed", {"peer": pairing.name, "path": cloud.join_path(parts)})
+                hub.delete(parts, header, peer)
+                p.send_reply(ch, True)
+            if changed:
+                self.on_event("cloud_changed", {"peer": pairing.name, "path": cloud.join_path(parts)})
         except p.ProtocolError as exc:
             self._refuse(conn, ch, exc)
         except OSError:
@@ -481,32 +527,49 @@ class Node:
 
     @staticmethod
     def _refuse(conn: socket.socket, ch: p.Channel, exc: p.ProtocolError) -> None:
+        extra = {"retry": exc.kw["retry"]} if "retry" in exc.kw else {}  # vault_wait: 몇 초 뒤에 다시(§14.2)
         try:
-            p.send_reply(ch, False, exc)
+            p.send_reply(ch, False, exc, **extra)
             _close_gently(conn)
         except OSError:
             pass
 
     @staticmethod
-    def _serve_cloud_get(ch: p.Channel, hub: cloud.CloudFolder, parts: list[str], header: dict) -> None:
-        """§12.2 cloud_get: 먼저 {"ok","size","mtime"}(last=0), 이어서 offset부터 데이터(마지막 데이터 프레임 last=1)."""
-        path, size, mtime = hub.stat_file(parts)
+    def _serve_cloud_get(ch: p.Channel, hub: hubmod.Hub, parts: list[str], header: dict, peer: str) -> None:
+        """§12.2 cloud_get: 먼저 {"ok","size","mtime"}(last=0), 이어서 offset부터 데이터(마지막 데이터 프레임 last=1).
+        잠긴 폴더 안이면 허브가 복호화해서 보낸다(§14)."""
+        if not parts:
+            raise p.ProtocolError("bad_path")
+        size, mtime, read = hub.open_file(parts, header, peer)
         # 바뀌었는지 먼저 본다: 파일이 줄어 offset이 넘친 경우도 cloud_changed(처음부터 다시)로 답한다.
         want_size, want_mtime = header.get("size"), header.get("mtime")
         if (want_size is not None and want_size != size) or (want_mtime is not None and want_mtime != mtime):
             raise p.ProtocolError("cloud_changed")
         offset = header.get("offset", 0)
-        if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= size:
+        if not _uint(offset) or offset > size:
             raise p.ProtocolError("bad_header")
-        src = open(path, "rb")  # 열기 실패(사용 중 등)는 ok를 보내기 전에 거부로
-        with src:
-            src.seek(offset)
-            ch.send(json.dumps({"ok": True, "size": size, "mtime": mtime}).encode("utf-8"), last=False)
-            try:
-                Node._stream_file(ch, src, size - offset)
-            except OSError:
-                # ok를 보낸 뒤에는 거부 응답을 보내지 않는다(받는 쪽이 데이터로 읽어 파일에 섞는다). 끊기만 한다.
-                return
+        blocks = read(offset)  # 열기 실패(사용 중 등)는 ok를 보내기 전에 거부로
+        first = next(blocks, b"")
+        ch.send(json.dumps({"ok": True, "size": size, "mtime": mtime}).encode("utf-8"), last=False)
+        try:
+            Node._stream_blocks(ch, first, blocks, size - offset)
+        except Exception:  # noqa: BLE001 - ok를 보낸 뒤에는 거부 응답을 보내지 않고 끊기만 한다(받는 쪽이 데이터로 읽는다)
+            return
+
+    @staticmethod
+    def _stream_blocks(ch: p.Channel, first: bytes, blocks, left: int) -> None:
+        """평문 조각들을 1 MiB 이하 프레임으로 보내고 마지막 데이터 프레임에 last를 붙인다(빈 평문 가능)."""
+        pending = bytearray(first)
+        sent = 0
+        for block in blocks:
+            pending += block
+            while len(pending) > p.CHUNK:
+                ch.send(bytes(pending[:p.CHUNK]), last=False)
+                sent += p.CHUNK
+                del pending[:p.CHUNK]
+        if sent + len(pending) != left:
+            return  # 보내는 사이 파일이 바뀌었다: last 없이 끊는다(상대는 다시 묻고 cloud_changed를 받는다)
+        ch.send(bytes(pending), last=True)
 
     @staticmethod
     def _stream_file(ch: p.Channel, src, left: int) -> None:
@@ -777,7 +840,75 @@ class Node:
         info = self._hello(stable_id)
         return "cloud" in info["caps"] and info.get("cloud") is True
 
-    def _cloud_request(self, stable_id: str, kind: str, **fields) -> dict:
+    def token_for(self, stable_id: str, path: str) -> str | None:
+        """path가 그 허브에서 연 잠긴 폴더 안이면 그 열쇠."""
+        for (sid, mount), token in list(self._open_tokens.items()):
+            if sid == stable_id and (path == mount or path.startswith(mount + "/")):
+                return token
+        return None
+
+    def _with_token(self, stable_id: str, path: str, fields: dict) -> dict:
+        token = self.token_for(stable_id, path)
+        return {**fields, "token": token} if token else fields
+
+    def cloud_open(self, stable_id: str, path: str, pin: str | None = None, recovery: str | None = None) -> None:
+        """허브의 잠긴 폴더를 PIN(또는 복구 코드)으로 연다. 열쇠는 앱이 켜져 있는 동안 기억한다."""
+        fields = {"path": path, "pin": pin} if pin is not None else {"path": path, "recovery": recovery}
+        try:
+            reply = self._cloud_request(stable_id, "cloud_open", **fields)
+        except p.ProtocolError:
+            self._open_tokens.pop((stable_id, path), None)
+            raise
+        token = reply.get("token")
+        if not isinstance(token, str) or len(token) != 32:
+            raise p.ProtocolError("bad_reply")
+        self._open_tokens[(stable_id, path)] = token
+
+    def cloud_lock(self, stable_id: str, path: str, pin: str) -> str:
+        """허브의 폴더를 잠근다. 복구 코드를 돌려준다(한 번만 보여 준다)."""
+        code = self._cloud_request(stable_id, "cloud_lock", path=path, pin=pin).get("recovery")
+        if not isinstance(code, str):
+            raise p.ProtocolError("bad_reply")
+        return code
+
+    def cloud_unlock(self, stable_id: str, path: str, pin: str) -> None:
+        self._cloud_request(stable_id, "cloud_unlock", path=path, pin=pin)
+        self._open_tokens.pop((stable_id, path), None)
+
+    def cloud_repin(self, stable_id: str, path: str, new_pin: str, pin: str | None = None,
+                    recovery: str | None = None) -> None:
+        fields = {"path": path, "new_pin": new_pin}
+        fields.update({"pin": pin} if pin is not None else {"recovery": recovery})
+        self._cloud_request(stable_id, "cloud_repin", **fields)
+
+    def cloud_search(self, stable_id: str, path: str, query: str, kind: str = "all",
+                     cursor: int = 0) -> tuple[list[dict], int | None, bool]:
+        reply = self._cloud_request(stable_id, "cloud_search",
+                                    **self._with_token(stable_id, path, {"path": path, "query": query, "kind": kind,
+                                                                         "cursor": cursor}))
+        items = [x for x in reply.get("items") or [] if _valid_item(x) and _valid_rel(x.get("path"))]
+        nxt = reply.get("next")
+        return items, nxt if _uint(nxt) and nxt > cursor else None, reply.get("partial") is True
+
+    def cloud_thumb(self, stable_id: str, path: str, px: int = 256) -> bytes:
+        """허브가 만든 JPEG 미리보기. 만들 수 없으면 not_found."""
+        sock, pairing = self._connect(stable_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            fields = self._with_token(stable_id, path, {"path": path, "px": px})
+            ch.send(json.dumps(p.new_header("cloud_thumb", self.me.name, **fields)).encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            raw, last = ch.recv()
+            if last:
+                p.parse_reply(raw)
+                raise p.ProtocolError("bad_reply")
+            p.parse_reply(raw, last_ok=False)
+            data, last = ch.recv()
+            if not last or len(data) > hubmod.THUMB_MAX or not bytes(data[:3]) == b"\xff\xd8\xff":
+                raise p.ProtocolError("bad_reply")
+            return bytes(data)
+
+    def _cloud_request(self, stable_id: str, kind: str, /, **fields) -> dict:
         sock, pairing = self._connect(stable_id)
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
@@ -787,31 +918,27 @@ class Node:
 
     def cloud_list(self, stable_id: str, path: str = "", cursor: int = 0) -> tuple[list[cloud.Item], int | None]:
         """허브의 폴더 목록 한 쪽. 상대가 보낸 항목도 이름·형식을 다시 검사한다."""
-        reply = self._cloud_request(stable_id, "cloud_list", path=path, cursor=cursor)
+        reply = self._cloud_request(stable_id, "cloud_list",
+                                    **self._with_token(stable_id, path, {"path": path, "cursor": cursor}))
         items = []
         for raw in reply.get("items") if isinstance(reply.get("items"), list) else []:
-            if not isinstance(raw, dict):
+            if not _valid_item(raw):
                 continue
-            name, is_dir, size, mtime = raw.get("name"), raw.get("dir"), raw.get("size"), raw.get("mtime")
-            if not isinstance(name, str) or not isinstance(is_dir, bool) or not _uint(size) or not _uint(mtime):
-                continue
-            try:
-                cloud.parse_path(name)
-            except p.ProtocolError:
-                continue
-            if "/" not in name:
-                items.append(cloud.Item(name, is_dir, size, mtime))
+            state, progress = raw.get("state"), raw.get("progress")
+            items.append(cloud.Item(raw["name"], raw["dir"], raw["size"], raw["mtime"], raw.get("locked") is True,
+                                    state if isinstance(state, str) else "", progress if _uint(progress) else 0))
         nxt = reply.get("next")
         return items, nxt if _uint(nxt) and nxt > cursor else None
 
     def cloud_mkdir(self, stable_id: str, path: str) -> None:
         cloud.parse_path(path)
-        self._cloud_request(stable_id, "cloud_mkdir", path=path)
+        self._cloud_request(stable_id, "cloud_mkdir", **self._with_token(stable_id, path, {"path": path}))
 
     def cloud_delete(self, stable_id: str, path: str) -> None:
         if not cloud.parse_path(path):
             raise p.ProtocolError("bad_path")
-        self._cloud_request(stable_id, "cloud_del", path=path)
+        self._cloud_request(stable_id, "cloud_del", **self._with_token(stable_id, path, {"path": path}))
+        self._open_tokens.pop((stable_id, path), None)
 
     def _deliver_cloud_put(self, job: outbox.Job, on_progress) -> None:
         path, _ = self._source(job)
@@ -826,7 +953,7 @@ class Node:
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
             p.send_file_xfer(ch, self.me.name, path, job.xfer, offset, on_progress, kind="cloud_put",
-                             dir=job.remote or "")
+                             **self._with_token(job.peer_id, job.remote or "", {"dir": job.remote or ""}))
             reply = p.read_reply(ch)
         self.on_event("cloud_sent", {"peer_id": job.peer_id, "name": str(reply.get("name") or path.name),
                                      "dir": job.remote or ""})
@@ -840,7 +967,7 @@ class Node:
         offset = part.stat().st_size if part.exists() and job.size and job.remote_mtime else 0
         if offset > job.size:
             offset = 0
-        fields = {"path": job.remote or "", "offset": offset}
+        fields = self._with_token(job.peer_id, job.remote or "", {"path": job.remote or "", "offset": offset})
         if offset:
             fields.update(size=job.size, mtime=job.remote_mtime)
         sock, pairing = self._connect(job.peer_id)
@@ -908,6 +1035,29 @@ class Node:
 
 def _uint(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _valid_item(raw: object) -> bool:
+    """허브가 보낸 목록 항목을 경계에서 검사한다(이름은 한 조각, 형식이 맞는 숫자)."""
+    if not isinstance(raw, dict):
+        return False
+    name, is_dir = raw.get("name"), raw.get("dir")
+    if not isinstance(name, str) or "/" in name or not isinstance(is_dir, bool):
+        return False
+    if not _uint(raw.get("size")) or not _uint(raw.get("mtime")):
+        return False
+    try:
+        cloud.parse_path(name)
+    except p.ProtocolError:
+        return False
+    return True
+
+
+def _valid_rel(value: object) -> bool:
+    try:
+        return bool(cloud.parse_path(value))
+    except p.ProtocolError:
+        return False
 
 
 def _pack_folder(folder: Path, out_dir: Path) -> Path:

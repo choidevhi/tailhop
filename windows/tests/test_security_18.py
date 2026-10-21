@@ -169,20 +169,20 @@ class TwoNodeSecurityTests(unittest.TestCase):
         data = os.urandom(p.CHUNK * 3)
         target.write_bytes(data)
         [item] = self.b.cloud_list("nodeA", "")[0]
-        real_stream = nodemod.Node._stream_file
+        real_stream = nodemod.Node._stream_blocks
 
-        def broken(ch, src, left):
-            ch.send(src.read(p.CHUNK), last=False)
+        def broken(ch, first, blocks, left):
+            ch.send(bytes(first[:p.CHUNK]), last=False)
             raise OSError("읽기 오류")
 
-        nodemod.Node._stream_file = staticmethod(broken)
+        nodemod.Node._stream_blocks = staticmethod(broken)
         job = outbox.Job(id="0123456789abcdee", peer_id="nodeA", kind="cloud_get", remote="big.bin",
                          size=item.size, remote_mtime=item.mtime)
         try:
             with self.assertRaises(Exception):
                 self.b.deliver(job)
         finally:
-            nodemod.Node._stream_file = staticmethod(real_stream)
+            nodemod.Node._stream_blocks = staticmethod(real_stream)
         part = self.b.outbox.work_dir / job.id / "big.bin.part"
         if part.exists():
             self.assertEqual(part.read_bytes(), data[:part.stat().st_size])  # 남은 조각은 진짜 데이터뿐

@@ -11,8 +11,10 @@ import ctypes
 import ctypes.wintypes as wt
 import os
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import protocol as p
 
@@ -67,6 +69,9 @@ class Item:
     is_dir: bool
     size: int
     mtime: int  # 유닉스 ms
+    locked: bool = False  # 잠긴 폴더(§14). 받는 쪽 목록에서만 채운다
+    state: str = ""
+    progress: int = 0
 
     def to_json(self) -> dict:
         return {"name": self.name, "dir": self.is_dir, "size": self.size, "mtime": self.mtime}
@@ -124,6 +129,12 @@ class CloudFolder:
     # ---------- 요청 ----------
     def list(self, parts: list[str], cursor: int = 0) -> tuple[list[Item], int | None]:
         """폴더 먼저, 이름순(대소문자 무시). 한 번에 PAGE개. (항목, 다음 cursor 또는 None)."""
+        items = self.list_all(parts)
+        page = items[cursor:cursor + PAGE]
+        nxt = cursor + PAGE if cursor + PAGE < len(items) else None
+        return page, nxt
+
+    def list_all(self, parts: list[str]) -> list[Item]:
         folder = self._existing(parts, want_dir=True)
         items: list[Item] = []
         with os.scandir(folder) as it:
@@ -142,9 +153,35 @@ class CloudFolder:
                     continue
                 items.append(Item(entry.name, is_dir, 0 if is_dir else st.st_size, st.st_mtime_ns // 1_000_000))
         items.sort(key=lambda x: (not x.is_dir, x.name.casefold(), x.name))
-        page = items[cursor:cursor + PAGE]
-        nxt = cursor + PAGE if cursor + PAGE < len(items) else None
-        return page, nxt
+        return items
+
+    def search(self, parts: list[str], query: str, kind: str, skip: Callable[[str], bool]) -> tuple[list[dict], bool]:
+        """parts 아래를 훑어 이름이 맞는 항목을 찾는다. skip(클라우드 경로)이 True인 폴더(잠긴 폴더)는 들어가지 않는다.
+        (항목: path는 parts 기준 상대 경로, 다 훑지 못했으면 True)."""
+        start = self._existing(parts, want_dir=True)
+        base = join_path(parts)
+        found: list[dict] = []
+        scanned, partial = 0, False
+        end = time.monotonic() + SEARCH_SECONDS
+        stack = [("", start)]
+        while stack:
+            rel, folder = stack.pop()
+            for item in self.list_all([*parts, *rel.split("/")] if rel else parts):
+                scanned += 1
+                if scanned > SEARCH_SCAN or time.monotonic() > end:
+                    partial = True
+                    stack.clear()
+                    break
+                sub = f"{rel}/{item.name}" if rel else item.name
+                full = f"{base}/{sub}" if base else sub
+                if item.is_dir and skip(full):
+                    continue
+                if matches(item.name, item.is_dir, query, kind):
+                    found.append(item_json(item, path=sub))
+                if item.is_dir:
+                    stack.append((sub, folder / item.name))
+        found.sort(key=lambda x: (x["path"].casefold(), x["path"]))
+        return found, partial
 
     def stat_file(self, parts: list[str]) -> tuple[Path, int, int]:
         """(경로, 크기, 수정 시각 ms). 파일이 아니면 not_found."""
@@ -163,7 +200,7 @@ class CloudFolder:
         self.mkdir(parts)
         return here
 
-    def put_target(self, dir_text: object) -> Path:
+    def put_target(self, dir_text: object, header: dict | None = None) -> Path:
         """cloud_put 헤더의 dir → 받을 폴더(protocol.receive_message가 부른다)."""
         return self.folder_for_put(parse_path(dir_text))
 
@@ -206,3 +243,40 @@ def recycle(path: Path) -> bool:
                           FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI, False, None, None)
     result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     return result == 0 and not op.fAnyOperationsAborted and not Path(path).exists()
+
+
+# ---------- §15 종류·검색 ----------
+# docs/test_vectors.json의 file_kinds와 같은 표(테스트가 같은지 확인한다)
+FILE_KINDS = {
+    "image": {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif", "svg", "raw", "dng",
+              "cr2", "nef", "arw"},
+    "video": {"mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "flv", "3gp", "mts", "m2ts", "ts"},
+    "audio": {"mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "aiff", "alac"},
+    "doc": {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "hwp", "hwpx", "txt", "md", "rtf", "csv", "odt", "ods",
+            "odp", "pages", "numbers", "key", "epub"},
+    "archive": {"zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "apk", "exe", "msi", "iso", "dmg"},
+}
+KIND_NAMES = ("all", *FILE_KINDS, "other")
+SEARCH_SCAN = 50_000
+SEARCH_SECONDS = 3.0
+
+
+def file_kind(name: str) -> str:
+    ext = name.rpartition(".")[2].lower() if "." in name else ""
+    return next((kind for kind, exts in FILE_KINDS.items() if ext in exts), "other")
+
+
+def matches(name: str, is_dir: bool, query: str, kind: str) -> bool:
+    if query and query.casefold() not in name.casefold():
+        return False
+    if kind == "all":
+        return True
+    return not is_dir and file_kind(name) == kind
+
+
+def item_json(item: Item, **extra) -> dict:
+    data = item.to_json()
+    if not item.is_dir:
+        data["kind"] = file_kind(item.name)
+    data.update(extra)
+    return data
