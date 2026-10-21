@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import sys
 from pathlib import Path
 
@@ -46,6 +47,39 @@ def icon(name: str, size: int = 16, color=TEXT) -> ctk.CTkImage:
         svg = vicons.load(name, resource_path("assets/icons"))
         cached = _ICONS[key] = ctk.CTkImage(light_image=vicons.render(svg, px, light),
                                             dark_image=vicons.render(svg, px, dark), size=(size, size))
+    return cached
+
+
+_CHECKS: dict[tuple, ctk.CTkImage] = {}
+
+
+def _check_picture(on: bool, px: int, dark: bool):
+    """체크 상자 한 장을 4배로 그려 줄인다(작은 둥근 테두리가 계단지지 않게). 바깥은 투명."""
+    from PIL import Image, ImageDraw
+    big = px * 4
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    radius, edge = big * 0.24, max(4, big // 14)
+    box = (edge // 2, edge // 2, big - 1 - edge // 2, big - 1 - edge // 2)
+    if on:  # shadcn Checkbox: primary 면 + primary-foreground 체크
+        d.rounded_rectangle(box, radius, fill="#FAFAFA" if dark else "#18181B")
+        line = "#18181B" if dark else "#FAFAFA"
+        d.line([(big * 0.27, big * 0.52), (big * 0.43, big * 0.68), (big * 0.74, big * 0.34)], fill=line,
+               width=max(4, big // 9), joint="curve")
+    else:  # 바탕 + 테두리(mute 글자색)
+        d.rounded_rectangle(box, radius, fill="#09090B" if dark else "#FFFFFF", outline="#71717A" if dark
+                            else "#A1A1AA", width=edge)
+    return img.resize((px, px), Image.Resampling.LANCZOS)
+
+
+def checkbox_image(on: bool, size: int = 18) -> ctk.CTkImage:
+    """고르기 체크 상자(켜짐·꺼짐). 화면 배율의 실제 픽셀로 그린다."""
+    key = (on, size, _SCALE[0])
+    cached = _CHECKS.get(key)
+    if cached is None:
+        px = max(1, round(size * _SCALE[0]))
+        cached = _CHECKS[key] = ctk.CTkImage(light_image=_check_picture(on, px, False),
+                                             dark_image=_check_picture(on, px, True), size=(size, size))
     return cached
 
 
@@ -157,6 +191,49 @@ def glass_supported() -> bool:
 
 def is_dark() -> bool:
     return ctk.get_appearance_mode() == "Dark"
+
+
+def protect(win) -> bool:
+    """이 창을 화면 캡처·녹화·화면 공유에서 뺀다(WDA_EXCLUDEFROMCAPTURE, Windows 10 2004+). 그게 안 되는 Windows면
+    캡처에 검게 나오게 한다(WDA_MONITOR). 클라우드 안을 보여 주는 창은 모두 부른다. 카메라로 모니터를 찍는 것은 못 막는다."""
+    try:
+        win.update_idletasks()
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetAncestor(win.winfo_id(), 2)
+        return bool(user32.SetWindowDisplayAffinity(hwnd, 0x11) or user32.SetWindowDisplayAffinity(hwnd, 0x1))
+    except (AttributeError, OSError):
+        return False
+
+
+def work_area(win) -> tuple[int, int, int, int]:
+    """창이 있는 모니터에서 작업 표시줄을 뺀 영역(실제 픽셀, x, y, 너비, 높이)."""
+    try:
+        user32 = ctypes.windll.user32
+        win.update_idletasks()
+        monitor = user32.MonitorFromWindow(user32.GetAncestor(win.winfo_id(), 2), 2)  # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.rcWork
+            return r.left, r.top, r.right - r.left, r.bottom - r.top
+    except (AttributeError, OSError):
+        pass
+    return 0, 0, win.winfo_screenwidth(), win.winfo_screenheight()
+
+
+def fit_geometry(win, width: int, height: int, share: float = 0.92) -> None:
+    """창을 원하는 크기(논리 단위)로 열되 작업 영역을 넘지 않게 줄이고 가운데에 둔다.
+    CTk는 geometry의 너비·높이에 화면 배율을 곱하므로(위치는 곱하지 않는다) 화면 크기를 배율로 나눠 비교한다."""
+    k = win._get_window_scaling()
+    x, y, aw, ah = work_area(win)
+    w = max(1, min(width, int(aw * share / k)))
+    h = max(1, min(height, int(ah * share / k)))
+    win.geometry(f"{w}x{h}+{x + (aw - round(w * k)) // 2}+{y + max(0, (ah - round(h * k)) // 2 - 10)}")
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", ctypes.wintypes.RECT), ("rcWork", ctypes.wintypes.RECT),
+                ("dwFlags", ctypes.c_ulong)]
 
 
 def apply_glass(win) -> bool:

@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 라이트박스(2.1.0) 원본 받기 진행 막대(scaleX로 늘인다) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#E6FFFFFF" /></shape>

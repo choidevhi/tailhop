@@ -73,6 +73,19 @@ object Errors {
         "vault_pin" to R.string.err_vault_pin,
         "vault_wait" to R.string.err_vault_wait,
         "vault_busy" to R.string.err_vault_busy,
+        // 2.1.0 여러 항목 옮기기(§16.1)
+        "bad_move" to R.string.err_bad_move,
+        "vault_move" to R.string.err_vault_move,
+        // 2.2.0 암호화 클라우드 저장소(§17.6). 허브의 storage(암호문 손상)는 Net이 store_damaged(이 폰 안에서만 쓰는 코드)로 바꾼다
+        "store_locked" to R.string.err_store_locked,
+        "store_missing" to R.string.err_store_missing,
+        "store_damaged" to R.string.err_store_damaged,
+        "exists" to R.string.err_exists,
+        "too_large" to R.string.err_too_large,
+        // 2.2.1 이름 바꾸기(§18.2 항목 오류)·강한 잠금(§18.3)
+        "bad_name" to R.string.err_bad_name,
+        "store_password" to R.string.err_store_password,
+        "store_state" to R.string.err_store_state,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

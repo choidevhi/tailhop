@@ -98,6 +98,8 @@ data class CloudItem(
     val progress: Int? = null,
     /** §15 검색 결과: 검색을 시작한 폴더 기준 상대 경로(마지막 조각 = name). 목록에서는 null. */
     val path: String? = null,
+    /** §17.4(2.2.0): 허브가 만든 딸린 버전(thumb·screen·poster·play 중 있는 것, CloudVariants.KNOWN만). */
+    val variants: Set<String> = emptySet(),
 ) {
     /** 종류(허브가 알렸으면 그것, 아니면 이름으로). 폴더는 other. */
     val kindOrGuess: String get() = if (dir) FileKinds.OTHER else kind ?: FileKinds.of(name)
@@ -172,7 +174,8 @@ object CloudListing {
             val path = o.opt("path") as? String
             val pathOk = path != null && CloudPath.isVisiblePath(path) && path.isNotEmpty() && CloudPath.name(path) == name
             if (requirePath && !pathOk) continue
-            out += CloudItem(name, dir, size, mtime, kind, locked, state, progress, if (pathOk) path else null)
+            val variants = if (dir) emptySet() else CloudVariants.parse(o.opt("variants"))
+            out += CloudItem(name, dir, size, mtime, kind, locked, state, progress, if (pathOk) path else null, variants)
         }
         val nextRaw = Xfer.field(reply, "next")
         val next = if (nextRaw == null) null else Xfer.jsonLong(nextRaw)?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()

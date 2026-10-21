@@ -13,6 +13,10 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 - 1.8.0부터 클라우드 모드(§12): 켠 기기의 클라우드 폴더(PC 기본 `%USERPROFILE%\TailHop Cloud`, 폰 `Download/TailHop/Cloud`)를 연결된 모든 기기가 보고, 가져오고, 올리고, 지운다(PC에서 지운 것은 휴지통). 대화방으로 받은 파일도 클라우드에 모으는 설정이 있다. PC는 사이드바의 '클라우드', 폰은 홈의 '클라우드'
 - 1.9.0부터 사이드바의 … 버튼이 설정 창을 연다(일반·받기·클라우드·기기·업데이트, 받은 파일 폴더와 클라우드 폴더 바꾸기). PC 창은 Windows 11 아크릴 흐림 위에 shadcn 카드가 떠 있다(Windows 10은 단색 바탕)
 - 1.9.0부터 Tailscale 업데이트(§13): 빌드한 PC에서 `windows\tools\publish_update.py`를 돌리면 그 PC가 새 설치 파일·APK를 내주고, 다른 PC는 설정 → 업데이트, 폰은 홈의 새 버전 줄이나 메뉴의 '업데이트 확인'으로 받아 바로 설치한다. PC 설치 프로그램은 실행 중인 앱을 `--quit`으로 끄고 설치한 뒤 다시 켠다. 폰은 같은 서명의 APK만 설치한다
+- 2.0.0부터 클라우드 미리보기·격자/목록·이름 찾기·종류 거르기(§15)와 PIN 잠긴 폴더(§14): PIN(또는 한 번만 보이는 복구 코드)으로만 열리고 그 기기에 묶인 30분 열쇠로 쓴다. 5번 틀리면 기기마다 따로 막는다
+- 2.1.0부터 사진·영상을 누르면 라이트박스(핀치·휠 확대, 끌어 옮기기, 옆으로 넘기기, 받기·지우기·취소)로 보고, 여러 개를 골라(폰은 꾹 눌러 끌기) 한꺼번에 받기·옮기기(§16)·지우기를 한다
+- 2.2.0부터 PC 클라우드는 통째로 암호화 저장소(§17): 이름·내용·미리보기가 모두 암호문이라 허브 PC의 탐색기·다른 Windows 계정·떼어 간 외장 드라이브로는 볼 수 없고 TailHop 앱에서만 열린다. 암호 계산은 Google Tink(AES-256-GCM, 파일마다 따로 열쇠, 1 MiB 청크), 비밀번호는 Argon2id, 이 PC 자동 열기는 Windows DPAPI. 위치는 아무 드라이브·폴더(외장 SSD도, 드라이브 문자가 바뀌어도 따라감). 새 PC에서는 클라우드 비밀번호(또는 복구 코드)를 한 번 넣고, 잊으면 리셋뿐이다. 사진은 화면용(긴 변 2048)을, 영상은 720p 재생용(FFmpeg, 그래픽카드 인코더)을 허브가 만들어 두고 받지 않고 바로 흘려 본다. 지운 것은 허브 휴지통에 30일. 2.1까지의 평문 폴더·예전 잠긴 폴더는 저장소를 만들 때 옮긴다
+- 2.2.1부터 클라우드 창은 화면 캡처·녹화·화면 공유에 잡히지 않고(PC는 SetWindowDisplayAffinity, 폰은 FLAG_SECURE), 강한 잠금을 켜면 이 PC에서도 자동으로 열리지 않아 클라우드 비밀번호 없이는 아무도(이 PC의 다른 프로그램도) 안을 볼 수 없다(앱을 켤 때·Windows를 잠글 때·쓰지 않을 때 잠기고, 폰에서 비밀번호로 열 수 있음). 여러 개 한꺼번에 이름 바꾸기(찾아 바꾸기·앞뒤 붙이기·번호·대소문자, 미리보기), 창 안 끌어서 옮기기(잠긴 폴더 안팎도), 이 클라우드의 로컬 폴더 열기. 사진 보기는 화면 크기에 맞춰 열리고 확대·축소·맞춤·원래 크기·돌리기·정보(EXIF)·필름 띠·전체 화면·앞뒤 미리 불러오기·고품질 다시 그리기를, 영상은 앱 안 재생기(PC는 mpv, 폰은 Media3)로 탐색 막대·받아 둔 범위·±10초·속도·음량·전체 화면·이어 보기를 지원한다
 - `docs/PROTOCOL.md` — 전송 프로토콜, `docs/test_vectors.json` — 두 구현이 공유하는 테스트 벡터
 
 ## 보안 (1.5.0 점검 반영)
@@ -36,6 +40,7 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 ## 빌드
 - 업데이트로 내주기: 두 빌드를 마친 뒤 `cd windows && .venv\Scripts\python tools\publish_update.py` (`%APPDATA%\TailHop\updates`에 복사하고 manifest를 쓴다. 디버그 서명 APK는 거부)
 - PC: `windows\build.bat` → `dist\TailHop_Setup_<버전>.exe` (Inno Setup 6 필요)
+- FFmpeg: `build.bat`이 `windows\tools\fetch_ffmpeg.py`로 고정된 LGPL 빌드(BtbN, SHA-256 확인)를 `windows\vendor\ffmpeg`에 받아 설치 파일에 넣는다. 저장소에는 넣지 않는다
 - Android: `cd android && ./gradlew assembleRelease` (서명 키는 저장소에 없음)
 - 릴리즈(`.github/workflows/release.yml`): Android 서명 키 시크릿(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, 선택 `ANDROID_KEY_PASSWORD`)이 없으면 실패한다. 올리기 전에 APK가 debuggable이 아닌지, 서명 인증서 SHA-256이 워크플로의 기대값(또는 저장소 변수 `ANDROID_SIGNER_SHA256`)과 같은지 확인한다.
 - 아이콘: 원본은 `windows/assets/icons/*.svg`(Lucide, ISC). 고친 뒤 `cd windows && .venv\Scripts\python assets\build_icons.py`로 PC `.ico`와 Android 벡터 아이콘을 다시 만든다(PC 화면 아이콘은 실행 중에 화면 배율에 맞춰 그린다). 테스트가 Android 아이콘이 원본과 같은지 확인한다.

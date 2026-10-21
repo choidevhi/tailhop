@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import datetime as dt
 import hashlib
+import json
 import os
 import queue
 import subprocess
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import traceback
 import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -27,16 +29,23 @@ from PIL import Image, ImageGrab
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import bridge
+import cloud
 import cloud_ui
+import cloudstore
 import i18n
+import lightbox
+import media
+import player
+import migrate
 import settings_ui
+import store_ui
 import outbox
 import protocol as p
 import store
 import thumbs
 import vicons
 from i18n import t
-from ui import (MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, BUBBLE, INK, INK_TEXT, INK_HOVER,
+from ui import (fit_geometry, MAIN_BG, SIDEBAR_BG, BORDER, TEXT, SECONDARY, HOVER, SELECTED, BUBBLE, INK, INK_TEXT, INK_HOVER,
                 MUTED_BUTTON, GREEN, RED, AMBER, DROP, DROP_ROW, MONO, KIND_ICON, _SCALE, icon, kind_label,
                 resource_path, human_size, font, ghost_button, round_icon, CircleButton, drop_tree, bind_tree,
                 GUTTER, apply_glass, card)
@@ -45,11 +54,12 @@ from node import PAIR_WINDOW_SEC, Node
 APP_NAME = "TailHop"
 CHAT_FILTERS = {"all": "chat.filter_all", "text": "chat.filter_text", "media": "chat.filter_media",
                 "file": "chat.filter_file"}
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.2.1"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
 TEXT_PREVIEW = 400
+VIEW_LIMIT = 200 * 1024 * 1024  # 라이트박스가 원본을 메모리로 읽는 상한(넘으면 썸네일)
 THUMB_MEMORY = 120  # 화면에 들고 있는 썸네일 이미지 수(넘으면 오래된 것부터 버린다)
 PAUSE_HOUR = 3600
 
@@ -120,7 +130,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.TkdndVersion = TkinterDnD._require(self)
         _SCALE[0] = ctk.ScalingTracker.get_widget_scaling(self)  # 아이콘을 이 배율의 픽셀 크기로 그린다
         self.title(APP_NAME)
-        self.geometry("880x700")
+        fit_geometry(self, 880, 700)
         self.minsize(560, 520)
         icon = resource_path("assets/tailhop.ico")
         self.icon_path = icon if icon.exists() else None
@@ -142,6 +152,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.qr_window: ctk.CTkToplevel | None = None
         self.cloud_window: cloud_ui.CloudWindow | None = None
         self.settings_window: settings_ui.SettingsWindow | None = None
+        self.store_asked = False
+        self.migrate_asked = False
         self.version = APP_VERSION
         self.hotkey_label = bridge.HOTKEY_LABEL
         self.cloud_on_var = tk.BooleanVar(value=self.node.cloud_on)
@@ -158,6 +170,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.hotkey: bridge.Hotkey | None = None
         self.preview_var = tk.BooleanVar(value=self.node.settings.get("previews") is not False)
         self.thumb_images: dict[str, ctk.CTkImage] = {}  # 원본 경로별 화면용 이미지(넣은 순서 = 오래된 순)
+        self.viewer: lightbox.Lightbox | None = None
+        self.video: player.VideoWindow | None = None
         self.thumb_waiting: dict[str, list[ctk.CTkLabel]] = {}
         self.thumbs = thumbs.Worker(lambda src, out: self.events.put(("thumb", {"src": str(src), "out": out})))
         self.receiving_var = tk.BooleanVar(value=self.node.receiving)
@@ -179,6 +193,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._start_hotkey(quiet=True)
         self.after(100, self._poll)
         self.after(1000, self._tick_pending)
+        self.after(1500, self._check_store)
         self.after(30, lambda: apply_glass(self))
         if start_hidden:
             self.withdraw()
@@ -640,7 +655,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self._render_history(scroll_to_end=False)
 
     def _render_media_grid(self, items: list[dict]) -> None:
-        """이 대화방의 사진·영상을 최근 것부터 칸으로 모아 보인다. 누르면 탐색기에서 보인다."""
+        """이 대화방의 사진·영상을 최근 것부터 칸으로 모아 보인다. 누르면 라이트박스로 크게 본다."""
         items = [x for x in reversed(items) if Path(x.get("path") or "").is_file()][:300]
         if not items:
             ctk.CTkLabel(self.log, text=t("chat.no_media"), font=font(13), text_color=SECONDARY).pack(pady=120)
@@ -682,6 +697,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             return t("pending.failed", error=job.error), RED
         if job.attempts == 0:
             return t("pending.queued"), SECONDARY
+        if job.code in outbox.OFFLINE_CODES:  # 상대가 꺼져 있다: 켜지면 바로 보낸다(§11.5)
+            return t("pending.offline"), SECONDARY
         secs = max(0, int(job.next_at - time.time() + 0.99))
         return t("pending.retry", secs=secs, error=job.error), AMBER
 
@@ -797,7 +814,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(names, text=name, font=font(13, "bold"), text_color=TEXT, anchor="w", height=19).pack(anchor="w")
             ctk.CTkLabel(names, text=human_size(item.get("size", 0)), font=font(11), text_color=SECONDARY,
                          anchor="w", height=15).pack(anchor="w")
-            hint = t("msg.click_show")
+            hint = t("msg.click_view") if thumbs.previewable(item["name"]) else t("msg.click_show")
         meta = f"{when:%H:%M} · {hint}" if mine else hint
         ctk.CTkLabel(row, text=meta, font=font(10), text_color=SECONDARY, height=14).pack(anchor=side, padx=6)
         bind_tree(box, "<Button-1>", lambda _e, it=item: self._open_history_item(it))
@@ -858,18 +875,107 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.clipboard_clear()
             self.clipboard_append(self.node.history.full_text(item))
             self._flash(t("flash.copied"))
+        elif item.get("cloud"):  # 클라우드에 모은 파일(이 PC의 암호화 저장소 맨 위): 클라우드 창에서 연다
+            self.open_cloud(cloud_ui.LOCAL, focus=item["cloud"])
+        elif thumbs.previewable(Path(item.get("path") or "").name) and Path(item["path"]).is_file():
+            self._open_viewer(item)
         else:
-            path = Path(item["path"])
-            if path.is_file():
-                # 받은 파일을 직접 실행하지 않고 탐색기에서 선택만 한다. 경로는 통째로 따옴표로 묶어 넘긴다
-                # (파일명의 쉼표가 explorer 인자로 쪼개지지 않게).
-                cmd = store.explorer_select_command(path)
-                if cmd is not None:
-                    subprocess.Popen(cmd)
-                else:
-                    os.startfile(str(path.parent))  # 폴더만 연다
-            else:
-                messagebox.showinfo(APP_NAME, t("dialog.file_missing"), parent=self)
+            self._show_in_folder(item)
+
+    # ---------- 라이트박스(2.2.0) ----------
+    def _viewer_items(self, item: dict) -> list[dict]:
+        """이 대화방의 사진·영상(오래된 것부터, 파일이 남아 있는 것만). 누른 항목은 꼭 들어간다."""
+        items = [x for x in self._items_for(self.current) if x["kind"] != "text"
+                 and thumbs.previewable(Path(x.get("path") or "").name) and Path(x["path"]).is_file()] \
+            if self.current else []
+        return items if any(x is item for x in items) else [*items, item]
+
+    def _open_viewer(self, item: dict) -> None:
+        items = self._viewer_items(item)
+        by_key = {str(id(x)): x for x in items}
+        shots = [lightbox.Shot(key, x.get("name") or Path(x["path"]).name, self._viewer_preview(x),
+                               self._viewer_loader(Path(x["path"])),
+                               video=Path(x["path"]).suffix.lower() in thumbs.VIDEO_EXT) for key, x in by_key.items()]
+        index = next(i for i, x in enumerate(items) if x is item)
+        actions = [lightbox.Action(t("chat.show_in_folder"), "folder", lambda s: self._show_in_folder(by_key[s.key])),
+                   lightbox.Action(t("chat.delete"), "trash-2", lambda s: self._viewer_delete(by_key[s.key]), "danger",
+                                   key="delete")]
+        if player.mpv_path() is not None and any(s.video for s in shots):
+            actions.insert(0, lightbox.Action(t("lightbox.play"), "play", lambda s: self._play_file(by_key[s.key]),
+                                              key="play", video_only=True))
+        if self.viewer is not None and self.viewer.winfo_exists():
+            self.viewer.close()
+        self.viewer = lightbox.Lightbox(self, shots, index, actions,
+                                        lambda fn: self.events.put(("ui_call", {"fn": fn})), self.icon_path)
+
+    def _play_file(self, item: dict) -> None:
+        """대화방의 영상(이 PC의 파일)을 앱 안 재생기로. 이 대화방의 영상끼리 이전·다음으로 넘긴다."""
+        path = Path(item.get("path") or "")
+        if path.suffix.lower() not in thumbs.VIDEO_EXT or not path.is_file():
+            return
+        videos = [Path(x["path"]) for x in self._viewer_items(item) if Path(x["path"]).suffix.lower() in thumbs.VIDEO_EXT]
+        if path not in videos:
+            videos.append(path)
+        settings = self.node.settings
+        clips = [player.Clip(player.resume_key(settings, str(v)), v.name, lambda v=v: (str(v), lambda: None))
+                 for v in videos]
+        if self.video is not None and self.video.winfo_exists():
+            self.video.close()
+        self.video = player.VideoWindow(self, clips, videos.index(path),
+                                        lambda fn: self.events.put(("ui_call", {"fn": fn})), settings,
+                                        self.node.save_settings, self.icon_path)
+
+    def _viewer_preview(self, item: dict):
+        cached = self.thumb_images.get(str(Path(item["path"])))
+        return cached.cget("light_image") if cached is not None else None
+
+    @staticmethod
+    def _viewer_loader(path: Path):
+        def from_thumb():
+            ctypes.windll.ole32.CoInitializeEx(None, 0x2)  # 영상·HEIC는 셸 썸네일(COM)을 쓴다
+            out = thumbs.make(path)
+            if out is None:
+                return None
+            with Image.open(out) as im:
+                im.load()
+                return im.copy()
+
+        def load():
+            if path.suffix.lower() in thumbs.VIDEO_EXT or path.stat().st_size > VIEW_LIMIT:
+                return from_thumb()
+            try:
+                return lightbox.decode(path.read_bytes())
+            except (OSError, ValueError):
+                return from_thumb()  # Pillow가 못 푸는 형식(HEIC 등)
+
+        return load
+
+    def _viewer_delete(self, item: dict) -> None:
+        """대화에서 지운다. 받은 파일은 휴지통으로 보내고, 보낸 파일(내 원본)은 그대로 둔다."""
+        mine = item["dir"] == "out"
+        key = "chat.delete_sent_confirm" if mine else "chat.delete_received_confirm"
+        if not messagebox.askyesno(APP_NAME, t(key, name=item.get("name", "")), parent=self.viewer):
+            return
+        self.node.history.remove(item)
+        if not mine and not cloud.recycle(Path(item["path"])):
+            self._flash(t("chat.delete_file_failed"))
+        if self.viewer is not None and self.viewer.winfo_exists():
+            self.viewer.remove_current()
+        self._render_history(scroll_to_end=False)
+
+    def _show_in_folder(self, item: dict) -> None:
+        path = Path(item["path"])
+        if not path.is_file():
+            messagebox.showinfo(APP_NAME, t("dialog.file_missing"), parent=self)
+            return
+
+        # 받은 파일을 직접 실행하지 않고 탐색기에서 선택만 한다. 경로는 통째로 따옴표로 묶어 넘긴다
+        # (파일명의 쉼표가 explorer 인자로 쪼개지지 않게).
+        cmd = store.explorer_select_command(path)
+        if cmd is not None:
+            subprocess.Popen(cmd)
+        else:
+            os.startfile(str(path.parent))  # 폴더만 연다
 
     def _clear_history(self, stable_id: str) -> None:
         name = self.node.pairings[stable_id].name
@@ -1319,13 +1425,24 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     # ---------- 이벤트 ----------
     def _poll(self) -> None:
+        """이벤트 처리. 한 이벤트가 예외를 내도 다음 이벤트와 다음 차례는 계속 돈다(2.2.0에서는 한 번의 예외로
+        이 순환이 멈춰 설치 프로그램의 끄기 요청까지 받지 못했다)."""
         try:
             while True:
-                kind, data = self.events.get_nowait()
-                self._handle_event(kind, data)
-        except queue.Empty:
-            pass
-        self.after(100, self._poll)
+                try:
+                    kind, data = self.events.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_event(kind, data)
+                except Exception:  # noqa: BLE001 - 기록하고 계속
+                    log_error(f"event {kind}")
+        finally:
+            self.after(100, self._poll)
+
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """Tk 콜백의 예외(창이 없는 앱이라 보이지 않는다)를 오류 기록에 남긴다."""
+        log_error("tk callback", (exc, val, tb))
 
     def _on_outbox(self, data: dict) -> None:
         """보낼 곳 목록이 바뀜: 넣음·보내기 시작·다시 시도 대기·실패·끝(gone)."""
@@ -1378,15 +1495,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         return p.confirm_code(pairing.secret)
 
     # ---------- 클라우드 ----------
-    def open_cloud(self, source: str | None = None) -> None:
+    def open_cloud(self, source: str | None = None, focus: str | None = None) -> None:
         if self.cloud_window is not None and self.cloud_window.winfo_exists():
             if source is not None:
+                self.cloud_window.focus_path = focus
                 self.cloud_window.open_source(source)
             self.cloud_window.deiconify()
             self.cloud_window.lift()
             self.cloud_window.focus_force()
             return
-        self.cloud_window = cloud_ui.CloudWindow(self, source)
+        self.cloud_window = cloud_ui.CloudWindow(self, source, focus)
 
     def toggle_cloud_on(self) -> None:
         self.cloud_on_var.set(not self.node.cloud_on)
@@ -1399,21 +1517,157 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             if not messagebox.askyesno(APP_NAME, t("dialog.cloud_on", path=str(self.node.cloud_dir)), parent=self):
                 self.cloud_on_var.set(False)
                 return
+            self.node.cloud_dir.mkdir(parents=True, exist_ok=True)
         self.node.set_cloud(on=on)
         self.cloud_collect_var.set(self.node.cloud_collect)
         self._refresh_header()
         self._flash(t("flash.cloud_on") if on else t("flash.cloud_off"))
+        self.store_changed()
+        if on:
+            self._check_store(force=True)
+
+    def _check_store(self, force: bool = False) -> None:
+        """클라우드가 켜져 있는데 저장소가 아직 없거나(새로 만들기) 비밀번호가 필요하면(새 PC) 한 번 묻는다."""
+        st = self.node.store()
+        if st is None or (self.store_asked and not force):
+            return
+        self.store_asked = True
+        mode = {cloudstore.NEW: "create", cloudstore.LOCKED: "unlock"}.get(st.state)
+        if mode is not None:
+            self.deiconify()
+            store_ui.ask(self, self, mode, self.store_changed)
+        elif st.state == cloudstore.MISSING:
+            self._flash(t("store.state_missing"))
+        else:
+            self._offer_migration()
+
+    # ---------- 2.1까지의 클라우드 옮기기(2.2.0) ----------
+    def _migration_sources(self, st) -> list[Path]:
+        sources = [st.root]
+        old = self.node.settings.get("cloud_import_from")
+        if isinstance(old, str) and old and Path(old) != st.root and Path(old).is_dir():
+            sources.append(Path(old))
+        return sources
+
+    def _offer_migration(self, force: bool = False) -> None:
+        """저장소가 열렸는데 예전 평문 파일·예전 잠긴 폴더가 남아 있으면 옮길지 묻는다(한 번)."""
+        st = self.node.store()
+        if st is None or st.state != cloudstore.OPEN or (self.migrate_asked and not force):
+            return
+        self.migrate_asked = True
+
+        def scan():
+            return [(src, *migrate.pending(src)) for src in self._migration_sources(st)]
+
+        def found(result, error) -> None:
+            if error is not None or not result:
+                return
+            for src, count, size, mounts in result:
+                if count:
+                    if messagebox.askyesno(APP_NAME, t("migrate.ask", count=count, size=human_size(size),
+                                                       path=str(src)), parent=self):
+                        self._run_migration(st, src, mounts)
+                    return
+                if mounts:
+                    self._convert_vaults(st, src, mounts)
+                    return
+
+        store_ui.run_bg(self, scan, found)
+
+    def _run_migration(self, st, src: Path, mounts: list[str]) -> None:
+        self._flash(t("migrate.running", pct=0))
+
+        def progress(done: int, total: int) -> None:
+            self.events.put(("ui_call", {"fn": lambda: self._flash(t("migrate.running", pct=done * 100 // total))}))
+
+        def done(report, error) -> None:
+            if error is not None:
+                messagebox.showerror(APP_NAME, str(error), parent=self)
+                return
+            if report.failed:
+                lines = "\n".join(f"{name}: {why}" for name, why in report.failed[:6])
+                messagebox.showwarning(APP_NAME, t("migrate.some_failed", done=report.moved,
+                                                   failed=len(report.failed)) + "\n\n" + lines, parent=self)
+            else:
+                self._flash(t("migrate.done", count=report.moved))
+            self.store_changed()
+            if mounts:
+                self._convert_vaults(st, src, mounts)
+
+        store_ui.run_bg(self, lambda: migrate.move_plain(st, src, progress), done)
+
+    def _convert_vaults(self, st, src: Path, mounts: list[str]) -> None:
+        """예전 잠긴 폴더마다 지금 PIN(또는 복구 코드)과 새 PIN을 물어 새 저장소로 옮긴다."""
+        if not mounts:
+            return
+        mount, rest = mounts[0], mounts[1:]
+
+        def submit(dialog, values) -> None:
+            def work():
+                return migrate.convert_vault(st, src, mount, values["new_pin"], values.get("pin"),
+                                             values.get("recovery"))
+
+            def after(code, error) -> None:
+                if error is not None:
+                    dialog.fail(str(error))
+                    return
+                dialog.destroy()
+                cloud_ui.show_recovery(self, code)
+                self.store_changed()
+                self._convert_vaults(st, src, rest)
+
+            store_ui.run_bg(self, work, after)
+
+        cloud_ui.PinDialog(self, "convert", mount, submit)
+
+    def store_changed(self) -> None:
+        """저장소를 만들거나 열거나 리셋한 뒤: 설정·클라우드 창을 다시 그린다. 예전 파일이 남았으면 옮길지 묻는다."""
+        self.after(300, self._offer_migration)
+        self._refresh_header()
+        win = self.settings_window
+        if win is not None and win.winfo_exists():
+            win.rebuild()
         self._refresh_cloud_window(local=True)
 
     def _on_collect_switch(self) -> None:
         self.node.set_cloud(collect=bool(self.cloud_collect_var.get()))
 
     def _change_cloud_dir(self) -> None:
-        chosen = cloud_ui.cloud_folder_dialog(self)
-        if chosen:
-            self.node.set_cloud(folder=chosen)
-            self._flash(t("flash.cloud_dir", path=chosen))
-            self._refresh_cloud_window(local=True)
+        """저장 위치 바꾸기(아무 드라이브·외장 SSD). 지금 저장소가 열려 있으면 그대로 옮길지 묻는다."""
+        chosen = cloud_ui.cloud_folder_dialog(self.settings_window or self)
+        if not chosen or Path(chosen) == self.node.cloud_dir:
+            return
+        target = Path(chosen)
+        st = self.node.store()
+        existing = cloudstore.store_id_at(target)
+        old = self.node.cloud_dir
+        if cloudstore.store_id_at(old) is None and any(migrate.pending(old)[::2]):
+            self.node.settings["cloud_import_from"] = str(old)  # 예전 평문 폴더: 새 저장소로 옮길 수 있게 기억한다
+        if st is not None and st.state == cloudstore.OPEN and existing is None and st.nodes:
+            answer = messagebox.askyesnocancel(APP_NAME, t("store.move_ask", path=chosen), parent=self)
+            if answer is None:
+                return
+            if answer:
+                self._flash(t("store.moving"))
+
+                def progress(done: int, total: int) -> None:
+                    self.events.put(("ui_call", {"fn": lambda: self._flash(
+                        t("store.moving_pct", pct=done * 100 // max(1, total)))}))
+
+                def done(_r, error) -> None:
+                    if error is not None:
+                        messagebox.showerror(APP_NAME, str(error), parent=self)
+                        return
+                    self.node.set_cloud(folder=chosen)
+                    self._flash(t("store.moved", path=chosen))
+                    self.store_changed()
+
+                store_ui.run_bg(self, lambda: cloudstore.relocate(st, target, progress), done)
+                return
+        self.node.set_cloud(folder=chosen)
+        self._flash(t("flash.cloud_dir", path=chosen))
+        self.store_changed()
+        self._check_store(force=True)
 
     def _refresh_cloud_window(self, local: bool = False) -> None:
         win = self.cloud_window
@@ -1491,6 +1745,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_cloud_window(local=True)
         elif kind == "cloud_sent":
             self._flash(t("flash.cloud_sent", name=data["name"]))
+        elif kind == "store_changed":  # 강한 잠금: 잠기거나(Windows 잠금·쓰지 않음) 다른 기기에서 열었다
+            if data.get("state") != cloudstore.OPEN:
+                win = self.cloud_window
+                if win is not None and win.winfo_exists():
+                    win.close_viewers()  # 풀어 둔 그림·영상을 메모리에 두지 않게
+                if self.viewer is not None and self.viewer.winfo_exists():
+                    self.viewer.close()
+                self._flash(t("store.locked_now"))
+            elif data.get("peer"):
+                self._flash(t("store.unlocked_by", peer=data["peer"]))
+            self.store_changed()
         elif kind == "outbox_progress":
             if self.cloud_window is not None and self.cloud_window.winfo_exists():
                 self.cloud_window.update_transfers(data)
@@ -1586,7 +1851,52 @@ def _forward(req: bridge.Request) -> int:
     return 1
 
 
+ERROR_LOG_MAX = 256 * 1024
+
+
+def log_error(where: str, info=None) -> None:
+    """예외의 위치와 호출 순서만 %APPDATA%\\TailHop\\error.log에 남긴다(파일 내용·비밀번호는 넣지 않는다). 너무 커지면 새로 쓴다."""
+    try:
+        text = "".join(traceback.format_exception(*info) if info else traceback.format_exc())
+        path = store.APP_DIR / "error.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "w" if path.exists() and path.stat().st_size > ERROR_LOG_MAX else "a"
+        with open(path, mode, encoding="utf-8") as out:
+            out.write(f"--- {dt.datetime.now().isoformat(timespec='seconds')} {APP_VERSION} {where}\n{text}\n")
+    except OSError:
+        pass
+
+
+def selftest(out: Path) -> int:
+    """빌드한 설치본 확인용(--selftest 결과파일): 임시 폴더에 암호화 저장소를 만들어 넣고 읽고, FFmpeg을 찾는다.
+    사용자 설정·클라우드는 건드리지 않는다."""
+    result: dict[str, str | bool] = {"version": APP_VERSION}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            st = cloudstore.Store(Path(tmp) / "cloud", Path(tmp) / "app")
+            (Path(tmp) / "cloud").mkdir()
+            st.create("selftest password 1")
+            up = st.begin_upload("", cloudstore.MAIN, "a.bin", 5, 0, "local", os.urandom(16).hex())
+            up.write(b"hello")
+            up.commit()
+            result["store"] = b"".join(st.read(st.node_at(["a.bin"], {}, "local"))) == b"hello"
+            st.close()
+        ff = media.ffmpeg_dir()
+        result["ffmpeg"] = str(ff) if ff else ""
+        if ff:
+            done = subprocess.run([str(ff / "ffmpeg.exe"), "-hide_banner", "-version"], capture_output=True,
+                                  creationflags=0x08000000)
+            result["ffmpeg_ok"] = done.returncode == 0 and b"ffmpeg version" in done.stdout
+            result["encoder"] = media.pick_encoder(ff) or ""
+    except Exception as exc:  # noqa: BLE001 - 결과 파일에 이유를 남긴다
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    out.write_text(json.dumps(result, ensure_ascii=False), "utf-8")
+    return 0 if result.get("store") and result.get("ffmpeg_ok") else 1
+
+
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
+        return selftest(Path(sys.argv[2]))
     i18n.set_language(store.load_settings().get("language", i18n.SYSTEM))
     _console()
     try:

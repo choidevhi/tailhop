@@ -56,7 +56,7 @@ object Notifs {
     }
 
     /**
-     * 끝내 보내지 못한 건(다시 시도하지 않는 실패·24시간 포기). 탭하면 그 PC의 대화방에서 다시 보낼 수 있다.
+     * 끝내 보내지 못한 건(다시 시도하지 않는 실패·30일 포기). 탭하면 그 PC의 대화방에서 다시 보낼 수 있다.
      * 클라우드 올리기·가져오기(1.8.0)는 그 PC의 클라우드 화면을 연다(전송 목록에서 다시 시도한다).
      */
     fun sendFailed(ctx: Context, dev: String, pcName: String, what: String, reason: String, cloud: Boolean = false) {

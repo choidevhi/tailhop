@@ -1,5 +1,6 @@
 package com.choidev.tailhop
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.Locale
@@ -215,12 +216,175 @@ class VaultTokens {
 
     @Synchronized fun forgetPc(pc: String) {
         mounts.remove(pc)
-        tokens.keys.removeIf { it.startsWith("$pc|") }
+        dropTokens(pc)
+    }
+
+    /** 그 PC의 열쇠만 모두 버린다(허브 저장소가 다시 잠김, §18.3). 잠긴 폴더 자리는 남긴다(PIN을 다시 묻게). */
+    @Synchronized fun dropTokens(pc: String) { tokens.keys.removeIf { it.startsWith("$pc|") } }
+
+    /**
+     * 항목이 from에서 to로 옮겨졌거나 이름이 바뀌었다(2.2.1, §18.1·§18.2): from이거나 그 아래인 잠긴 폴더 자리와 열쇠가 새 자리를 따라간다.
+     * 허브는 옮긴 잠긴 폴더의 열쇠를 그대로 두므로(안은 그대로 잠김) 이 폰도 새 자리로 기억해야 다시 PIN을 묻지 않는다.
+     */
+    @Synchronized fun retarget(pc: String, from: String, to: String) {
+        if (from.isEmpty() || to.isEmpty() || !CloudPath.isValid(to)) return
+        val f = low(from)
+        val m = mounts[pc] ?: return
+        for ((k, shown) in m.entries.toList()) {
+            if (k != f && !k.startsWith("$f/")) continue
+            val moved = to + shown.substring(minOf(from.length, shown.length))
+            m.remove(k)
+            val t = tokens.remove("$pc|$k")
+            if (!CloudPath.isValid(moved)) continue // 규칙을 넘는 깊이·길이가 됐다: 잊는다(다시 열면 PIN을 묻는다)
+            m[low(moved)] = moved
+            if (t != null) tokens[key(pc, moved)] = t
+        }
     }
 
     companion object {
         /** 이 프로세스의 열쇠(화면·보내기 서비스가 같이 쓴다). */
         val shared = VaultTokens()
+    }
+}
+
+/** cloud_move(§16) 결과: 옮긴 것(원래 경로 → 옮긴 곳의 이름)과 못 옮긴 것(원래 경로, 오류 코드). */
+data class MoveResult(val moved: List<MoveResult.Moved>, val failed: List<MoveResult.Failed>) {
+    data class Moved(val path: String, val name: String)
+    data class Failed(val path: String, val code: String)
+
+    operator fun plus(o: MoveResult) = MoveResult(moved + o.moved, failed + o.failed)
+
+    companion object { val EMPTY = MoveResult(emptyList(), emptyList()) }
+}
+
+/**
+ * 여러 항목 옮기기(§16, 2.1.0). 허브가 hello caps에 "move"를 알릴 때만 쓴다. 안드로이드 의존성 없음(JVM 단위 테스트).
+ * 한 요청에 경로 1–MAX_PATHS개(헤더가 1 MiB 프레임을 넘지 않게) — 더 많으면 나눠 보내고 결과를 합친다(run).
+ */
+object CloudMove {
+    const val MAX_PATHS = 200
+    private val CODE_RE = Regex("[a-z_]{1,40}")
+
+    /** 요청 필드. paths는 1–MAX_PATHS개의 빈 경로가 아닌 규칙(§12.1)에 맞는 경로, dest는 규칙에 맞는 폴더(맨 위 ""도 된다). */
+    fun fields(paths: List<String>, dest: String): JSONObject {
+        require(paths.size in 1..MAX_PATHS && paths.all { it.isNotEmpty() && CloudPath.isValid(it) } && CloudPath.isValid(dest))
+        return JSONObject().put("paths", JSONArray(paths)).put("dest", dest)
+    }
+
+    /**
+     * 응답. moved·failed 중 하나는 배열이어야 한다(둘 다 없으면 bad_reply). 형식이 틀린 항목(경로가 규칙에 맞지 않거나 비었음,
+     * 이름이 보이는 이름이 아님, 코드가 코드 모양이 아님)은 버린다.
+     */
+    fun parse(reply: JSONObject): MoveResult {
+        val movedArr = reply.opt("moved") as? JSONArray
+        val failedArr = reply.opt("failed") as? JSONArray
+        if (movedArr == null && failedArr == null) throw ProtocolException("bad_reply")
+        val moved = ArrayList<MoveResult.Moved>()
+        if (movedArr != null) for (i in 0 until movedArr.length()) {
+            val o = movedArr.opt(i) as? JSONObject ?: continue
+            val path = (o.opt("path") as? String)?.takeIf { it.isNotEmpty() && CloudPath.isValid(it) } ?: continue
+            val name = (o.opt("name") as? String)?.takeIf { CloudPath.isListable(it) } ?: continue
+            moved += MoveResult.Moved(path, name)
+        }
+        val failed = ArrayList<MoveResult.Failed>()
+        if (failedArr != null) for (i in 0 until failedArr.length()) {
+            val o = failedArr.opt(i) as? JSONObject ?: continue
+            val path = (o.opt("path") as? String)?.takeIf { it.isNotEmpty() && CloudPath.isValid(it) } ?: continue
+            val code = (o.opt("code") as? String)?.takeIf { CODE_RE.matches(it) } ?: continue
+            failed += MoveResult.Failed(path, code)
+        }
+        return MoveResult(moved, failed)
+    }
+
+    /**
+     * 경로들을 MAX_PATHS개씩 나눠 send로 보내고 결과를 합친다(같은 경로는 한 번만). 첫 묶음이 통째로 거부되면(dest 없음·
+     * 잠긴 폴더 열쇠 없음 등) 그 예외를 그대로 던진다 — 아무것도 옮기지 않았다. 뒤 묶음이 통째로 거부되면 앞의 결과는 살리고
+     * 그 묶음의 경로들을 그 코드로 failed에 넣는다.
+     */
+    fun run(paths: List<String>, send: (List<String>) -> MoveResult): MoveResult {
+        var out = MoveResult.EMPTY
+        paths.distinct().chunked(MAX_PATHS).forEachIndexed { i, chunk ->
+            out += try { send(chunk) } catch (e: ProtocolException) {
+                if (i == 0) throw e
+                MoveResult(emptyList(), chunk.map { MoveResult.Failed(it, e.code) })
+            }
+        }
+        return out
+    }
+
+    /** 못 옮긴 이유별 개수(많은 것부터, 같으면 코드 이름순) — 결과 알림에 쓴다. */
+    fun failureCounts(r: MoveResult): List<Pair<String, Int>> =
+        r.failed.groupingBy { it.code }.eachCount().entries.sortedWith(compareBy({ -it.value }, { it.key })).map { it.key to it.value }
+
+    /** 폴더 dir이 옮길 항목 자신이거나 그 아래인지(그리로는 옮길 수 없다, bad_move). 허브처럼 대소문자를 가리지 않는다. */
+    fun inside(dir: String, moving: Collection<String>): Boolean {
+        val d = dir.lowercase(Locale.ROOT)
+        return moving.any { m -> val l = m.lowercase(Locale.ROOT); d == l || d.startsWith("$l/") }
+    }
+
+    /** §18.1 "tokens"에 담는 열쇠는 16개까지. */
+    const val MAX_TOKENS = 16
+
+    /**
+     * §18.1 출발 항목들의 열쇠: 각 경로가 든 잠긴 폴더의 열쇠(tokenFor) 가운데 도착 열쇠(destToken, "token"에 따로 감)를 뺀 것.
+     * 겹치지 않게, 처음 나온 순서로 MAX_TOKENS개까지. 없으면 빈 목록(헤더에 넣지 않는다).
+     */
+    fun sourceTokens(paths: List<String>, destToken: String?, tokenFor: (String) -> String?): List<String> {
+        val out = LinkedHashSet<String>()
+        for (p in paths) {
+            val t = tokenFor(p) ?: continue
+            if (t != destToken) out += t
+            if (out.size >= MAX_TOKENS) break
+        }
+        return out.toList()
+    }
+
+    /** 옮길 항목 하나: 경로, 그것이 있는 잠긴 폴더 자리(없으면 null), 그것 자체가 잠긴 폴더인지. */
+    data class Source(val path: String, val mount: String?, val lockedDir: Boolean)
+
+    /**
+     * 화면이 "여기로 옮기기"를 막을지(허브가 vault_move로 거부할 것). destMount는 도착 폴더가 든 잠긴 폴더 자리(없으면 null).
+     * - 잠긴 폴더 자체를 다른 잠긴 폴더 안에 넣기: 늘 막는다(§18.1에서도 vault_move).
+     * - move2(2.2.1 허브): 그 밖에는 잠긴 폴더 안팎·사이로도 옮긴다(§18.1).
+     * - 예전 허브: 잠긴 폴더 안팎을 오가면 막는다(§16). 잠긴 폴더 자체를 바깥 어디로 옮기기는 2.2 허브(store)만 된다(§17.5).
+     */
+    fun blocked(sources: List<Source>, destMount: String?, move2: Boolean, store: Boolean): Boolean {
+        val dest = destMount?.lowercase(Locale.ROOT)
+        return sources.any { s ->
+            when {
+                s.lockedDir -> dest != null || !(move2 || store)
+                move2 -> false
+                else -> s.mount?.lowercase(Locale.ROOT) != dest
+            }
+        }
+    }
+}
+
+/** 클라우드 다중 선택(2.1.0)의 계산: 길게 눌러 끌기(Google 포토처럼)와 끝 가까이에서 저절로 내리기. */
+object CloudSelect {
+    /**
+     * 끌기 중의 선택: 끌기 전에 고른 것(base) + 처음 누른 위치(anchor)부터 지금 손가락 아래(current)까지의 항목.
+     * keys는 목록 위치별 키(항목이 아닌 줄은 null). 위치가 목록을 넘으면 끝까지로 본다.
+     */
+    fun range(base: Set<String>, keys: List<String?>, anchor: Int, current: Int): Set<String> {
+        if (keys.isEmpty()) return base
+        val a = anchor.coerceIn(0, keys.size - 1)
+        val c = current.coerceIn(0, keys.size - 1)
+        val out = LinkedHashSet(base)
+        for (i in minOf(a, c)..maxOf(a, c)) keys[i]?.let { out += it }
+        return out
+    }
+
+    /** 손가락이 목록 위·아래 끝 edge 픽셀 안이면 한 번에 내릴 픽셀(위는 음수). 끝에 가까울수록 빠르게, 최대 max. */
+    fun autoScroll(y: Float, height: Int, edge: Float, max: Int): Int {
+        if (height <= 0 || edge <= 0f) return 0
+        val top = (edge - y) / edge
+        val bottom = (y - (height - edge)) / edge
+        return when {
+            top > 0f -> -(max * top.coerceAtMost(1f)).toInt()
+            bottom > 0f -> (max * bottom.coerceAtMost(1f)).toInt()
+            else -> 0
+        }
     }
 }
 

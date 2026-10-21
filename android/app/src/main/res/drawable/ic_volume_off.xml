@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2.2.1 손으로 옮긴 아이콘(Lucide volume-x, ISC): 음소거 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M11,4.702A0.705,0.705 0 0,0 9.797,4.204L6.413,7.587A1.4,1.4 0 0,1 5.416,8L3,8A1,1 0 0,0 2,9L2,15A1,1 0 0,0 3,16L5.416,16A1.4,1.4 0 0,1 6.413,16.413L9.796,19.797A0.705,0.705 0 0,0 11,19.298Z"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path android:pathData="M22,9L16,15"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path android:pathData="M16,9L22,15"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>

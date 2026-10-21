@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 끌어다 놓기(2.2.1): 놓을 수 있는 폴더 줄·칸·경로 조각에 옅은 점선 테두리(rounded-lg 8dp) -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:inset="2dp">
+    <shape android:shape="rectangle">
+        <stroke android:width="1.5dp" android:color="@color/secondary" android:dashWidth="5dp" android:dashGap="3dp" />
+        <corners android:radius="8dp" />
+    </shape>
+</inset>

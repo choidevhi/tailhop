@@ -1,6 +1,7 @@
 package com.choidev.tailhop
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -39,9 +40,15 @@ import java.util.Calendar
  * 한 PC와의 대화방. 보내기는 보낼 곳 목록(Outbox)에 넣기만 하고 SendService가 보낸다(1.7.0).
  * 아직 못 보낸 건은 대화 끝에 흐린 말풍선(보내는 중 n% / 대기 · n초 뒤 다시 시도 / 실패: 이유)으로 보이고,
  * 탭하거나 길게 누르면 다시 시도·취소를 고른다.
+ *
+ * 2.1.0: 받은 사진·영상(말풍선·모아 보기 칸)을 누르면 라이트박스(확대·좌우로 넘기기·다른 앱으로 열기·지우기).
  */
 class ChatActivity : AppCompatActivity() {
-    companion object { const val EXTRA_IP = "ip" }
+    companion object {
+        const val EXTRA_IP = "ip"
+        /** 라이트박스에서 영상 대신 보일 장면의 긴 변(px). */
+        private const val VIDEO_FRAME_PX = 1280
+    }
 
     private lateinit var ip: String
     private lateinit var pairState: TextView
@@ -67,6 +74,7 @@ class ChatActivity : AppCompatActivity() {
     /** 사진·영상 모아 보기(격자). */
     private var mediaMode = false
     private val searchRun = Runnable { query = searchBox.text.toString(); reloadChat() }
+    private var lightbox: Lightbox<HistoryItem>? = null
 
     private val historyListener: () -> Unit = { ui.post { reloadChat() } }
 
@@ -151,6 +159,7 @@ class ChatActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        lightbox?.close()
         History.removeListener(historyListener)
         Outbox.removeListener(historyListener)
         ui.removeCallbacks(searchRun)
@@ -228,6 +237,15 @@ class ChatActivity : AppCompatActivity() {
 
     private fun updateChips() {
         for (i in 0 until kindChips.childCount) kindChips.getChildAt(i).let { it.isSelected = it.tag == kind }
+    }
+
+    /**
+     * 돌림·폴드 펴기·접기(2.2.1): 화면을 다시 만들지 않는다(라이트박스가 보던 자리 그대로 남게, 매니페스트 configChanges).
+     * 모아 보기 격자의 칸 수만 새 폭에 맞춘다.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (mediaMode) (chat.layoutManager as? GridLayoutManager)?.spanCount = CloudGrid.columns(newConfig.screenWidthDp)
     }
 
     /** 모아 보기: 이 대화의 사진·영상을 격자로(미리보기는 이 폰의 파일에서 만든다). 입력창·찾기는 숨긴다. */
@@ -348,12 +366,101 @@ class ChatActivity : AppCompatActivity() {
             val type = contentResolver.getType(uri) ?: "*/*"
             val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
             // 읽기 권한은 이 앱이 받아 저장한 파일(MediaStore Downloads 또는 이 앱의 FileProvider)에만 넘긴다.
-            if (uri.authority == MediaStore.AUTHORITY || uri.authority == "$packageName.files")
-                view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (ownUri(uri)) view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(view)
         } catch (e: Exception) {
             toast(getString(R.string.cant_open_file))
         }
+    }
+
+    /** 받은 파일 URI 중 이 앱이 저장한 것(MediaStore Downloads·이 앱의 FileProvider)인지 — 열기 권한을 넘기고 지울 수 있는 것. */
+    private fun ownUri(uri: Uri): Boolean = uri.scheme == "content" &&
+        (uri.authority == MediaStore.AUTHORITY || uri.authority == "$packageName.files")
+
+    // ---------- 라이트박스(2.1.0) ----------
+
+    /** list(보이는 순서) 가운데 받은 사진·영상만 좌우로 넘기며 item부터 보인다. 보낸 파일은 다시 열어 주지 않는다. */
+    private fun showMedia(list: List<HistoryItem>, item: HistoryItem) {
+        val pics = list.filter { it.incoming && ChatFilter.isMedia(it) && it.uri?.startsWith("content:") == true }
+        val start = pics.indexOfFirst { it.id == item.id }
+        if (start < 0) { open(item); return }
+        lightbox?.close()
+        val lb = Lightbox(this, pics, start, chatPics())
+        lb.onClosed = { if (lightbox === lb) lightbox = null }
+        lightbox = lb
+        lb.show()
+    }
+
+    /** 이 폰에 받은 사진·영상의 라이트박스 원천: 모아 보기 미리보기(메모리)를 먼저, 사진은 원본을 줄여 읽고 영상은 큰 장면 하나. */
+    private fun chatPics() = object : Lightbox.Source<HistoryItem> {
+        private val app = applicationContext
+
+        override fun key(t: HistoryItem) = t.id
+        override fun name(t: HistoryItem) = t.name ?: getString(R.string.file_default)
+        override fun video(t: HistoryItem) = ChatFilter.isVideo(t)
+
+        override fun quick(t: HistoryItem): Bitmap? = t.uri?.let { Thumbs.cached(Thumbs.localKey(it, CloudThumb.GRID_PX)) }
+
+        override fun load(t: HistoryItem, job: Thumbs.Job, progress: (Long, Long) -> Unit): Lightbox.Picture? {
+            val uri = Uri.parse(t.uri ?: return null)
+            return if (video(t)) Thumbs.local(app, uri, true, VIDEO_FRAME_PX, job)?.let { Lightbox.Picture.plain(it) }
+            else Pictures.picture(app, uri)
+        }
+
+        override fun bindThumb(t: HistoryItem, view: ImageView, show: (Bitmap) -> Unit) {
+            val u = t.uri ?: return
+            val key = Thumbs.localKey(u, CloudThumb.GRID_PX)
+            val video = video(t)
+            Thumbs.bind(view, key, { job -> Thumbs.local(app, Uri.parse(u), video, CloudThumb.GRID_PX, job) }, show)
+        }
+
+        /** 정보: 이름·크기·받은 시각·저장한 곳(Download/TailHop). 픽셀·찍은 날짜는 그림을 읽을 때(원본) 함께 안다. */
+        override fun info(t: HistoryItem) = Lightbox.Info(name(t), t.size.takeIf { it > 0 }, t.ts, null)
+
+        /** 영상: 이 폰의 파일에서 가로세로(돌림 반영)만 읽는다. */
+        override fun details(t: HistoryItem, job: Thumbs.Job): Pictures.Details? {
+            if (!video(t)) return null
+            val uri = Uri.parse(t.uri ?: return null)
+            val r = android.media.MediaMetadataRetriever()
+            return try {
+                r.setDataSource(app, uri)
+                val w = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: return null
+                val h = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: return null
+                val rot = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                if (rot % 180 == 0) Pictures.Details(w, h, null) else Pictures.Details(h, w, null)
+            } catch (e: Exception) { null } finally { try { r.release() } catch (e: Exception) { } }
+        }
+
+        override fun actions() = listOf(
+            Lightbox.Action<HistoryItem>(R.string.cloud_open, R.drawable.ic_external) { open(it) },
+            Lightbox.Action(R.string.cloud_delete, R.drawable.ic_trash) { confirmDelete(it) },
+        )
+
+        /** 영상은 다른 앱(동영상 플레이어)으로 연다. */
+        override fun play(t: HistoryItem) = open(t)
+    }
+
+    /**
+     * 받은 사진·영상 지우기: 대화에서 지우고 파일도 지운다. 파일은 이 앱이 저장한 것만 지운다(MediaStore·FileProvider).
+     * 파일을 못 지워도(이미 없음·다시 설치해 소유가 바뀜) 기록은 지우고 알린다.
+     */
+    private fun confirmDelete(item: HistoryItem) {
+        AlertDialog.Builder(this).setTitle(getString(R.string.cloud_delete_title, item.name ?: getString(R.string.file_default)))
+            .setMessage(R.string.chat_delete_msg)
+            .setPositiveButton(R.string.cloud_delete) { _, _ ->
+                val app = applicationContext
+                Thread {
+                    val uri = item.uri?.let { Uri.parse(it) }
+                    val fileGone = uri != null && ownUri(uri) && try { app.contentResolver.delete(uri, null, null) > 0 } catch (e: Exception) { false }
+                    History.remove(app, item.id)
+                    ui.post {
+                        if (isDestroyed) return@post
+                        toast(getString(if (fileGone) R.string.cloud_deleted else R.string.chat_delete_file_failed))
+                        lightbox?.remove(item)
+                    }
+                }.start()
+            }
+            .setNegativeButton(R.string.cancel, null).let { if (lightbox != null) it.showSecure() else it.show() } // 라이트박스 위면 캡처 막기(§18.4)
     }
 
     private fun copy(item: HistoryItem) {
@@ -368,6 +475,8 @@ class ChatActivity : AppCompatActivity() {
             j.failed -> getString(R.string.outbox_failed, SendService.reason(this, j))
             j.state == OutboxJob.SENDING -> getString(R.string.outbox_sending,
                 if (j.size > 0) (Outbox.progressOf(j.id) * 100 / j.size).toInt().coerceIn(0, 100) else 0)
+            // 연결 실패로 기다림(2.2.0): 상대가 켜져 닿으면(hello·메시지) 바로 보낸다 — 다음 시도 시각 대신.
+            Idle.offline(j) -> getString(R.string.outbox_peer_off)
             j.attempts > 0 && j.nextAt > now -> getString(R.string.outbox_retry_in,
                 DateUtils.formatElapsedTime((j.nextAt - now + 999) / 1000))
             else -> getString(R.string.outbox_queued)
@@ -426,7 +535,7 @@ class ChatActivity : AppCompatActivity() {
                     h.icon.visibility = View.GONE
                 }
             }
-            h.itemView.setOnClickListener { _ -> if (it.incoming) open(it) else toast(getString(R.string.sent_file_to_pc)) }
+            h.itemView.setOnClickListener { _ -> if (it.incoming) showMedia(items, it) else toast(getString(R.string.sent_file_to_pc)) }
         }
     }
 
@@ -520,7 +629,13 @@ class ChatActivity : AppCompatActivity() {
                 h.body.ellipsize = TextUtils.TruncateAt.MIDDLE
                 val size = Formatter.formatShortFileSize(ctx, it.size)
                 h.sub.text = if (out) size else ctx.getString(R.string.tap_to_open, size)
-                h.bubble.setOnClickListener { _ -> if (out) toast(ctx.getString(R.string.sent_file_to_pc)) else open(it) }
+                h.bubble.setOnClickListener { _ ->
+                    when {
+                        out -> toast(ctx.getString(R.string.sent_file_to_pc))
+                        ChatFilter.isMedia(it) -> showMedia(items, it) // 대화 순서(오래된 것 → 새 것)로 넘긴다
+                        else -> open(it)
+                    }
+                }
                 h.bubble.setOnLongClickListener(null)
             }
         }

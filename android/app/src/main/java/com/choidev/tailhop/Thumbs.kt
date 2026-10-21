@@ -101,6 +101,9 @@ object Thumbs {
 
     fun clearMemory() { mem.evictAll(); missing.evictAll() }
 
+    /** 메모리에 이미 있는 그림(라이트박스가 원본을 받는 동안 먼저 보인다). 없으면 null — 받지 않는다. */
+    fun cached(key: String): Bitmap? = mem.get(key)
+
     // ---------- 클라우드(허브의 미리보기) ----------
 
     fun cloudKey(pc: String, path: String, item: CloudItem, px: Int) = "c|$pc|$path|${item.mtime}|${item.size}|$px"

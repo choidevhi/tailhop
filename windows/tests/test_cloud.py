@@ -1,7 +1,7 @@
-"""1.8.0 클라우드 모드(docs/PROTOCOL.md §12): 경로 규칙, 허브 목록·링크 막기, 두 노드 사이 올리기·가져오기·이어받기·지우기.
+"""클라우드 모드(docs/PROTOCOL.md §12, §17): 경로 규칙, 평문 폴더 읽기(옮기기용 cloud.CloudFolder),
+두 노드 사이 올리기·가져오기·이어받기·지우기(허브는 2.2.0부터 암호화 저장소).
 
-모든 파일은 임시 폴더에만 쓴다. 휴지통으로 보내기(cloud.recycle)는 사용자의 실제 휴지통을 채우지 않게
-시험용 함수로 바꿔 끼우고, 진짜 휴지통 호출은 없는 경로로만 확인한다.
+모든 파일은 임시 폴더에만 쓴다. 진짜 휴지통 호출은 없는 경로로만 확인한다.
 """
 from __future__ import annotations
 
@@ -23,8 +23,10 @@ store.APP_DIR = Path(_GUARD.name) / "appdata-guard"
 store.DEFAULT_SAVE_DIR = Path(_GUARD.name) / "save-guard"
 
 import cloud  # noqa: E402
+import cloudstore as cs  # noqa: E402
 import node as nodemod  # noqa: E402
 import outbox  # noqa: E402
+from storehelp import names, open_hub, read, seed  # noqa: E402
 from test_nodes import IP_A, IP_B, USER, FakeTS, wait_for  # noqa: E402
 
 VECTORS = json.loads((Path(__file__).resolve().parents[2] / "docs" / "test_vectors.json").read_text("utf-8"))
@@ -151,24 +153,15 @@ class TwoNodeCloudTests(unittest.TestCase):
         self.b.join_pairing(self.a.begin_pairing())
         self.assertTrue(wait_for(lambda: "nodeB" in self.a.pairings))
         self.hub_dir = self.root / "A" / "cloud"
-        self.a.set_cloud(True, str(self.hub_dir))
-        self.recycled: list[Path] = []
-        self._recycle = cloud.recycle
-        cloud.recycle = self.fake_recycle
+        self.st = open_hub(self.a, self.hub_dir)
         self._backoff = outbox.BACKOFF
         outbox.BACKOFF = (0.05,) * 5
 
     def tearDown(self):
-        cloud.recycle = self._recycle
         outbox.BACKOFF = self._backoff
         for n in self.nodes:
             n.stop()
         self.tmp.cleanup()
-
-    def fake_recycle(self, path: Path) -> bool:
-        self.recycled.append(path)
-        shutil.rmtree(path) if path.is_dir() else path.unlink()
-        return True
 
     def make_node(self, label, ip, sid):
         events = []
@@ -183,6 +176,22 @@ class TwoNodeCloudTests(unittest.TestCase):
     def test_hello_tells_cloud_state(self):
         self.assertTrue(self.b.cloud_info("nodeA"))
         self.assertFalse(self.a.cloud_info("nodeB"))
+        self.assertEqual(self.b._hello("nodeA").get("store"), "open")
+
+    def test_store_not_ready_is_told(self):
+        """켜져 있지만 저장소가 열리지 않음: hello에 그 상태, 요청은 store_locked·store_missing으로 거부."""
+        self.a.set_cloud(True, str(self.root / "A" / "아직 안 만듦"))
+        (self.root / "A" / "아직 안 만듦").mkdir()
+        self.b._caps.clear()
+        info = self.b._hello("nodeA")
+        self.assertEqual((info["cloud"], info.get("store")), (False, "new"))
+        with self.assertRaises(p.ProtocolError) as ctx:
+            self.b.cloud_list("nodeA", "")
+        self.assertEqual(ctx.exception.code, "store_locked")
+        self.a.set_cloud(True, str(self.root / "빠진 드라이브"))
+        with self.assertRaises(p.ProtocolError) as ctx:
+            self.b.cloud_list("nodeA", "")
+        self.assertEqual(ctx.exception.code, "store_missing")
 
     def test_upload_list_download_delete(self):
         src = self.root / "보고서.pdf"
@@ -190,7 +199,8 @@ class TwoNodeCloudTests(unittest.TestCase):
         src.write_bytes(data)
         [job] = self.b.outbox.add_cloud_upload("nodeA", [src], "문서/2026")
         self.assertTrue(wait_for(lambda: self.b.outbox.get(job.id) is None))
-        self.assertEqual((self.hub_dir / "문서" / "2026" / "보고서.pdf").read_bytes(), data)
+        self.assertEqual(read(self.st, "문서/2026/보고서.pdf"), data)
+        self.assertNotIn(data[:64], b"".join(x.read_bytes() for x in self.hub_dir.rglob("*") if x.is_file()))
         self.assertTrue(any(k == "cloud_in" for k, _ in self.ev_a))
 
         items, nxt = self.b.cloud_list("nodeA", "")
@@ -205,10 +215,10 @@ class TwoNodeCloudTests(unittest.TestCase):
         self.assertTrue(received and received[-1]["from_cloud"])
 
         self.b.cloud_mkdir("nodeA", "빈 폴더")
-        self.assertTrue((self.hub_dir / "빈 폴더").is_dir())
+        self.assertEqual(names(self.st), ["문서", "빈 폴더"])
         self.b.cloud_delete("nodeA", "문서")
-        self.assertFalse((self.hub_dir / "문서").exists())
-        self.assertEqual(self.recycled, [self.hub_dir / "문서"])
+        self.assertEqual(names(self.st), ["빈 폴더"])
+        self.assertEqual([x["name"] for x in self.st.trash_items()], ["문서"])  # 허브의 휴지통(30일)
 
     def test_upload_folder_keeps_tree(self):
         folder = self.root / "여행"
@@ -218,13 +228,12 @@ class TwoNodeCloudTests(unittest.TestCase):
         jobs = self.b.outbox.add_cloud_upload("nodeA", [folder], "")
         self.assertEqual(len(jobs), 2)
         self.assertTrue(wait_for(lambda: all(self.b.outbox.get(j.id) is None for j in jobs)))
-        self.assertEqual((self.hub_dir / "여행" / "1일차" / "a.jpg").read_bytes(), b"a")
-        self.assertEqual((self.hub_dir / "여행" / "b.jpg").read_bytes(), b"b")
+        self.assertEqual(read(self.st, "여행/1일차/a.jpg"), b"a")
+        self.assertEqual(read(self.st, "여행/b.jpg"), b"b")
 
     def test_download_resumes_after_cut(self):
         data = os.urandom(p.CHUNK * 6 + 5)
-        self.hub_dir.mkdir(parents=True, exist_ok=True)
-        (self.hub_dir / "영상.mp4").write_bytes(data)
+        seed(self.st, "영상.mp4", data)
         [item] = self.b.cloud_list("nodeA", "")[0]
         job = outbox.Job(id="dl", peer_id="nodeA", kind="cloud_get", remote="영상.mp4", size=item.size,
                          remote_mtime=item.mtime)
@@ -244,9 +253,7 @@ class TwoNodeCloudTests(unittest.TestCase):
         self.assertEqual((self.root / "B" / "recv" / "영상.mp4").read_bytes(), data)
 
     def test_download_restarts_when_hub_file_changed(self):
-        self.hub_dir.mkdir(parents=True, exist_ok=True)
-        target = self.hub_dir / "a.bin"
-        target.write_bytes(os.urandom(p.CHUNK * 3))
+        seed(self.st, "a.bin", os.urandom(p.CHUNK * 3))
         [item] = self.b.cloud_list("nodeA", "")[0]
         job = outbox.Job(id="dl2", peer_id="nodeA", kind="cloud_get", remote="a.bin", size=item.size,
                          remote_mtime=item.mtime)
@@ -258,8 +265,8 @@ class TwoNodeCloudTests(unittest.TestCase):
         with self.assertRaises(Stop):
             self.b.deliver(job, cut)
         new = os.urandom(p.CHUNK * 2)
-        target.write_bytes(new)
-        os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 5_000_000))
+        self.st.delete(["a.bin"], {}, "local")
+        seed(self.st, "a.bin", new, mtime=1_700_000_005_000)
         with self.assertRaises(p.ProtocolError) as ctx:
             self.b.deliver(job)
         self.assertEqual(ctx.exception.code, "cloud_changed")
@@ -287,7 +294,10 @@ class TwoNodeCloudTests(unittest.TestCase):
         src2 = self.root / "chat2.bin"
         src2.write_bytes(b"chat2")
         self.b.send_file("nodeA", src2)
-        self.assertEqual((self.hub_dir / "chat2.bin").read_bytes(), b"chat2")
+        self.assertEqual(read(self.st, "chat2.bin"), b"chat2")
+        self.assertFalse((self.root / "A" / "recv" / "chat2.bin").exists())
+        item = self.a.history.items[-1]
+        self.assertEqual((item["name"], item.get("cloud"), "path" in item), ("chat2.bin", "chat2.bin", False))
 
     def raw_cloud(self, kind: str, **fields) -> dict:
         pairing = self.b.pairings["nodeA"]
@@ -301,7 +311,6 @@ class TwoNodeCloudTests(unittest.TestCase):
 
     def test_traversal_attempts_are_refused(self):
         (self.root / "A" / "outside.txt").write_text("밖", "utf-8")
-        self.hub_dir.mkdir(parents=True, exist_ok=True)
         for kind, fields in (("cloud_list", {"path": ".."}), ("cloud_get", {"path": "../outside.txt"}),
                              ("cloud_del", {"path": "..\\outside.txt"}), ("cloud_mkdir", {"path": "a/../../b"}),
                              ("cloud_list", {"path": "C:/Windows"}), ("cloud_del", {"path": ""}),

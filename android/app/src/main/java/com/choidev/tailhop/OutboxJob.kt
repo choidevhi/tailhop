@@ -30,7 +30,7 @@ data class OutboxJob(
     /** 마지막 실패의 오류 코드(Errors)와, 코드로 나타낼 수 없는 상대의 문장. */
     val error: String? = null,
     val detail: String? = null,
-    /** 24시간 동안 못 보내 포기했는지(실패 이유 문장이 달라진다). */
+    /** 30일(Retry.KEEP_MS) 동안 못 보내 포기했는지(실패 이유 문장이 달라진다). */
     val gaveUp: Boolean = false,
     /** 무엇을 하는 건인지(TEXT·FILE·CLOUD_UP·CLOUD_DOWN). */
     val kind: String = if (isText) TEXT else FILE,
@@ -178,6 +178,12 @@ object Retry {
     const val LATER_MS = 300_000L
 
     /**
+     * 보낼 건을 포기하기까지(2.2.0, 30일 — 사용자가 취소할 때까지 거의 늘 남는다). 받는 쪽의 이어받기 조각 보관(Xfer.KEEP_MS, 24시간)과는
+     * 따로다: 하루가 지나 다시 보내면 상대에 조각이 없어 처음부터 보낼 뿐이다(§11.3 resume_lost 없이 have=0).
+     */
+    const val KEEP_MS = 30L * 24 * 3600 * 1000
+
+    /**
      * 다시 시도하는 실패의 코드: 연결 실패·끊김(응답 전 끊김은 pc_forgot으로 보인다), 이어받기 조각 없음, 해시 불일치,
      * 보내는 중 파일이 바뀜(다음 시도에서 바뀐 것을 보고 새 xfer로 처음부터 보낸다, PC와 같다).
      * 나머지 코드는 상대가 이유를 대고 거부했거나(§10), 이 폰의 파일·페어링 문제다.
@@ -195,12 +201,12 @@ object Retry {
         else -> false
     }
 
-    /** 한 번 실패한 뒤의 상태: 다시 시도할 수 없거나 만든 지 24시간이 지났으면 실패, 아니면 다음 시도 시각을 정한다. */
+    /** 한 번 실패한 뒤의 상태: 다시 시도할 수 없거나 만든 지 30일(KEEP_MS)이 지났으면 실패, 아니면 다음 시도 시각을 정한다. */
     fun afterFailure(job: OutboxJob, now: Long, retryable: Boolean, code: String, detail: String?): OutboxJob {
         val n = job.attempts + 1
         return when {
             !retryable -> job.copy(state = OutboxJob.FAILED, attempts = n, error = code, detail = detail, gaveUp = false)
-            now - job.created >= Xfer.KEEP_MS ->
+            now - job.created >= KEEP_MS ->
                 job.copy(state = OutboxJob.FAILED, attempts = n, error = code, detail = detail, gaveUp = true)
             else -> job.copy(state = OutboxJob.WAITING, attempts = n, nextAt = now + delayMs(n), error = code, detail = detail)
         }
@@ -219,7 +225,64 @@ object Retry {
             detail = null, gaveUp = false)
     }
 
-    /** 사용자가 다시 보내기: 처음 넣은 것처럼(24시간을 새로 센다). 같은 xfer를 써서 상대에 남은 조각을 이어 쓴다. */
+    /** 사용자가 다시 보내기: 처음 넣은 것처럼(30일을 새로 센다). 같은 xfer를 써서 상대에 남은 조각을 이어 쓴다. */
     fun restart(job: OutboxJob, now: Long): OutboxJob = job.copy(state = OutboxJob.WAITING, attempts = 0, nextAt = now,
         created = now, error = null, detail = null, gaveUp = false, restarted = false)
+
+    /**
+     * 기다리기만 하던 건이 30일을 넘김(2.2.0): 보내기 서비스가 쉬는 동안(Idle)에는 시도가 없어 afterFailure가 불리지 않는다 —
+     * 깨우는 작업(OutboxWake)이 대신 포기로 둔다. 실패·보내는 중이거나 아직이면 null.
+     */
+    fun expire(job: OutboxJob, now: Long): OutboxJob? =
+        if (job.state == OutboxJob.WAITING && now - job.created >= KEEP_MS) job.copy(state = OutboxJob.FAILED, gaveUp = true) else null
+}
+
+/**
+ * 상대가 꺼져 있을 때의 기다림(2.2.0). 줄의 맨 앞 건이 연결 실패로 다음 시도까지 PARK_MS 넘게 기다리면 그 줄 일꾼을 끝내고, 모든 줄이
+ * 그렇게 기다리기만 하면 보내기 서비스(dataSync FGS)를 멈춘다. 그동안은 OutboxWake(JobScheduler, 네트워크 연결 + 15분 주기)·상대의 hello·
+ * 네트워크 바뀜이 깨운다. 안드로이드 의존성 없음(JVM 단위 테스트).
+ */
+object Idle {
+    const val PARK_MS = 120_000L
+
+    /** 상대에 닿지 못한 실패(상대 꺼짐·Tailscale 끊김). 응답 뒤 끊김(pc_forgot·disconnected)은 상대가 켜져 있었다 — 여기 넣지 않는다. */
+    private val OFFLINE_CODES = setOf("connect_failed")
+
+    /** 상대가 꺼져 있어 기다리는 건(대화방에 "상대가 꺼져 있음"). */
+    fun offline(j: OutboxJob): Boolean = j.state == OutboxJob.WAITING && j.attempts > 0 && j.error in OFFLINE_CODES
+
+    /** 그 줄의 일꾼을 끝내도 되는지: 맨 앞 건이 상대가 꺼져 다음 시도까지 PARK_MS보다 오래 남았다. */
+    fun parked(head: OutboxJob, now: Long): Boolean = offline(head) && head.nextAt - now > PARK_MS
+
+    /**
+     * 서비스가 멈추면 사라질 임시 읽기 권한에 기대는 파일 건(공유받은 파일: 공유 화면의 권한을 서비스 시작 요청에 실어 왔다, SendService 설명).
+     * 영구 권한(persisted, takePersistableUriPermission)을 가진 것은 괜찮다.
+     */
+    fun needsGrant(j: OutboxJob, persisted: Set<String>): Boolean =
+        !j.failed && (j.kind == OutboxJob.FILE || j.kind == OutboxJob.CLOUD_UP) && j.uri != null && j.uri !in persisted
+
+    /** 서비스를 멈추고 쉬어도 되는지: 남은 건 중 임시 권한에 기대는 것이 없다(있으면 예전처럼 서비스가 기다린다). */
+    fun canSleep(jobs: Collection<OutboxJob>, persisted: Set<String>): Boolean = jobs.none { needsGrant(it, persisted) }
+
+    /** 모든 줄의 맨 앞 건이 parked인지(남은 일꾼 없이 쉴 때). */
+    fun allParked(heads: Collection<OutboxJob>, now: Long): Boolean = heads.isNotEmpty() && heads.all { parked(it, now) }
+
+    /**
+     * 쉬는 서비스를 다시 켤 일이 있는지(앱 열기·네트워크 바뀜·깨우는 작업): 상대가 꺼져 기다리는 것이 아닌 건이 맨 앞에 있다.
+     * 꺼져 기다리는 줄은 상대가 닿을 때(hello가 오가면 SendService.wake)만 켠다 — 닿지 않는 PC 때문에 알림을 띄웠다 끄지 않게.
+     */
+    fun needsService(heads: Collection<OutboxJob>): Boolean = heads.any { !it.failed && !offline(it) }
+}
+
+/** PC마다 hello를 보내는 간격(2.2.0, HelloPing): 마지막으로 보낸 지 gapMs가 지났을 때만. 안드로이드 의존성 없음. */
+class PingGate(private val gapMs: Long) {
+    private val last = HashMap<String, Long>()
+
+    /** 지금 보내도 되면 true(보낸 것으로 적는다). */
+    @Synchronized fun take(pc: String, now: Long): Boolean {
+        val t = last[pc]
+        if (t != null && now - t < gapMs && now >= t) return false
+        last[pc] = now
+        return true
+    }
 }

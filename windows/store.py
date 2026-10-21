@@ -34,9 +34,9 @@ def _blob(data: bytes) -> _Blob:
     return _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
 
 
-def _dpapi(data: bytes, protect: bool) -> bytes:
+def _dpapi(data: bytes, protect: bool, entropy_bytes: bytes = b"TailHop v1") -> bytes:
     crypt32 = ctypes.windll.crypt32
-    entropy = _blob(b"TailHop v1")
+    entropy = _blob(entropy_bytes)
     out = _Blob()
     fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
     # CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -341,6 +341,17 @@ class History:
     def last_for_peer(self, peer_id: str) -> dict | None:
         """한 기기의 마지막 항목(목록 전체를 복사하지 않고 뒤에서 찾는다)."""
         return next((i for i in reversed(self.items) if i.get("peer_id") == peer_id), None)
+
+    def remove(self, item: dict) -> bool:
+        """항목 하나를 기록에서 뺀다(목록에서 받은 바로 그 dict). 있었으면 True."""
+        with self.lock:
+            kept = [i for i in self.items if i is not item]
+            if len(kept) == len(self.items):
+                return False
+            self._drop_files([item])
+            self.items = kept
+            self._save()
+        return True
 
     def clear_peer(self, peer_id: str, fallback: bool = False) -> None:
         with self.lock:

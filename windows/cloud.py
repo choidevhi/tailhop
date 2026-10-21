@@ -72,6 +72,7 @@ class Item:
     locked: bool = False  # 잠긴 폴더(§14). 받는 쪽 목록에서만 채운다
     state: str = ""
     progress: int = 0
+    variants: tuple[str, ...] = ()  # 허브가 만든 딸린 버전(§17.4: thumb·screen·poster·play). 받는 쪽 목록에서만
 
     def to_json(self) -> dict:
         return {"name": self.name, "dir": self.is_dir, "size": self.size, "mtime": self.mtime}

@@ -25,6 +25,7 @@ import cloud  # noqa: E402
 import node as nodemod  # noqa: E402
 import outbox  # noqa: E402
 import resume  # noqa: E402
+from storehelp import open_hub, read, seed  # noqa: E402
 from test_nodes import IP_A, IP_B, USER, FakeTS, wait_for  # noqa: E402
 
 
@@ -101,7 +102,7 @@ class TwoNodeSecurityTests(unittest.TestCase):
         self.b.join_pairing(self.a.begin_pairing())
         self.assertTrue(wait_for(lambda: "nodeB" in self.a.pairings))
         self.hub_dir = self.root / "A" / "cloud"
-        self.a.set_cloud(True, str(self.hub_dir))
+        self.st = open_hub(self.a, self.hub_dir)
 
     def tearDown(self):
         for n in self.nodes:
@@ -118,6 +119,14 @@ class TwoNodeSecurityTests(unittest.TestCase):
         self.nodes.append(n)
         return n, events
 
+    def test_hello_tells_strong_lock(self):
+        """2.2.1: 강한 잠금인 허브만 hello에 "strong"을 보낸다(폰의 "지금 잠그기")."""
+        self.assertNotIn("strong", self.a._hello_reply("nodeB", {}))
+        self.a.settings["store_strong"] = True
+        self.assertIs(self.a._hello_reply("nodeB", {})["strong"], True)
+        self.a.settings["store_strong"] = False
+        self.assertNotIn("strong", self.a._hello_reply("nodeB", {}))
+
     def test_cloud_partial_cannot_be_resumed_as_chat_file_after_cloud_off(self):
         """F3: 클라우드에 올리다 만 조각을 클라우드를 끈 뒤 대화방 파일로 이어 보내도 클라우드 폴더에 쓰지 못한다."""
         src = self.root / "v.bin"
@@ -133,10 +142,11 @@ class TwoNodeSecurityTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.b.deliver(job, cut)
-        self.assertTrue(wait_for(lambda: not self.a.book.busy and self.a.book.have("nodeB", job.xfer, job.size)))
+        self.assertTrue(wait_for(lambda: self.st.partial_have("nodeB", job.xfer, job.size) > 0))
+        disk = b"".join(x.read_bytes() for x in self.hub_dir.rglob("*") if x.is_file())
+        self.assertNotIn(data[1000:1100], disk)  # 받다 만 조각도 암호문뿐
         self.a.set_cloud(False)
-        self.assertEqual(self.a.book.have("nodeB", job.xfer, job.size), 0)  # 끈 클라우드의 조각은 지웠다
-        self.assertEqual(list(self.hub_dir.glob("*.part")), [])
+        self.assertEqual(self.a._hello_reply("nodeB", {"xfer": job.xfer, "size": job.size})["have"], 0)
         # 같은 xfer를 대화방 파일로 offset을 주고 이어 보내 본다
         sock, pairing = self.b._connect("nodeA")
         with sock:
@@ -148,8 +158,30 @@ class TwoNodeSecurityTests(unittest.TestCase):
         if isinstance(ctx.exception, p.ProtocolError):
             self.assertEqual(ctx.exception.code, "resume_lost")
         self.assertTrue(wait_for(lambda: any(k == "rejected" and d.get("code") == "resume_lost" for k, d in self.ev_a)))
-        self.assertEqual([x.name for x in self.hub_dir.iterdir()], [])
         self.assertFalse((self.root / "A" / "recv" / "v.bin").exists())
+
+    def test_cloud_upload_resumes_into_encrypted_store(self):
+        """끊긴 cloud_put은 저장소의 청크 조각에서 이어 받는다(처음부터가 아니라)."""
+        src = self.root / "big.mov"
+        data = os.urandom(p.CHUNK * 6 + 123)
+        src.write_bytes(data)
+        [job] = self.b.outbox.add_cloud_upload("nodeA", [src], "영상")
+        self.b.outbox.cancel(job.id)
+        st = src.stat()
+        job = outbox.Job(id="0123456789abcdea", peer_id="nodeA", kind="cloud_put", path=str(src), remote="영상",
+                         xfer=p.new_xfer(), size=st.st_size, mtime_ns=st.st_mtime_ns)
+
+        def cut(done, total):
+            if done >= p.CHUNK * 4:
+                raise RuntimeError("cut")
+
+        with self.assertRaises(RuntimeError):
+            self.b.deliver(job, cut)
+        self.assertTrue(wait_for(lambda: self.st.partial_have("nodeB", job.xfer, job.size) >= p.CHUNK * 2))
+        seen = []
+        self.b.deliver(job, lambda done, total: seen.append(done))
+        self.assertGreaterEqual(seen[0], p.CHUNK * 2)  # 이어서
+        self.assertEqual(read(self.st, "영상/big.mov"), data)
 
     def test_claim_checks_kind_and_folder(self):
         book = resume.ResumeBook(self.root / "book")
@@ -164,10 +196,8 @@ class TwoNodeSecurityTests(unittest.TestCase):
 
     def test_hub_read_error_after_header_does_not_corrupt_download(self):
         """F4: 허브가 보내는 중 읽기 오류가 나도 받는 쪽 파일에 오류 문장이 섞이지 않는다."""
-        self.hub_dir.mkdir(parents=True, exist_ok=True)
-        target = self.hub_dir / "big.bin"
         data = os.urandom(p.CHUNK * 3)
-        target.write_bytes(data)
+        seed(self.st, "big.bin", data)
         [item] = self.b.cloud_list("nodeA", "")[0]
         real_stream = nodemod.Node._stream_blocks
 

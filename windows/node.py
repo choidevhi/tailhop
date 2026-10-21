@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import socket
@@ -18,14 +19,15 @@ from pathlib import Path
 from typing import Callable
 
 import cloud
+import cloudstore as cs
 import hub as hubmod
+import media
 import outbox
 import protocol as p
 import resume
 import store
 import tsnet
 import updates
-import vault
 from i18n import t
 
 PC_PORT = p.DEFAULT_PC_PORT
@@ -33,9 +35,15 @@ PAIR_WINDOW_SEC = 120
 MAX_CONNECTIONS = 4
 PAUSED_POLL_SEC = 30
 CAPS_TTL_SEC = 600  # 상대 능력(hello) 기억 시간. 실패하면 바로 잊는다
+PRESENCE_SEC = 30  # 꺼진 상대를 기다리는 건이 있을 때만 이 간격으로 Tailscale에 켜졌는지 묻는다
+ANNOUNCE_GAP_SEC = 60  # "켜졌다" hello를 같은 기기에 이보다 자주 보내지 않는다
 IP_REFRESH_SEC = 30  # 모르는 주소가 들어올 때 tailscale status로 주소표를 다시 읽는 최소 간격
 SOCK_BUF = 4 * 1024 * 1024  # 먼 경로(DERP 중계)에서도 창이 막히지 않게 소켓 버퍼를 넉넉히
 DEFAULT_CLOUD_DIR = Path.home() / "TailHop Cloud"
+STORE_IDLE_MIN = 30  # 강한 잠금: 이만큼 쓰지 않으면 잠근다(설정에서 바꿈, 0이면 시간으로는 안 잠금)
+LOCK_POLL_SEC = 5
+STORE_RECHECK_SEC = 5  # 저장소가 열려 있지 않으면 이 간격으로 다시 본다(드라이브를 다시 꽂음 등)
+MOVE_BATCH = 200  # cloud_move 한 번에 보내는 경로 수(§16, 헤더가 한 프레임을 넘지 않게)
 
 
 def _close_gently(conn: socket.socket, limit: int = p.MAX_FRAME + 64) -> None:
@@ -64,7 +72,11 @@ class Node:
         self.history = store.History(self.app_dir)
         self.book = resume.ResumeBook(self.app_dir)
         self.shelf = updates.Shelf(self.app_dir)
-        self._vaults: vault.VaultManager | None = None
+        self._store: cs.Store | None = None
+        self._store_checked = 0.0
+        self._store_lock = threading.Lock()
+        self.media: media.Worker | None = None  # 허브일 때만 만든다(미리보기·재생용 버전)
+        self._store_used = time.monotonic()
         self._open_tokens: dict[tuple[str, str], str] = {}  # (허브 기기, 잠긴 폴더 경로): 그 허브가 준 열쇠
         self.outbox = outbox.Outbox(self.deliver, self.app_dir, on_event)
         self._caps: dict[str, tuple[float, frozenset[str]]] = {}
@@ -85,6 +97,7 @@ class Node:
         self._wake = threading.Event()
         self._state: tuple | None = None
         self._stop = False
+        self._announced: dict[str, float] = {}
 
     # ---------- 설정 ----------
     @property
@@ -109,18 +122,76 @@ class Node:
         """대화방으로 받은 파일도 클라우드 폴더 맨 위에 모은다(켰을 때만)."""
         return self.cloud_on and self.settings.get("cloud_collect") is True
 
-    def cloud_folder(self) -> cloud.CloudFolder | None:
-        return cloud.CloudFolder(self.cloud_dir) if self.cloud_on else None
+    def store(self) -> cs.Store | None:
+        """클라우드가 켜져 있으면 그 폴더의 암호화 저장소(§17). 상태(missing·new·locked·open)는 store.state.
+        열려 있지 않으면 몇 초에 한 번 다시 본다(외장 드라이브를 다시 꽂았을 때 저절로 열리게)."""
+        if not self.cloud_on:
+            return None
+        with self._store_lock:
+            if self._store is None or self._store.root != self.cloud_dir:
+                if self._store is not None:
+                    self._store.close()
+                self._store = self._new_store(self.cloud_dir)
+                self._store_checked = time.monotonic()
+            elif time.monotonic() - self._store_checked > STORE_RECHECK_SEC:
+                self._store_checked = time.monotonic()
+                self._store.refresh()
+                known, serial = self.settings.get("cloud_store_id"), self.settings.get("cloud_volume")
+                moved = cs.find_moved(known, self.cloud_dir, serial if isinstance(serial, int) else None) \
+                    if self._store.state == cs.MISSING and known else None
+                if moved is not None:  # 외장 드라이브의 문자가 바뀌었다: 같은 저장소를 따라간다
+                    self.settings["cloud_dir"] = str(moved)
+                    self.save_settings()
+                    self._store = self._new_store(moved)
+            if self._store.state == cs.OPEN and self.settings.get("cloud_store_id") != self._store.id:
+                self.settings["cloud_store_id"] = self._store.id
+                self.settings["cloud_volume"] = cs.volume_serial(self._store.root)  # 문자가 바뀌어도 같은 드라이브인지
+                self.save_settings()
+            return self._store
+
+    def _new_store(self, root: Path) -> cs.Store:
+        """저장소를 만들고 미리보기 일꾼을 잇는다(열릴 때 밀린 것, 새로 들어온 사진·영상)."""
+        if self.media is None:
+            self.media = media.Worker(lambda: self._store)
+        return cs.Store(root, self.app_dir, on_media=self.media.request, on_open=self.media.backfill,
+                        strong=self.settings.get("store_strong") is True)
 
     def hub(self) -> hubmod.Hub | None:
-        """클라우드가 켜져 있으면 허브(평범한 폴더 + 잠긴 폴더). 보관함 관리자는 폴더마다 하나만 둔다(열쇠·막기 상태)."""
-        folder = self.cloud_folder()
-        if folder is None:
+        """저장소가 열려 있으면 허브. 잠긴 폴더 열쇠가 끝났으면 그 폴더 열쇠를 메모리에서 버린다."""
+        st = self.store()
+        if st is None or st.state != cs.OPEN:
             return None
-        if self._vaults is None or self._vaults.root != folder.root:
-            self._vaults = vault.VaultManager(folder.root)
-        self._vaults.close_expired()
-        return hubmod.Hub(folder, self._vaults)
+        st.close_expired()
+        self._store_used = time.monotonic()  # 강한 잠금의 '쓰지 않은 시간'은 여기서 센다
+        return hubmod.Hub(st)
+
+    def set_strong(self, on: bool, idle_min: int | None = None) -> None:
+        """강한 잠금 켜기·끄기(§18.3). 끄려면 저장소가 열려 있어야 한다(이 PC 사본을 다시 만든다)."""
+        st = self.store()
+        if st is not None:
+            st.set_strong(on)
+        self.settings["store_strong"] = bool(on)
+        if idle_min is not None:
+            self.settings["store_idle_min"] = max(0, int(idle_min))
+        self.save_settings()
+
+    def _lock_loop(self) -> None:
+        """강한 잠금: Windows가 잠기거나 정한 시간 동안 클라우드를 쓰지 않으면 잠근다(5초마다 본다)."""
+        while not self._stop:
+            time.sleep(LOCK_POLL_SEC)
+            st = self._store
+            if st is None or not st.strong or st.state != cs.OPEN:
+                continue
+            idle_min = self.settings.get("store_idle_min", STORE_IDLE_MIN)
+            idle = isinstance(idle_min, int) and idle_min > 0 and time.monotonic() - self._store_used > idle_min * 60
+            if (_session_locked() or idle) and st.lock_now():
+                self.on_event("store_changed", {"peer": "", "state": st.state})
+
+    @property
+    def cloud_state(self) -> str:
+        """화면·hello용: off | missing | new | locked | open."""
+        st = self.store()
+        return "off" if st is None else st.state
 
     def set_cloud(self, on: bool | None = None, folder: str | None = None, collect: bool | None = None) -> None:
         if on is not None:
@@ -132,8 +203,10 @@ class Node:
         self.save_settings()
         if on is False or folder is not None:
             self.book.forget_kind("cloud_put")  # 끈 클라우드·예전 폴더에 이어 쓰지 않게
-        if self.cloud_on:
-            self.cloud_folder().ensure()
+        if on is False and self._store is not None:
+            with self._store_lock:
+                self._store.close()
+                self._store = None
 
     def save_settings(self) -> None:
         with self._settings_lock:
@@ -182,6 +255,8 @@ class Node:
     def start(self) -> None:
         """Tailscale IP를 얻을 때까지 재시도하며 대기 소켓을 연다(수신 중지면 열지 않고 기다린다). 보낼 곳 목록도 돌린다."""
         threading.Thread(target=self._serve_forever, daemon=True).start()
+        threading.Thread(target=self._presence_loop, daemon=True, name="tailhop-presence").start()
+        threading.Thread(target=self._lock_loop, daemon=True, name="tailhop-lock").start()
         self.outbox.start()
 
     def stop(self) -> None:
@@ -234,6 +309,7 @@ class Node:
                     self.port = sock.getsockname()[1]
                     self.listener = sock
                 self._emit_state("listening", {"ip": self.me.ip, "name": self.me.name})
+                threading.Thread(target=self.announce, daemon=True, name="tailhop-announce").start()
                 while True:
                     conn, addr = sock.accept()
                     # 슬롯을 잡기 전에 싼 검사: 페어링된 IP이거나 페어링 창이 열려 있어야 한다.
@@ -256,6 +332,41 @@ class Node:
                     continue  # 수신 중지로 닫았다
                 self._emit_state("offline", {"error": str(exc)})
                 self._wake.wait(5)
+
+    # ---------- 켜졌다 알리기·꺼진 상대 기다리기(2.2.0, §11.5) ----------
+    def announce(self) -> None:
+        """받기를 열었다(앱을 켬·Tailscale이 다시 붙음): 연결된 기기마다 hello를 한 번 보낸다. 받은 쪽은 이 PC로 가려고
+        기다리던 것을 바로 보낸다(받은 쪽 대기열이 깨어난다). 실패는 조용히 넘긴다(상대가 꺼져 있으면 그쪽이 켜질 때 알린다)."""
+        now = time.monotonic()
+        for sid in list(self.pairings):
+            if now - self._announced.get(sid, -ANNOUNCE_GAP_SEC) < ANNOUNCE_GAP_SEC:
+                continue
+            self._announced[sid] = now
+
+            def hello(s=sid) -> None:
+                try:
+                    self._hello(s)
+                except Exception:  # noqa: BLE001 - 꺼져 있거나 예전 기기
+                    return
+                self.outbox.wake(s)  # 닿았다: 그 기기로 가려던 것도 바로
+
+            threading.Thread(target=hello, daemon=True, name="tailhop-announce").start()
+
+    def _presence_loop(self) -> None:
+        """꺼진 상대를 기다리는 건이 있을 때만 30초마다 Tailscale에 그 기기가 켜졌는지 묻고, 켜졌으면 바로 깨운다.
+        기다리는 건이 없으면 아무것도 하지 않는다."""
+        while not self._stop:
+            time.sleep(PRESENCE_SEC)
+            waiting = self.outbox.waiting_offline()
+            if not waiting:
+                continue
+            try:
+                online = self.ts.peer_online()
+            except Exception:  # noqa: BLE001 - Tailscale이 꺼져 있다
+                continue
+            for sid in waiting:
+                if online.get(sid):
+                    self.outbox.wake(sid)
 
     def _admissible(self, ip: str) -> bool:
         if any(x.ip == ip for x in list(self.pairings.values())):
@@ -382,14 +493,12 @@ class Node:
 
         self.outbox.wake(pairing.stable_id)  # 상대가 켜져 있다: 그 기기로 갈 대기를 깨운다
         hub = self.hub()
-        save_dir = self.save_dir
-        if hub is not None and self.cloud_collect:
-            hub.folder.ensure()
-            save_dir = hub.folder.root
+        collect = hubmod.StoreTarget(hub.store, "", cs.MAIN) if hub is not None and self.cloud_collect else None
+        reason = {"off": "cloud_off", "missing": "store_missing"}.get(self.cloud_state, "store_locked")
         try:
-            got = p.receive_message(ch, self.guard, save_dir, progress, peer=pairing.stable_id, book=self.book,
+            got = p.receive_message(ch, self.guard, self.save_dir, progress, peer=pairing.stable_id, book=self.book,
                                     cloud=hubmod.HubAccess(hub, pairing.stable_id) if hub else None,
-                                    cloud_names=save_dir != self.save_dir)
+                                    collect=collect, cloud_off=reason)
         except p.ProtocolError as exc:
             # 인증된 상대에게는 이유를 알려 준다(태그 실패면 전송 자체가 안 됨).
             if exc.code != "auth_failed":
@@ -412,21 +521,28 @@ class Node:
         if kind in p.CLOUD_REQUESTS:
             self._serve_cloud(conn, ch, hub, got.header, pairing)
             return
+        if kind in p.STORE_REQUESTS:
+            self._serve_store(conn, ch, got.header, pairing)
+            return
         if kind == "update_get":
             self._serve_update(conn, ch, got.header)
             return
         if kind == "cloud_put":
-            p.send_reply(ch, True, name=got.path.name)
+            p.send_reply(ch, True, name=got.stored)
             hidden = hub is not None and hub.is_vault_path(str(got.header.get("dir") or ""))
             # 잠긴 폴더에 들어온 이름은 알림(Windows 알림 기록에 남는다)에 쓰지 않는다
             self.on_event("cloud_in", {"peer": pairing.name, "peer_id": pairing.stable_id,
-                                       "name": "" if hidden else got.path.name})
+                                       "name": "" if hidden else got.stored})
             return
         if got.dup:  # 이미 받은 글(응답이 사라져 다시 옴): 기록·알림 없이 받았다고만 답한다
             p.send_reply(ch, True)
             return
         who = {"peer": pairing.name, "peer_id": pairing.stable_id, "peer_kind": pairing.kind}
-        if got.path is None:
+        if got.stored is not None:  # 클라우드에 모았다(암호화 저장소 맨 위, 평문 파일은 없다)
+            item = self.history.add("in", "file", name=got.stored, cloud=got.stored, size=got.header["size"], **who)
+            p.send_reply(ch, True)
+            self.on_event("received", item)
+        elif got.path is None:
             text = got.header["text"]
             item = self.history.add("in", "text", text=text, **who)
             if "xfer" in got.header:
@@ -441,14 +557,23 @@ class Node:
 
     def _hello_reply(self, peer: str, header: dict) -> dict:
         """§11.1 hello 응답: 아는 확장, 클라우드 여부, 이어받기 위치·끝났는지."""
-        reply = {"caps": ["xfer", "cloud", "cloud2", "update"], "cloud": self.cloud_on, "have": 0, "done": False}
+        state = self.cloud_state
+        reply = {"caps": ["xfer", "cloud", "cloud2", "update", "move", "move2", "store", "rename", "store_unlock"],
+                 "cloud": state == cs.OPEN,
+                 "have": 0, "done": False}
+        if state != "off":
+            reply["store"] = state  # §17: 켜져 있지만 열리지 않음(missing·new·locked)을 앱이 알 수 있게
+            if self.settings.get("store_strong") is True:
+                reply["strong"] = True  # §18.3: 강한 잠금(폰에서 "지금 잠그기"를 보인다)
         offered = self.shelf.advert()
         if offered:
             reply["updates"] = offered
         xfer, size = header.get("xfer"), header.get("size")
         if resume.valid_xfer(xfer) and isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             reply["done"] = self.book.is_done(peer, xfer)
-            reply["have"] = 0 if reply["done"] else self.book.have(peer, xfer, size)
+            st = self._store if state == cs.OPEN else None
+            have = max(self.book.have(peer, xfer, size), st.partial_have(peer, xfer, size) if st else 0)
+            reply["have"] = 0 if reply["done"] else have
         return reply
 
     def _serve_cloud(self, conn: socket.socket, ch: p.Channel, hub: hubmod.Hub, header: dict,
@@ -483,9 +608,22 @@ class Node:
                 ch.send(json.dumps({"ok": True, "mime": "image/jpeg", "w": w, "h": h}).encode("utf-8"), last=False)
                 ch.send(data, last=True)
                 return
+            if kind == "cloud_rename":
+                renamed, failed = hub.rename(_rename_request(header), header, peer)
+                p.send_reply(ch, True, renamed=renamed, failed=failed)
+                if renamed:
+                    self.on_event("cloud_changed", {"peer": pairing.name, "path": ""})
+                return
+            if kind == "cloud_move":
+                sources, dest = _move_request(header)
+                moved, failed = hub.move(sources, dest, header, peer)
+                p.send_reply(ch, True, moved=moved, failed=failed)
+                if moved:
+                    self.on_event("cloud_changed", {"peer": pairing.name, "path": cloud.join_path(dest)})
+                return
             if kind == "cloud_open":
                 token = hub.open(parts, header, peer)
-                p.send_reply(ch, True, token=token, ttl=vault.TOKEN_TTL)
+                p.send_reply(ch, True, token=token, ttl=cs.TOKEN_TTL)
                 return
             if kind == "cloud_lock":
                 p.send_reply(ch, True, recovery=hub.lock(parts, header.get("pin")))
@@ -508,6 +646,24 @@ class Node:
             self._refuse(conn, ch, exc)
         except OSError:
             self._refuse(conn, ch, p.ProtocolError("cloud_denied"))
+
+    def _serve_store(self, conn: socket.socket, ch: p.Channel, header: dict, pairing: store.Pairing) -> None:
+        """§18.3 store_unlock·store_lock: 강한 잠금인 저장소를 다른 기기에서 열거나 잠근다."""
+        st = self.store()
+        try:
+            if st is None:
+                raise p.ProtocolError("cloud_off")
+            if header["type"] == "store_unlock":
+                st.unlock_remote(header.get("password"), pairing.stable_id)
+                self._store_used = time.monotonic()
+                self.on_event("store_changed", {"peer": pairing.name, "state": st.state})
+            elif not st.lock_now():
+                raise p.ProtocolError("store_state")
+            else:
+                self.on_event("store_changed", {"peer": pairing.name, "state": st.state})
+            p.send_reply(ch, True)
+        except p.ProtocolError as exc:
+            self._refuse(conn, ch, exc)
 
     def _serve_update(self, conn: socket.socket, ch: p.Channel, header: dict) -> None:
         """§13 update_get: 머리 {"ok","version","size","sha256"}(last=0) 뒤에 파일 전체(마지막 데이터 프레임 last=1)."""
@@ -544,19 +700,23 @@ class Node:
         잠긴 폴더 안이면 허브가 복호화해서 보낸다(§14)."""
         if not parts:
             raise p.ProtocolError("bad_path")
-        size, mtime, read = hub.open_file(parts, header, peer)
+        role = header.get("variant")
+        if role is not None and role not in hubmod.VARIANTS:
+            raise p.ProtocolError("bad_header")
+        size, mtime, read = hub.open_file(parts, header, peer, role)
         # 바뀌었는지 먼저 본다: 파일이 줄어 offset이 넘친 경우도 cloud_changed(처음부터 다시)로 답한다.
         want_size, want_mtime = header.get("size"), header.get("mtime")
         if (want_size is not None and want_size != size) or (want_mtime is not None and want_mtime != mtime):
             raise p.ProtocolError("cloud_changed")
-        offset = header.get("offset", 0)
-        if not _uint(offset) or offset > size:
+        offset, length = header.get("offset", 0), header.get("length")
+        if not _uint(offset) or offset > size or (length is not None and not _uint(length)):
             raise p.ProtocolError("bad_header")
-        blocks = read(offset)  # 열기 실패(사용 중 등)는 ok를 보내기 전에 거부로
+        left = size - offset if length is None else min(length, size - offset)
+        blocks = read(offset, left)  # 열기 실패(사용 중 등)는 ok를 보내기 전에 거부로
         first = next(blocks, b"")
         ch.send(json.dumps({"ok": True, "size": size, "mtime": mtime}).encode("utf-8"), last=False)
         try:
-            Node._stream_blocks(ch, first, blocks, size - offset)
+            Node._stream_blocks(ch, first, blocks, left)
         except Exception:  # noqa: BLE001 - ok를 보낸 뒤에는 거부 응답을 보내지 않고 끊기만 한다(받는 쪽이 데이터로 읽는다)
             return
 
@@ -851,6 +1011,16 @@ class Node:
                 return token
         return None
 
+    def retarget_tokens(self, stable_id: str, moved: list[dict], dest: str) -> None:
+        """옮긴 잠긴 폴더(또는 그 위 폴더)의 열쇠가 새 자리를 따라가게 한다."""
+        for item in moved:
+            old = item["path"]
+            new = f"{dest}/{item['name']}" if dest else item["name"]
+            for (sid, mount), token in list(self._open_tokens.items()):
+                if sid == stable_id and (mount == old or mount.startswith(old + "/")):
+                    del self._open_tokens[(sid, mount)]
+                    self._open_tokens[(sid, new + mount[len(old):])] = token
+
     def _with_token(self, stable_id: str, path: str, fields: dict) -> dict:
         token = self.token_for(stable_id, path)
         return {**fields, "token": token} if token else fields
@@ -929,10 +1099,121 @@ class Node:
             if not _valid_item(raw):
                 continue
             state, progress = raw.get("state"), raw.get("progress")
+            roles = raw.get("variants")
+            roles = tuple(x for x in roles if x in hubmod.VARIANTS) if isinstance(roles, list) else ()
             items.append(cloud.Item(raw["name"], raw["dir"], raw["size"], raw["mtime"], raw.get("locked") is True,
-                                    state if isinstance(state, str) else "", progress if _uint(progress) else 0))
+                                    state if isinstance(state, str) else "", progress if _uint(progress) else 0,
+                                    roles))
         nxt = reply.get("next")
         return items, nxt if _uint(nxt) and nxt > cursor else None
+
+    def cloud_read(self, stable_id: str, path: str, limit: int, offset: int = 0, length: int | None = None,
+                   variant: str | None = None) -> bytes:
+        """허브의 파일(또는 딸린 버전)을 메모리로 받는다(라이트박스·스트리밍). length를 주면 그 부분만(§17.3).
+        받을 크기가 limit보다 크면 받지 않고 too_large."""
+        sock, pairing = self._connect(stable_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            want = {"path": path, "offset": offset}
+            if length is not None:
+                want["length"] = length
+            if variant is not None:
+                want["variant"] = variant
+            fields = self._with_token(stable_id, path, want)
+            ch.send(json.dumps(p.new_header("cloud_get", self.me.name, **fields)).encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            raw, last = ch.recv()
+            if last:
+                p.parse_reply(raw)
+                raise p.ProtocolError("bad_reply")
+            head = p.parse_reply(raw, last_ok=False)
+            size = head.get("size")
+            if not _uint(size) or size < offset:
+                raise p.ProtocolError("bad_reply")
+            size = size - offset if length is None else min(length, size - offset)  # 이번에 올 크기
+            if size > limit:
+                raise p.ProtocolError("too_large")  # 연결을 닫으면 허브는 보내기를 멈춘다
+            out = bytearray()
+            empty = 0
+            while True:
+                data, last = ch.recv()
+                empty = empty + 1 if not data and not last else 0
+                if empty > 16:  # 진척 없이 빈 프레임만 온다
+                    raise p.ProtocolError("bad_reply")
+                out += data
+                if len(out) > size:
+                    raise p.ProtocolError("bad_reply")
+                if last:
+                    break
+            if len(out) != size:
+                raise p.ProtocolError("file_incomplete")
+            return bytes(out)
+
+    def cloud_size(self, stable_id: str, path: str, variant: str | None = None) -> int:
+        """허브의 파일(또는 딸린 버전) 크기만 묻는다(cloud_get length=0)."""
+        sock, pairing = self._connect(stable_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            want = {"path": path, "offset": 0, "length": 0}
+            if variant is not None:
+                want["variant"] = variant
+            ch.send(json.dumps(p.new_header("cloud_get", self.me.name, **self._with_token(stable_id, path, want)))
+                    .encode("utf-8"), last=False)
+            ch.send(b"", last=True)
+            raw, last = ch.recv()
+            if last:
+                p.parse_reply(raw)
+                raise p.ProtocolError("bad_reply")
+            size = p.parse_reply(raw, last_ok=False).get("size")
+            if not _uint(size):
+                raise p.ProtocolError("bad_reply")
+            return size
+
+    def cloud_rename(self, stable_id: str, items: list[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
+        """§18.2: [(경로, 새 이름)]을 200개씩. 잠긴 폴더 안이면 그 열쇠들을 tokens로."""
+        renamed, failed = [], []
+        for start in range(0, len(items), MOVE_BATCH):
+            batch = items[start:start + MOVE_BATCH]
+            tokens = sorted({self.token_for(stable_id, path) for path, _ in batch} - {None})
+            fields = {"items": [{"path": path, "name": name} for path, name in batch]}
+            if tokens:
+                fields["token"], fields["tokens"] = tokens[0], tokens[:16]
+            reply = self._cloud_request(stable_id, "cloud_rename", **fields)
+            asked = {path for path, _ in batch}
+            renamed += [x for x in reply.get("renamed") or [] if isinstance(x, dict) and x.get("path") in asked
+                        and isinstance(x.get("name"), str)]
+            failed += [x for x in reply.get("failed") or [] if isinstance(x, dict) and x.get("path") in asked
+                       and isinstance(x.get("code"), str)]
+        for item in renamed:  # 이름을 바꾼 잠긴 폴더의 열쇠도 새 이름을 따라가게
+            parent = item["path"].rpartition("/")[0]
+            self.retarget_tokens(stable_id, [item], parent)
+        return renamed, failed
+
+    def store_unlock(self, stable_id: str, password: str) -> None:
+        self._cloud_request(stable_id, "store_unlock", password=password)
+        self._caps.pop(stable_id, None)
+
+    def store_lock(self, stable_id: str) -> None:
+        self._cloud_request(stable_id, "store_lock")
+        self._caps.pop(stable_id, None)
+
+    def cloud_move(self, stable_id: str, paths: list[str], dest: str) -> tuple[list[dict], list[dict]]:
+        """§16: 허브 안에서 여러 항목을 dest 폴더로 옮긴다. 200개씩 나눠 묻고 (옮긴 것, 안 된 것)을 합친다."""
+        cloud.parse_path(dest)
+        moved, failed = [], []
+        for start in range(0, len(paths), MOVE_BATCH):
+            batch = paths[start:start + MOVE_BATCH]
+            fields = self._with_token(stable_id, dest, {"paths": batch, "dest": dest})
+            tokens = {self.token_for(stable_id, x) for x in batch} - {None, fields.get("token")}
+            if tokens:  # 출발이 잠긴 폴더 안이면 그 열쇠들도(§16, 잠긴 폴더 사이로 옮기기)
+                fields["tokens"] = sorted(tokens)[:16]
+            reply = self._cloud_request(stable_id, "cloud_move", **fields)
+            moved += [x for x in reply.get("moved") or [] if isinstance(x, dict) and x.get("path") in batch
+                      and isinstance(x.get("name"), str)]
+            failed += [x for x in reply.get("failed") or [] if isinstance(x, dict) and x.get("path") in batch
+                       and isinstance(x.get("code"), str)]
+        self.retarget_tokens(stable_id, moved, dest)
+        return moved, failed
 
     def cloud_mkdir(self, stable_id: str, path: str) -> None:
         cloud.parse_path(path)
@@ -1055,6 +1336,49 @@ def _valid_item(raw: object) -> bool:
     except p.ProtocolError:
         return False
     return True
+
+
+def _move_request(header: dict) -> tuple[list[list[str]], list[str]]:
+    """§16 cloud_move 헤더 → (옮길 경로 조각들, 옮겨 갈 폴더 조각). 같은 경로는 한 번만. 틀리면 bad_path."""
+    paths, dest = header.get("paths"), header.get("dest")
+    if not isinstance(paths, list) or not 1 <= len(paths) <= MOVE_BATCH or not isinstance(dest, str):
+        raise p.ProtocolError("bad_path")
+    seen: dict[str, list[str]] = {}
+    for raw in paths:
+        parts = cloud.parse_path(raw)
+        if not parts:
+            raise p.ProtocolError("bad_path")
+        seen.setdefault(cloud.join_path(parts), parts)
+    return list(seen.values()), cloud.parse_path(dest)
+
+
+def _session_locked() -> bool:
+    """Windows 잠금 화면인지(입력 데스크톱을 열 수 없으면 잠겨 있다)."""
+    try:
+        user32 = ctypes.windll.user32
+        desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+        if not desk:
+            return True
+        user32.CloseDesktop(desk)
+    except (AttributeError, OSError):
+        pass
+    return False
+
+
+def _rename_request(header: dict) -> list[tuple[list[str], str]]:
+    """§18.2 cloud_rename 헤더 → [(경로 조각, 새 이름)]. 모양이 틀리면 요청 전체를 bad_path로."""
+    items = header.get("items")
+    if not isinstance(items, list) or not 1 <= len(items) <= MOVE_BATCH:
+        raise p.ProtocolError("bad_path")
+    out = []
+    for raw in items:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or len(raw["name"]) > 255:
+            raise p.ProtocolError("bad_path")
+        parts = cloud.parse_path(raw.get("path"))
+        if not parts:
+            raise p.ProtocolError("bad_path")
+        out.append((parts, raw["name"]))
+    return out
 
 
 def _valid_rel(value: object) -> bool:

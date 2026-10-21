@@ -53,6 +53,10 @@ ANDROID = {
     "ic_file_text": "file-text",
     "ic_archive": "archive",
     "ic_close": "x",
+    "ic_trash": "trash-2",
+    "ic_folder_input": "folder-input",
+    "ic_check_all": "check-check",
+    "ic_external": "external-link",
 }
 HEAD = '<?xml version="1.0" encoding="utf-8"?>\n<!-- build_icons.py가 만든 파일(원본: windows/assets/icons/{src}.svg, Lucide ISC). 직접 고치지 않는다. -->\n'
 

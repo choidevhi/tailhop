@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 클라우드·대화방 모아 보기의 격자 칸(2.0.0): 정사각 미리보기(없으면 종류 아이콘) + 이름·크기. 잠긴 폴더·영상은 작은 표시 -->
+<!-- 클라우드·대화방 모아 보기의 격자 칸(2.0.0): 정사각 미리보기(없으면 종류 아이콘) + 이름·크기. 잠긴 폴더·영상은 작은 표시.
+     2.1.0: 미리보기는 자르지 않고 전체가 보이게(fitCenter). 다중 선택이면 고른 표시(덮개·체크 원)를 겹친다 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="wrap_content"
     android:orientation="vertical" android:padding="6dp"
@@ -7,13 +8,18 @@
     <com.choidev.tailhop.SquareFrame android:layout_width="match_parent" android:layout_height="wrap_content"
         android:background="@drawable/bg_thumb">
         <ImageView android:id="@+id/thumb" android:layout_width="match_parent" android:layout_height="match_parent"
-            android:scaleType="centerCrop" android:importantForAccessibility="no" />
+            android:scaleType="fitCenter" android:importantForAccessibility="no" />
         <ImageView android:id="@+id/icon" android:layout_width="36dp" android:layout_height="36dp"
             android:layout_gravity="center" android:tint="@color/label" android:importantForAccessibility="no" />
         <ImageView android:id="@+id/badge" android:layout_width="22dp" android:layout_height="22dp"
             android:layout_gravity="top|end" android:layout_margin="6dp" android:padding="4dp"
             android:background="@drawable/bg_badge" android:tint="@color/onAccent" android:visibility="gone"
             android:importantForAccessibility="no" />
+        <View android:id="@+id/selDim" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:background="@drawable/bg_sel_dim" android:visibility="gone" />
+        <ImageView android:id="@+id/check" android:layout_width="22dp" android:layout_height="22dp"
+            android:layout_gravity="top|start" android:layout_margin="6dp" android:src="@drawable/sel_off_photo"
+            android:visibility="gone" android:importantForAccessibility="no" />
     </com.choidev.tailhop.SquareFrame>
     <TextView android:id="@+id/name" android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_marginTop="6dp" android:paddingStart="2dp" android:paddingEnd="2dp" android:textSize="13sp"

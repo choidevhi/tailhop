@@ -189,8 +189,10 @@ class XferTest {
         assertEquals(listOf(3_000L, 10_000L, 30_000L, 60_000L, 120_000L, 300_000L, 300_000L), waits)
         assertEquals(7, j.attempts)
         assertEquals("connect_failed", j.error)
-        // 24시간이 지나면 실패(포기)
-        val late = Retry.afterFailure(j, t0 + Xfer.KEEP_MS, true, "connect_failed", null)
+        // 하루가 지나도 기다린다(2.2.0, 받는 쪽 조각 보관 24시간과 따로)
+        assertEquals(OutboxJob.WAITING, Retry.afterFailure(j, t0 + Xfer.KEEP_MS + 1, true, "connect_failed", null).state)
+        // 30일이 지나면 실패(포기)
+        val late = Retry.afterFailure(j, t0 + Retry.KEEP_MS, true, "connect_failed", null)
         assertEquals(OutboxJob.FAILED, late.state)
         assertTrue(late.gaveUp)
         // 다시 시도하지 않는 실패는 바로
@@ -198,7 +200,7 @@ class XferTest {
         assertEquals(OutboxJob.FAILED, refused.state)
         assertFalse(refused.gaveUp)
         assertEquals("싫어요", refused.detail)
-        // 사용자가 다시 보내기: 24시간을 새로 세고 같은 xfer
+        // 사용자가 다시 보내기: 30일을 새로 세고 같은 xfer
         val again = Retry.restart(late, t0 + Xfer.KEEP_MS + 5)
         assertEquals(OutboxJob.WAITING, again.state)
         assertEquals(0, again.attempts)

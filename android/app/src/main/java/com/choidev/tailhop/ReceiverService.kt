@@ -87,6 +87,8 @@ class ReceiverService : Service() {
             timer = Executors.newSingleThreadScheduledExecutor()
             watchNetwork()
             thread = Thread({ loop() }, "tailhop-accept").also { it.start() }
+            // 받기를 시작함: PC들에 hello 한 번(2.2.0) — PC의 보낼 곳 목록이 이 폰으로 바로 보내고, 닿은 PC로 기다리던 건도 깨운다.
+            HelloPing.soon(this)
         }
         return START_STICKY
     }
@@ -135,7 +137,13 @@ class ReceiverService : Service() {
         try { cm.registerNetworkCallback(req, cb); netCallback = cb } catch (e: Exception) { }
     }
 
+    /**
+     * 네트워크가 바뀜(Tailscale이 붙음 포함): 주소를 다시 보고, PC들에 hello(몇 초 모아 한 번, PC마다 60초 간격, HelloPing),
+     * 쉬던 보내기 중 켤 일이 있으면 켠다(상대가 꺼져 기다리던 줄은 hello가 닿으면 HelloPing이 깨운다).
+     */
     private fun netChanged() {
+        HelloPing.soon(this)
+        SendService.resumeIfNeeded(this)
         recheckAddress()
         try { timer?.schedule({ recheckAddress() }, 3, TimeUnit.SECONDS) } catch (e: Exception) { }
     }

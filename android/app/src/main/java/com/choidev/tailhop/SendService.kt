@@ -17,8 +17,12 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 보내기 서비스(1.7.0, docs/PROTOCOL.md §11.3). Outbox의 건을 PC마다 차례로 보내고(서로 다른 PC는 동시에),
- * 실패하면 3초·10초·30초·1분·2분, 그 뒤 5분마다 다시 보내고 24시간이 지나면 실패로 둔다.
+ * 실패하면 3초·10초·30초·1분·2분, 그 뒤 5분마다 다시 보내고 30일(Retry.KEEP_MS)이 지나면 실패로 둔다.
  * 보낼 건이 남아 있는 동안만 포그라운드로 돌고, 다 보내면(남은 건이 실패뿐이면) 멈춘다.
+ *
+ * 2.2.0 쉬기(Idle): 상대 PC가 꺼져 있어(연결 실패) 다음 시도까지 2분 넘게 기다려야 하는 줄은 일꾼을 끝내고, 모든 줄이 그렇게 기다리기만
+ * 하면 서비스를 멈추고 OutboxWake(JobScheduler)를 걸어 둔다. 상대가 보낸 메시지·hello(ReceiverService → wake), 이 폰의 hello가
+ * 닿음(HelloPing), 그 작업이 다시 깨운다. 단 공유받은 파일(임시 권한, 아래)이 남아 있으면 예전처럼 서비스가 기다린다.
  *
  * 공유받은 파일의 읽기 권한: 공유 화면(ShareActivity)이 받은 임시 권한은 그 화면이 끝나면 사라진다. 그래서 화면이
  * 이 서비스를 시작할 때 URI들을 ClipData에 넣고 FLAG_GRANT_READ_URI_PERMISSION을 붙여 권한을 서비스의 시작 요청에 옮긴다.
@@ -34,6 +38,8 @@ class SendService : Service() {
     private val caps = ConcurrentHashMap<String, Set<String>>()
     private val signal = Object()
     @Volatile private var running = false
+    /** 모든 줄이 기다리기만 해 멈추는 중(Idle). 깨우기는 이 서비스 대신 새로 시작한다. */
+    @Volatile private var sleeping = false
     @Volatile private var lastStartId = 0
     private var watchdog: Thread? = null
     @Volatile private var lastNotify = 0L
@@ -60,6 +66,7 @@ class SendService : Service() {
             // 백그라운드 시작 제한·dataSync 하루 시간 초과 등. 보낼 건은 Outbox에 남아 앱을 열면 이어서 보낸다.
             stopSelf(); return START_NOT_STICKY
         }
+        sleeping = false
         if (!running) {
             running = true
             instance = this
@@ -109,6 +116,8 @@ class SendService : Service() {
                 Outbox.head(this, lane) ?: run { workers.remove(lane); null }
             } ?: break
             if (job.nextAt > System.currentTimeMillis()) {
+                // 상대가 꺼져 오래 기다릴 줄: 모든 줄이 그러면 서비스를 멈춘다(maybeSleep). 멈추면 이 일꾼도 끝난다(running).
+                if (Idle.parked(job, System.currentTimeMillis())) ui.post { maybeSleep() }
                 // 잠금 안에서 다시 읽고 잔다: 그 사이 깨우기(wake·취소·새 건)가 와도 놓치지 않게.
                 synchronized(signal) {
                     val wait = (Outbox.head(this, lane)?.nextAt ?: 0L) - System.currentTimeMillis()
@@ -122,12 +131,28 @@ class SendService : Service() {
         ui.post { maybeStop() }
     }
 
-    /** 보낼 건이 없으면 멈춘다. 그 사이 새 시작 요청이 왔으면(start id가 바뀜) 멈추지 않는다. */
+    /** 보낼 건이 없으면 멈춘다(깨우는 작업도 끈다). 그 사이 새 시작 요청이 왔으면(start id가 바뀜) 멈추지 않는다. */
     private fun maybeStop() {
         if (!running || Outbox.hasActive(this)) { refresh(); return }
         synchronized(workers) { if (workers.isNotEmpty()) return }
+        OutboxWake.cancel(this)
         stopSelfResult(lastStartId)
     }
+
+    /**
+     * 쉬기(Idle): 모든 줄의 맨 앞이 상대가 꺼져 2분 넘게 기다리는 중이고 임시 권한에 기대는 건이 없으면, 깨우는 작업을 걸고 멈춘다
+     * (기다리던 일꾼들은 running이 꺼지며 끝난다). 메인 스레드에서만. 멈추지 못했으면(새 시작 요청) 그대로 돈다.
+     */
+    private fun maybeSleep() {
+        if (!running || sleeping || !Outbox.hasActive(this)) return
+        if (!Idle.allParked(Outbox.heads(this), System.currentTimeMillis()) || !sleepAllowed()) return
+        OutboxWake.schedule(this)
+        sleeping = true
+        if (!stopSelfResult(lastStartId)) sleeping = false
+    }
+
+    /** 서비스를 멈춰도 되는지: 남은 건 중 이 서비스의 시작 요청에 묶인 임시 읽기 권한에 기대는 것이 없다(Idle.canSleep). */
+    private fun sleepAllowed(): Boolean = Idle.canSleep(Outbox.all(this), Outbox.persistedUris(this))
 
     private fun attempt(job: OutboxJob) {
         val token = SendToken()
@@ -170,10 +195,7 @@ class SendService : Service() {
             }
         } ?: return
         dropPart?.let { PartFiles.delete(this, it) }
-        if (j.failed) {
-            val pc = Store.get(this, j.dev)?.pcName ?: j.dev
-            Notifs.sendFailed(this, j.dev, pc, what(j), reason(this, j), j.isCloud)
-        }
+        if (j.failed) notifyFailed(this, j)
     }
 
     /** 상대의 능력. 모르면 hello로 묻는다(파일은 어차피 매번 묻는다). */
@@ -368,18 +390,30 @@ class SendService : Service() {
             } catch (e: Exception) { false }
         }
 
-        /** 보낼 건이 있는데 서비스가 멈춰 있으면 시작한다(앱 화면을 열 때). */
+        /** 지금 깨워 쓸 수 있는 서비스(멈추는 중이면 null — 새로 시작한다). */
+        private val live: SendService? get() = instance?.takeIf { !it.sleeping }
+
+        /**
+         * 보낼 건이 있는데 서비스가 멈춰 있으면 시작한다(앱 화면을 열 때·네트워크가 바뀔 때·깨우는 작업). 상대가 꺼져 기다리기만 하는 줄뿐이면
+         * 켜지 않는다(Idle.needsService) — 그 줄은 상대에 닿을 때(wake) 켠다.
+         */
         fun resumeIfNeeded(ctx: Context) {
-            if (instance == null && Outbox.hasActive(ctx)) start(ctx)
+            if (live == null && Idle.needsService(Outbox.heads(ctx))) start(ctx.applicationContext)
         }
 
-        /** 상대 PC가 켜졌다(그 PC에서 메시지가 옴): 그 PC로 보낼 대기 건을 바로 보낸다. 실패해도 조용히. */
+        /** 상대 PC가 켜졌다(그 PC에서 메시지·hello가 옴, 이 폰의 hello가 닿음): 그 PC로 보낼 대기 건을 바로 보낸다. 실패해도 조용히. */
         fun wake(ctx: Context, dev: String) {
             try {
                 if (!Outbox.wake(ctx, dev)) return
-                val s = instance
+                val s = live
                 if (s != null) s.ensureWorkers() else start(ctx.applicationContext)
             } catch (e: Exception) { }
+        }
+
+        /** 끝내 보내지 못한 건의 알림(탭하면 그 PC의 대화방·클라우드 화면). */
+        fun notifyFailed(ctx: Context, j: OutboxJob) {
+            val pc = Store.get(ctx, j.dev)?.pcName ?: j.dev
+            Notifs.sendFailed(ctx, j.dev, pc, what(ctx, j), reason(ctx, j), j.isCloud)
         }
 
         /** 화면·알림에서 취소한 건: 보내는 중이면 연결을 끊는다. 클라우드에서 받다 만 조각도 지운다. */
@@ -387,12 +421,14 @@ class SendService : Service() {
             val gone = Outbox.remove(ctx, id)
             instance?.tokens?.get(id)?.cancel()
             gone?.let { discard(ctx, listOf(it)) }
+            OutboxWake.sync(ctx)
         }
 
         fun cancelAll(ctx: Context) {
             val gone = Outbox.cancelActive(ctx)
             instance?.let { s -> gone.forEach { s.tokens[it.id]?.cancel() } }
             discard(ctx, gone)
+            OutboxWake.sync(ctx)
         }
 
         /** 연결 해제: 그 PC로 보낼 건을 지우고 보내는 중이면 끊는다. */
@@ -400,6 +436,7 @@ class SendService : Service() {
             val gone = Outbox.removeDevice(ctx, dev)
             instance?.let { s -> gone.forEach { s.tokens[it.id]?.cancel() } }
             discard(ctx, gone)
+            OutboxWake.sync(ctx)
         }
 
         /**
@@ -418,7 +455,7 @@ class SendService : Service() {
 
         fun retry(ctx: Context, id: String) {
             Outbox.retry(ctx, id) ?: return
-            val s = instance
+            val s = live
             if (s != null) s.ensureWorkers() else start(ctx)
         }
 

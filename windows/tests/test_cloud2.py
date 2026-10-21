@@ -20,9 +20,10 @@ store.APP_DIR = Path(_GUARD.name) / "appdata-guard"
 store.DEFAULT_SAVE_DIR = Path(_GUARD.name) / "save-guard"
 
 import cloud  # noqa: E402
+import cloudstore as cs  # noqa: E402
 import node as nodemod  # noqa: E402
 import outbox  # noqa: E402
-import vault  # noqa: E402
+from storehelp import names, open_hub, read, seed  # noqa: E402
 from test_nodes import IP_A, IP_B, IP_C, USER, FakeTS, wait_for  # noqa: E402
 
 VECTORS = json.loads((Path(__file__).resolve().parents[2] / "docs" / "test_vectors.json").read_text("utf-8"))
@@ -62,14 +63,12 @@ class Cloud2Tests(unittest.TestCase):
             other.join_pairing(self.a.begin_pairing())
         self.assertTrue(wait_for(lambda: {"nodeB", "nodeC"} <= set(self.a.pairings)))
         self.hub_dir = self.root / "A" / "cloud"
-        self.a.set_cloud(True, str(self.hub_dir))
-        (self.hub_dir / "사진" / "여름").mkdir(parents=True)
-        (self.hub_dir / "사진" / "여름" / "바다.png").write_bytes(png_bytes())
-        (self.hub_dir / "사진" / "메모.txt").write_text("메모", "utf-8")
-        (self.hub_dir / "개인").mkdir()
+        self.st = open_hub(self.a, self.hub_dir)
+        seed(self.st, "사진/여름/바다.png", png_bytes())
+        seed(self.st, "사진/메모.txt", "메모".encode())
         self.secret = png_bytes(None)
-        (self.hub_dir / "개인" / "얼굴.png").write_bytes(self.secret)
-        (self.hub_dir / "개인" / "일기.txt").write_text("PLAINTEXT-DIARY", "utf-8")
+        seed(self.st, "개인/얼굴.png", self.secret)
+        seed(self.st, "개인/일기.txt", b"PLAINTEXT-DIARY")
         self._backoff = outbox.BACKOFF
         outbox.BACKOFF = (0.05,) * 5
 
@@ -121,7 +120,6 @@ class Cloud2Tests(unittest.TestCase):
         disk = b"".join(x.read_bytes() for x in self.hub_dir.rglob("*") if x.is_file())
         self.assertNotIn(b"PLAINTEXT-DIARY", disk)
         self.assertNotIn(self.secret[100:200], disk)  # 사진도 암호문만
-        self.assertFalse((self.hub_dir / "개인").exists())
         [locked] = [x for x in self.b.cloud_list("nodeA", "")[0] if x.locked]
         self.assertEqual(locked.name, "개인")
 
@@ -167,12 +165,12 @@ class Cloud2Tests(unittest.TestCase):
         with self.assertRaises(p.ProtocolError):
             self.b.cloud_open("nodeA", "개인", pin="432100")
         self.b.cloud_unlock("nodeA", "개인", "999999")
-        self.assertTrue(wait_for(lambda: (self.hub_dir / "개인" / "일기.txt").exists()
-                                 and not any(x.locked for x in self.b.cloud_list("nodeA", "")[0]), 20))
-        self.assertEqual((self.hub_dir / "개인" / "얼굴.png").read_bytes(), self.secret)
+        self.assertFalse(any(x.locked for x in self.b.cloud_list("nodeA", "")[0]))  # 바로 끝난다
+        self.assertEqual(read(self.st, "개인/얼굴.png"), self.secret)
+        self.assertEqual(sorted(names(self.st, "개인")), ["얼굴.png", "일기.txt"])
 
     def test_cannot_delete_folder_holding_vault_or_lock_twice(self):
-        (self.hub_dir / "상위" / "안").mkdir(parents=True)
+        self.st.mkdir(["상위", "안"], {}, "local")
         self.b.cloud_lock("nodeA", "상위/안", "432100")
         self.assertTrue(wait_for(lambda: any(x.locked for x in self.b.cloud_list("nodeA", "상위")[0]), 20))
         for call in (lambda: self.b.cloud_delete("nodeA", "상위"), lambda: self.b.cloud_lock("nodeA", "상위", "432100"),
@@ -183,7 +181,7 @@ class Cloud2Tests(unittest.TestCase):
 
     def test_wait_reply_carries_retry(self):
         self.lock_private()
-        for _ in range(vault.MAX_FAILS):
+        for _ in range(cs.MAX_FAILS):
             with self.assertRaises(p.ProtocolError):
                 self.b.cloud_open("nodeA", "개인", pin="000000")
         sock, pairing = self.b._connect("nodeA")

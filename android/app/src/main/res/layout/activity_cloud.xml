@@ -3,8 +3,10 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
     android:orientation="vertical">
-    <com.choidev.tailhop.GlassCard android:layout_width="match_parent" android:layout_height="56dp"
-        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp"
+    <!-- 위 막대. 다중 선택(2.1.0) 중에는 같은 자리에 선택 막대(n개 선택·닫기·모두 선택)가 대신 보인다 -->
+    <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginTop="8dp">
+    <com.choidev.tailhop.GlassCard android:id="@+id/topBar" android:layout_width="match_parent" android:layout_height="56dp"
         android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="6dp">
         <ImageButton android:id="@+id/backBtn" style="@style/IconBtn" android:src="@drawable/ic_back"
             android:contentDescription="@string/chat_back" />
@@ -23,6 +25,19 @@
         <ImageButton android:id="@+id/refreshBtn" style="@style/IconBtn" android:src="@drawable/ic_refresh"
             android:padding="11dp" android:contentDescription="@string/cloud_refresh" />
     </com.choidev.tailhop.GlassCard>
+    <com.choidev.tailhop.GlassCard android:id="@+id/selBar" android:layout_width="match_parent" android:layout_height="56dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="6dp" android:paddingEnd="6dp"
+        android:visibility="gone">
+        <ImageButton android:id="@+id/selClose" style="@style/IconBtn" android:src="@drawable/ic_close"
+            android:contentDescription="@string/select_end" />
+        <TextView android:id="@+id/selCount" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content" android:layout_marginStart="6dp" android:textSize="15sp"
+            android:fontFamily="sans-serif-medium" android:textColor="@color/label" android:maxLines="1"
+            android:ellipsize="end" android:accessibilityLiveRegion="polite" />
+        <ImageButton android:id="@+id/selAll" style="@style/IconBtn" android:src="@drawable/ic_check_all"
+            android:contentDescription="@string/select_all" />
+    </com.choidev.tailhop.GlassCard>
+    </FrameLayout>
 
     <!-- 찾기(2.0.0, §15 cloud_search): 허브가 "cloud2"를 알릴 때만 보인다. 이 폴더 아래까지 이름으로 찾는다 -->
     <com.choidev.tailhop.GlassCard android:id="@+id/searchBar" android:layout_width="match_parent" android:layout_height="44dp"
@@ -86,4 +101,31 @@
                 android:layout_weight="0" android:layout_marginTop="20dp" android:text="@string/cloud_retry" android:visibility="gone" />
         </com.choidev.tailhop.GlassCard>
     </FrameLayout>
+
+    <!-- 다중 선택(2.1.0)의 동작 막대(유리): 옮기기(허브가 "move"를 알릴 때만)·이름 바꾸기(2.2.1, "rename"일 때만)·받기·지우기·
+         더보기(하나만 골랐을 때) -->
+    <com.choidev.tailhop.GlassCard android:id="@+id/actionBar" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginStart="12dp" android:layout_marginEnd="12dp" android:layout_marginBottom="12dp"
+        android:orientation="horizontal" android:padding="4dp" android:visibility="gone">
+        <LinearLayout android:id="@+id/actMove" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_folder_input" />
+            <TextView style="@style/ActLabel" android:text="@string/cloud_move" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/actRename" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_pencil" />
+            <TextView style="@style/ActLabel" android:text="@string/rename_action" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/actDownload" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_download" />
+            <TextView style="@style/ActLabel" android:text="@string/cloud_download" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/actDelete" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_trash" />
+            <TextView style="@style/ActLabel" android:text="@string/cloud_delete" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/actMore" style="@style/ActBtn">
+            <ImageView style="@style/ActIcon" android:src="@drawable/ic_more" />
+            <TextView style="@style/ActLabel" android:text="@string/cloud_more" />
+        </LinearLayout>
+    </com.choidev.tailhop.GlassCard>
 </LinearLayout>

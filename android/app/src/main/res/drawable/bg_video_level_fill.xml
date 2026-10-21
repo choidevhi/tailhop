@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 영상 재생기(2.2.1) 음량·밝기 막대의 찬 부분(scaleX로 늘인다) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#FFFFFFFF" /><corners android:radius="2dp" /></shape>

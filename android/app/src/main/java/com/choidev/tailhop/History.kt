@@ -131,6 +131,16 @@ object History {
         write(ctx, keep)
     }
 
+    /** 항목 하나를 지운다(따로 둔 긴 글 파일도). 받은 파일 자체는 부른 쪽이 지운다. 없으면 false. */
+    @Synchronized
+    fun remove(ctx: Context, id: String): Boolean {
+        val (gone, keep) = all(ctx).partition { it.id == id }
+        if (gone.isEmpty()) return false
+        dropFiles(ctx, gone)
+        write(ctx, keep)
+        return true
+    }
+
     private fun persist(ctx: Context, list: List<HistoryItem>) {
         val f = file(ctx)
         val tmp = File(f.path + ".tmp")

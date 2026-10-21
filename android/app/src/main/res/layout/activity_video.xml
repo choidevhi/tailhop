@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 안 영상 재생(2.2.0, 2.2.1 다듬음): 검은 바탕 전체 화면. 영상(videoStage)은 시스템 바·가림을 뺀 칸 안에만(넘치지 않게),
+     그 위에 손짓 받이(VideoGestures)와 직접 만든 조작(위: 닫기·이름·화면 속 화면, 가운데: 이전·10초 뒤로·재생·10초 앞으로·다음,
+     아래: 시간·탐색 막대·속도·음소거·맞춤/채우기·화면 방향·전체 화면). 여백은 코드가 준다 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/videoRoot" android:layout_width="match_parent" android:layout_height="match_parent">
+    <FrameLayout android:id="@+id/videoStage" android:layout_width="match_parent" android:layout_height="match_parent">
+        <androidx.media3.ui.PlayerView android:id="@+id/player" android:layout_width="match_parent"
+            android:layout_height="match_parent" app:use_controller="false" app:show_buffering="when_playing"
+            app:shutter_background_color="#FF000000" app:keep_content_on_player_reset="true" app:resize_mode="fit" />
+    </FrameLayout>
+    <com.choidev.tailhop.VideoGestures android:id="@+id/gestures" android:layout_width="match_parent"
+        android:layout_height="match_parent" android:contentDescription="@string/video_gestures_desc" />
+
+    <!-- 두 번 탭 탐색 표시(왼쪽·오른쪽) -->
+    <TextView android:id="@+id/tapLeft" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="start|center_vertical" android:layout_marginStart="48dp" android:background="@drawable/bg_video_pill"
+        android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp"
+        android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:visibility="gone" />
+    <TextView android:id="@+id/tapRight" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="end|center_vertical" android:layout_marginEnd="48dp" android:background="@drawable/bg_video_pill"
+        android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp"
+        android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:visibility="gone" />
+
+    <!-- 끌어 탐색할 때의 미리 시간, 짧은 알림(화면 방향 등) -->
+    <TextView android:id="@+id/seekHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:background="@drawable/bg_video_pill" android:gravity="center"
+        android:paddingStart="20dp" android:paddingEnd="20dp" android:paddingTop="10dp" android:paddingBottom="10dp"
+        android:textSize="17sp" android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:visibility="gone"
+        android:accessibilityLiveRegion="polite" />
+
+    <!-- 음량·밝기 -->
+    <LinearLayout android:id="@+id/levelHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:orientation="horizontal" android:gravity="center_vertical"
+        android:background="@drawable/bg_video_pill" android:paddingStart="16dp" android:paddingEnd="18dp"
+        android:paddingTop="10dp" android:paddingBottom="10dp" android:visibility="gone">
+        <ImageView android:id="@+id/levelIcon" android:layout_width="20dp" android:layout_height="20dp"
+            android:src="@drawable/ic_volume" android:importantForAccessibility="no" />
+        <FrameLayout android:layout_width="120dp" android:layout_height="4dp" android:layout_marginStart="12dp"
+            android:background="@drawable/bg_video_level">
+            <View android:id="@+id/levelFill" android:layout_width="match_parent" android:layout_height="match_parent"
+                android:background="@drawable/bg_video_level_fill" />
+        </FrameLayout>
+        <TextView android:id="@+id/levelText" android:layout_width="40dp" android:layout_height="wrap_content"
+            android:layout_marginStart="10dp" android:gravity="end" android:textSize="13sp" android:textColor="#FFFFFFFF" />
+    </LinearLayout>
+
+    <!-- 조작(탭 한 번으로 숨기기·보이기). 빈 곳은 손짓 받이로 지나간다 -->
+    <FrameLayout android:id="@+id/controls" android:layout_width="match_parent" android:layout_height="match_parent">
+        <LinearLayout android:id="@+id/videoTop" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="top" android:orientation="horizontal" android:gravity="center_vertical"
+            android:minHeight="56dp" android:paddingStart="6dp" android:paddingEnd="6dp" android:background="@drawable/bg_lightbox_top">
+            <ImageButton android:id="@+id/videoClose" android:layout_width="44dp" android:layout_height="44dp"
+                android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                android:src="@drawable/ic_close" android:contentDescription="@string/close" />
+            <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                android:layout_marginStart="8dp" android:orientation="vertical">
+                <TextView android:id="@+id/videoName" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:textSize="15sp" android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF"
+                    android:maxLines="1" android:ellipsize="middle" />
+                <TextView android:id="@+id/videoCount" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:textSize="12sp" android:textColor="#B3FFFFFF" android:maxLines="1" />
+            </LinearLayout>
+            <ImageButton android:id="@+id/videoPip" android:layout_width="44dp" android:layout_height="44dp"
+                android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                android:src="@drawable/ic_pip" android:contentDescription="@string/video_pip" />
+        </LinearLayout>
+
+        <LinearLayout android:id="@+id/centerRow" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="center" android:orientation="horizontal" android:gravity="center_vertical">
+            <ImageButton android:id="@+id/videoPrev" android:layout_width="48dp" android:layout_height="48dp"
+                android:padding="13dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                android:src="@drawable/ic_skip_back" android:contentDescription="@string/video_prev" />
+            <FrameLayout android:id="@+id/videoRew" android:layout_width="56dp" android:layout_height="56dp"
+                android:layout_marginStart="12dp" android:background="@drawable/bg_lightbox_btn" android:clickable="true"
+                android:focusable="true" android:contentDescription="@string/video_back10">
+                <ImageView android:layout_width="34dp" android:layout_height="34dp" android:layout_gravity="center"
+                    android:src="@drawable/ic_retry" android:importantForAccessibility="no" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center"
+                    android:layout_marginTop="1dp" android:text="@string/video_ten" android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:importantForAccessibility="no" />
+            </FrameLayout>
+            <ImageButton android:id="@+id/videoPlay" android:layout_width="72dp" android:layout_height="72dp"
+                android:layout_marginStart="16dp" android:layout_marginEnd="16dp" android:padding="24dp" android:scaleType="fitCenter"
+                android:background="@drawable/bg_play" android:src="@drawable/ic_pause" android:contentDescription="@string/video_pause" />
+            <FrameLayout android:id="@+id/videoFwd" android:layout_width="56dp" android:layout_height="56dp"
+                android:layout_marginEnd="12dp" android:background="@drawable/bg_lightbox_btn" android:clickable="true"
+                android:focusable="true" android:contentDescription="@string/video_fwd10">
+                <ImageView android:layout_width="34dp" android:layout_height="34dp" android:layout_gravity="center"
+                    android:src="@drawable/ic_rotate_cw" android:importantForAccessibility="no" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center"
+                    android:layout_marginTop="1dp" android:text="@string/video_ten" android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:importantForAccessibility="no" />
+            </FrameLayout>
+            <ImageButton android:id="@+id/videoNext" android:layout_width="48dp" android:layout_height="48dp"
+                android:padding="13dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                android:src="@drawable/ic_skip_forward" android:contentDescription="@string/video_next" />
+        </LinearLayout>
+
+        <LinearLayout android:id="@+id/videoBottom" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_gravity="bottom" android:orientation="vertical" android:paddingTop="28dp" android:paddingBottom="4dp"
+            android:background="@drawable/bg_lightbox_bottom">
+            <TextView android:id="@+id/landscapeHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal" android:layout_marginBottom="8dp" android:background="@drawable/bg_video_chip"
+                android:paddingStart="14dp" android:paddingEnd="14dp" android:paddingTop="7dp" android:paddingBottom="7dp"
+                android:drawablePadding="6dp" android:gravity="center_vertical" android:text="@string/video_landscape"
+                android:textSize="13sp" android:fontFamily="sans-serif-medium" android:textColor="@color/video_chip_text"
+                android:visibility="gone" />
+            <HorizontalScrollView android:id="@+id/speedScroll" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal" android:layout_marginBottom="8dp" android:scrollbars="none"
+                android:visibility="gone">
+                <LinearLayout android:id="@+id/speedPanel" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="12dp" />
+            </HorizontalScrollView>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal"
+                android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp">
+                <TextView android:id="@+id/timeNow" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:minWidth="44dp" android:textSize="12sp" android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF"
+                    android:fontFeatureSettings="tnum" />
+                <com.choidev.tailhop.ScrubBar android:id="@+id/scrub" android:layout_width="0dp" android:layout_weight="1"
+                    android:layout_height="36dp" android:contentDescription="@string/video_seek" />
+                <TextView android:id="@+id/timeTotal" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:minWidth="44dp" android:gravity="end" android:textSize="12sp" android:fontFamily="sans-serif-medium"
+                    android:textColor="#CCFFFFFF" android:fontFeatureSettings="tnum" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal"
+                android:gravity="center_vertical" android:paddingStart="8dp" android:paddingEnd="8dp">
+                <TextView android:id="@+id/videoSpeed" android:layout_width="0dp" android:layout_weight="1" android:layout_height="44dp"
+                    android:gravity="center" android:background="@drawable/bg_lightbox_btn" android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" android:contentDescription="@string/video_speed" />
+                <ImageButton android:id="@+id/videoMute" android:layout_width="0dp" android:layout_weight="1" android:layout_height="44dp"
+                    android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                    android:src="@drawable/ic_volume" android:contentDescription="@string/video_mute" />
+                <ImageButton android:id="@+id/videoFit" android:layout_width="0dp" android:layout_weight="1" android:layout_height="44dp"
+                    android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                    android:src="@drawable/ic_fill" android:contentDescription="@string/video_fill" />
+                <ImageButton android:id="@+id/videoRotate" android:layout_width="0dp" android:layout_weight="1" android:layout_height="44dp"
+                    android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                    android:src="@drawable/ic_rotate_cw" android:contentDescription="@string/video_rotate" />
+                <ImageButton android:id="@+id/videoFull" android:layout_width="0dp" android:layout_weight="1" android:layout_height="44dp"
+                    android:padding="11dp" android:scaleType="fitCenter" android:background="@drawable/bg_lightbox_btn"
+                    android:src="@drawable/ic_fullscreen_exit" android:contentDescription="@string/video_fullscreen_exit" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- 이어 보기 알림: "1:23부터 이어 봅니다 · 처음부터" -->
+    <LinearLayout android:id="@+id/resumePill" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal" android:layout_marginTop="72dp" android:orientation="horizontal"
+        android:gravity="center_vertical" android:background="@drawable/bg_video_pill" android:paddingStart="16dp"
+        android:paddingEnd="6dp" android:visibility="gone">
+        <TextView android:id="@+id/resumeText" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textSize="13sp" android:textColor="#FFFFFFFF" />
+        <TextView android:id="@+id/resumeRestart" android:layout_width="wrap_content" android:layout_height="36dp"
+            android:layout_marginStart="8dp" android:gravity="center" android:paddingStart="10dp" android:paddingEnd="10dp"
+            android:background="@drawable/bg_lightbox_btn" android:text="@string/video_from_start" android:textSize="13sp"
+            android:fontFamily="sans-serif-medium" android:textColor="#FFFFFFFF" />
+    </LinearLayout>
+
+    <!-- 오류(허브 끊김 등): 이유와 다시 시도 -->
+    <LinearLayout android:id="@+id/errorBox" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:layout_marginStart="32dp" android:layout_marginEnd="32dp"
+        android:orientation="vertical" android:gravity="center_horizontal" android:visibility="gone">
+        <TextView android:id="@+id/videoMessage" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:gravity="center" android:textSize="14sp" android:textColor="#CCFFFFFF" />
+        <TextView android:id="@+id/videoRetry" android:layout_width="wrap_content" android:layout_height="40dp"
+            android:layout_marginTop="16dp" android:gravity="center" android:paddingStart="20dp" android:paddingEnd="20dp"
+            android:background="@drawable/bg_video_chip" android:text="@string/cloud_retry" android:textSize="14sp"
+            android:fontFamily="sans-serif-medium" android:textColor="@color/video_chip_text" />
+    </LinearLayout>
+</FrameLayout>

@@ -73,6 +73,13 @@ def peer_ips() -> dict[str, str]:
     return table
 
 
+def peer_online() -> dict[str, bool]:
+    """내 tailnet 기기들의 StableID → 지금 Tailscale에 켜져 있는지(Online)."""
+    status = json.loads(_run("status", "--json"))
+    return {str(node["ID"]): node.get("Online") is True for node in (status.get("Peer") or {}).values()
+            if node.get("ID")}
+
+
 @dataclass(frozen=True)
 class Peer:
     """tags: 태그 노드(서버·공유 기기 등)면 ACL 태그 목록. 태그 노드는 사람 계정이 아니라 공용 'tagged-devices'

@@ -1,5 +1,5 @@
 #define AppName "TailHop"
-#define AppVersion "2.0.0"
+#define AppVersion "2.2.1"
 #define AppExe "TailHop.exe"
 
 [Setup]
@@ -47,6 +47,10 @@ Name: "sendto"; Description: "{cm:SendTo}"; GroupDescription: "{cm:AdditionalIco
 
 [Files]
 Source: "..\dist\TailHop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; 2.2.1부터 영상은 앱 안 mpv로 재생한다. 예전 설치에 남은 ffplay를 지운다
+Type: files; Name: "{app}\_internal\ffmpeg\ffplay.exe"
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"

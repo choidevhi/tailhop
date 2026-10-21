@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 라이트박스(2.2.1) 필름 띠 칸: 옅은 덧칠, rounded-md 6dp(미리보기도 이 모양으로 잘린다) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#26FFFFFF" /><corners android:radius="6dp" /></shape>

@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -142,7 +143,12 @@ object Net {
      * "이 PC는 클라우드를 지원하지 않음"(이 폰 안에서만 쓰는 코드)으로 바꾼다. 1.4 이하는 코드 없이 한국어 문장으로 거부해 그대로 보인다.
      */
     private inline fun <T> cloudCall(block: () -> T): T = try { block() } catch (e: ProtocolException) {
-        throw if (e.code == "unsupported") ProtocolException("cloud_unsupported") else e
+        throw when {
+            e.code == "unsupported" -> ProtocolException("cloud_unsupported")
+            // 2.2 허브(§17.6)의 storage = 저장소 암호문이 손상됨. 이 폰의 storage(파일을 저장하지 못함)와 문장이 달라 따로 둔다.
+            e.code == "storage" && e is HubRefusal -> HubRefusal("store_damaged", e.reply)
+            else -> e
+        }
     }
 
     /** §12.2 cloud_list: 폴더 path의 한 쪽(cursor부터). */
@@ -153,13 +159,16 @@ object Net {
     private inline fun <T> vaultCall(p: Pairing, path: String, h: JSONObject, block: (JSONObject) -> T): T {
         VaultTokens.shared.tokenFor(p.pcIp, path)?.let { h.put("token", it) }
         return try { cloudCall { block(h) } } catch (e: ProtocolException) {
-            if (e.code == "vault_locked") {
-                // 허브가 알려 준 잠긴 폴더 자리(§14.2)를 먼저 믿고, 없으면 이 폰이 아는 자리로. 그 열쇠는 버린다.
-                val m = Vault.lockedMount((e as? HubRefusal)?.reply) ?: VaultTokens.shared.mountOf(p.pcIp, path)
-                if (m != null) { VaultTokens.shared.learn(p.pcIp, m); VaultTokens.shared.drop(p.pcIp, m) }
-            }
+            forgetOnVaultLocked(p, path, e)
             throw e
         }
+    }
+
+    /** vault_locked 거부: 허브가 알려 준 잠긴 폴더 자리(§14.2)를 먼저 믿고, 없으면 이 폰이 아는 자리로. 그 열쇠는 버린다. */
+    private fun forgetOnVaultLocked(p: Pairing, path: String, e: ProtocolException) {
+        if (e.code != "vault_locked") return
+        val m = Vault.lockedMount((e as? HubRefusal)?.reply) ?: VaultTokens.shared.mountOf(p.pcIp, path)
+        if (m != null) { VaultTokens.shared.learn(p.pcIp, m); VaultTokens.shared.drop(p.pcIp, m) }
     }
 
     fun cloudList(p: Pairing, path: String, cursor: Int, token: SendToken? = null): CloudPage {
@@ -171,6 +180,55 @@ object Net {
     fun cloudMkdir(p: Pairing, path: String) { vaultCall(p, path, header("cloud_mkdir").put("path", path)) { request(p, it) } }
 
     fun cloudDel(p: Pairing, path: String) { vaultCall(p, path, header("cloud_del").put("path", path)) { request(p, it) } }
+
+    /**
+     * §16 cloud_move: 여러 항목을 dest 폴더로 옮긴다. 한 요청에 CloudMove.MAX_PATHS개까지라 더 많으면 나눠 보내고 결과를 합친다.
+     * 잠긴 폴더 안끼리 옮길 때는 dest 기준 열쇠를 붙인다(같은 보관함 안에서만 옮길 수 있다). 항목별 실패는 결과의 failed에 있다.
+     */
+    /**
+     * 2.2.1 허브(caps "move2", §18.1)는 잠긴 폴더 안팎·사이로도 옮긴다: 도착 열쇠는 "token"에, 출발 항목들의 열쇠는 "tokens"에(16개까지).
+     * 옮긴 것 가운데 잠긴 폴더(또는 그것을 품은 폴더)가 있으면 그 열쇠·자리를 새 자리로 옮겨 기억한다(허브는 열쇠를 그대로 둔다).
+     */
+    fun cloudMove(p: Pairing, paths: List<String>, dest: String, move2: Boolean = false): MoveResult = CloudMove.run(paths) { chunk ->
+        val h = header("cloud_move")
+        CloudMove.fields(chunk, dest).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
+        vaultCall(p, dest, h) { hh ->
+            if (move2) {
+                val src = CloudMove.sourceTokens(chunk, hh.opt("token") as? String) { VaultTokens.shared.tokenFor(p.pcIp, it) }
+                if (src.isNotEmpty()) hh.put("tokens", JSONArray(src))
+            }
+            CloudMove.parse(request(p, hh))
+        }
+    }.also { r -> r.moved.forEach { VaultTokens.shared.retarget(p.pcIp, it.path, CloudPath.join(dest, it.name)) } }
+
+    /**
+     * §18.2 cloud_rename: 200개씩 나눠 보낸다. 잠긴 폴더 안의 항목이면 그 열쇠들을(첫 것은 "token", 둘 이상이면 모두 "tokens"에) 붙인다.
+     * 바뀐 것이 잠긴 폴더(또는 그것을 품은 폴더)면 열쇠·자리를 새 이름으로 옮겨 기억한다.
+     */
+    fun cloudRename(p: Pairing, items: List<CloudRename.Item>): MoveResult = CloudRename.run(items) { chunk ->
+        val h = header("cloud_rename").put("items", CloudRename.itemsJson(chunk))
+        val toks = CloudMove.sourceTokens(chunk.map { it.path }, null) { VaultTokens.shared.tokenFor(p.pcIp, it) }
+        if (toks.isNotEmpty()) h.put("token", toks[0])
+        if (toks.size > 1) h.put("tokens", JSONArray(toks))
+        try { cloudCall { CloudRename.parse(request(p, h)) } } catch (e: ProtocolException) {
+            forgetOnVaultLocked(p, chunk[0].path, e)
+            throw e
+        }
+    }.also { r -> r.moved.forEach { VaultTokens.shared.retarget(p.pcIp, it.path, CloudPath.join(CloudPath.parent(it.path), it.name)) } }
+
+    /**
+     * §18.3 store_unlock: 강한 잠금으로 잠긴 허브 저장소를 클라우드 비밀번호로 연다. 비밀번호는 이 요청에만 쓰고 어디에도 두지 않는다.
+     * 틀리면 store_password, 너무 많이 틀리면 vault_wait(retry초).
+     */
+    fun storeUnlock(p: Pairing, password: String) {
+        cloudCall { request(p, header("store_unlock").put("password", password)) }
+    }
+
+    /** §18.3 store_lock: 허브 저장소를 바로 잠근다(강한 잠금일 때만, 아니면 store_state). 이 폰이 가진 잠긴 폴더 열쇠도 끝난다. */
+    fun storeLock(p: Pairing) {
+        cloudCall { request(p, header("store_lock")) }
+        VaultTokens.shared.dropTokens(p.pcIp)
+    }
 
     /** §15 cloud_search: path 폴더 아래에서 이름에 query가 든 것(kind로 거름). 잠긴 폴더 안에서 찾으면 그 열쇠를 붙인다. */
     fun cloudSearch(p: Pairing, path: String, query: String, kind: String, cursor: Int, token: SendToken? = null): SearchPage {
@@ -234,11 +292,15 @@ object Net {
      * 그 사이 바뀌었는지 보게 한다(바뀌면 cloud_changed). open은 허브가 알린 머리(크기·수정 시각)를 받고 쓸 곳을 돌려준다 —
      * 조각을 만들거나 이어 쓸 위치로 연다. 다 받으면 머리를 돌려준다. 끊기면 쓴 데까지 남는다(부른 쪽이 다시 시도).
      */
+    /**
+     * 2.2 허브(§17.3): length를 주면 offset부터 그만큼만 받고(끝은 CloudRange.end), variant를 주면 원본 대신 그 딸린 버전을 받는다.
+     * 예전 허브는 length를 모른다(끝까지 보낸다 → file_too_big) — hello caps에 "store"가 있을 때만 준다.
+     */
     fun cloudGet(p: Pairing, path: String, offset: Long, size: Long?, mtime: Long?, token: SendToken? = null,
-                 open: (CloudWire.Head) -> OutputStream, onProgress: ((Long, Long) -> Unit)? = null): CloudWire.Head {
-        val hh = header("cloud_get").put("path", path).put("offset", offset)
-        if (size != null) hh.put("size", size)
-        if (mtime != null) hh.put("mtime", mtime)
+                 open: (CloudWire.Head) -> OutputStream, onProgress: ((Long, Long) -> Unit)? = null,
+                 length: Long? = null, variant: String? = null): CloudWire.Head {
+        val hh = header("cloud_get")
+        CloudRange.fields(path, offset, length, variant, size, mtime).let { f -> f.keys().forEach { k -> hh.put(k, f.get(k)) } }
         return vaultCall(p, path, hh) { h -> connect(p.pcIp, p.pcPort, token).use { s ->
             val ch = msgChannel(p, s)
             ch.send(h.toString().toByteArray(Charsets.UTF_8), last = false)
@@ -252,15 +314,29 @@ object Net {
                 is CloudWire.First.Ok -> first.head
             }
             // 허브가 알린 크기가 이어 받을 위치보다 작다 = 그 사이 바뀌었다(size를 주지 않은 첫 요청에서만 생길 수 있다).
-            if (head.size < offset) throw ProtocolException("cloud_changed")
+            val end = CloudRange.end(offset, length, head.size)
             open(head).use { out ->
-                CloudWire.readData(ch, offset, head.size, out) { got ->
+                CloudWire.readData(ch, offset, end, out) { got ->
                     token?.tick()
-                    onProgress?.invoke(got, head.size)
+                    onProgress?.invoke(got, end)
                 }
             }
             head
         } }
+    }
+
+    /**
+     * §17.3 범위를 메모리로 받는다(영상 재생·건너뛰기): offset부터 length(CloudRange.MAX_LEN 이하)만. 디스크에 쓰지 않는다.
+     * size·mtime은 앞서 받은 머리(같은 객체가 그대로인지 허브가 본다, 바뀌었으면 cloud_changed). 돌려준 머리의 size는 객체 전체 크기.
+     */
+    fun cloudReadRange(p: Pairing, path: String, offset: Long, length: Long, variant: String?, size: Long? = null,
+                       mtime: Long? = null, token: SendToken? = null): CloudChunk {
+        require(length in 0..CloudRange.MAX_LEN)
+        var sink: CloudRange.Sink? = null
+        val head = cloudGet(p, path, offset, size, mtime, token, open = { head ->
+            CloudRange.Sink((CloudRange.end(offset, length, head.size) - offset).toInt()).also { sink = it }
+        }, length = length, variant = variant)
+        return CloudChunk(head, sink?.bytes ?: ByteArray(0))
     }
 
     /**

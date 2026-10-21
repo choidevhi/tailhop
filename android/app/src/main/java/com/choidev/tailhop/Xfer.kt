@@ -60,9 +60,9 @@ object Xfer {
         .put("have", if (done) 0L else have).put("done", done)
 
     /** 상대의 hello 응답(보내는 쪽). 모르는 caps 값은 그대로 두고 쓰는 쪽에서 무시한다. */
-    /** update: 배포 PC(§13)가 알린 Android 업데이트(없거나 형식이 틀리면 null). */
+    /** update: 배포 PC(§13)가 알린 Android 업데이트(없거나 형식이 틀리면 null). store: 2.2 허브의 저장소 상태(§17.2, HubStore). */
     data class Hello(val caps: Set<String>, val cloud: Boolean, val have: Long, val done: Boolean,
-                     val update: UpdateOffer? = null) {
+                     val update: UpdateOffer? = null, val store: String? = null, val strong: Boolean = false) {
         val xfer: Boolean get() = "xfer" in caps
     }
 
@@ -71,7 +71,7 @@ object Xfer {
         val caps = HashSet<String>()
         if (arr != null) for (i in 0 until arr.length()) (arr.opt(i) as? String)?.let { caps += it }
         return Hello(caps, reply.opt("cloud") == true, jsonLong(reply.opt("have")) ?: 0L, reply.opt("done") == true,
-            Updates.fromHello(reply, caps))
+            Updates.fromHello(reply, caps), HubStore.parse(reply), reply.opt("strong") == true)
     }
 
     /** 이어 보낼 위치: 상대가 알린 have가 0..size 밖이면 처음부터(0). */

@@ -2,7 +2,7 @@
 
 - 기기마다 줄 두 개(대화방, 클라우드)로 차례로 보낸다(같은 줄은 넣은 순서대로). 큰 클라우드 받기가 대화방 글을 막지 않는다.
   서로 다른 기기·줄은 동시에 보낸다.
-- 연결 실패·끊김은 3초, 10초, 30초, 1분, 2분, 그 뒤 5분마다 다시 시도하고 24시간이 지나면 실패로 둔다.
+- 연결 실패·끊김은 3초, 10초, 30초, 1분, 2분, 그 뒤 5분마다 다시 시도하고 30일이 지나면 실패로 둔다(2.2.0, 그 전에는 24시간). 상대가 켜지면 바로 깨운다(§11.5).
   상대가 이유와 함께 거부하거나 파일이 사라지면 바로 실패로 두고 사용자가 다시 보낼 수 있게 한다.
 - 앱을 껐다 켜도 이어서 보낸다(outbox.json, 이 사용자만 읽는 ACL). 폴더는 처음 보낼 때 zip으로 묶어 두고
   다 보낼 때까지 같은 zip을 쓴다(이어 보내기가 같은 바이트를 보내게).
@@ -27,7 +27,8 @@ import store
 WAITING, SENDING, FAILED = "waiting", "sending", "failed"
 BACKOFF = (3, 10, 30, 60, 120)
 BACKOFF_LATER = 300
-GIVE_UP_SEC = 24 * 3600
+GIVE_UP_SEC = 30 * 86400  # 2.2.0: 상대가 오래 꺼져 있어도 30일까지는 기다린다(그 전에 취소할 수 있다)
+OFFLINE_CODES = {"peer_offline", "peer_unreachable", "connect_failed", "tailscale_down"}  # 상대가 꺼져 있는 것
 PROGRESS_EVERY = 0.1  # 진행 알림 간격(초). 빠른 망에서 화면 큐가 넘치지 않게
 # 다시 시도해 볼 만한 상대 응답·연결 실패 코드(§11.3). 나머지 코드는 상대가 이유를 대고 거부한 것이다.
 RETRY_CODES = {"disconnected", "resume_lost", "hash_mismatch", "tailscale_down", "connect_failed",
@@ -281,7 +282,7 @@ class Outbox:
             return job.copy() if job else None
 
     def retry(self, job_id: str) -> None:
-        """실패한 보내기를 다시(처음 넣은 것처럼 24시간을 새로 센다)."""
+        """실패한 보내기를 다시(처음 넣은 것처럼 30일을 새로 센다)."""
         with self.lock:
             job = next((j for j in self.jobs if j.id == job_id), None)
             if job is None or job.state == SENDING:
@@ -319,6 +320,11 @@ class Outbox:
                     woke = True
         if woke:
             self.wake_event.set()
+
+    def waiting_offline(self) -> set[str]:
+        """상대가 꺼져 있어 기다리는 건이 있는 기기들(Tailscale에 그 기기가 켜졌는지 물어볼 때만 쓴다)."""
+        with self.lock:
+            return {j.peer_id for j in self.jobs if j.state == WAITING and j.code in OFFLINE_CODES}
 
     def drop_peer(self, peer_id: str) -> None:
         """연결 해제: 그 기기로 갈 보내기를 모두 지운다."""

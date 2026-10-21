@@ -7,22 +7,24 @@
 from __future__ import annotations
 
 import io
-import shutil
 from pathlib import Path
 
 from PIL import Image
 
 import cloud
 import hub as hubmod
+import media
 import protocol as p
 
 LOCAL = ""  # 왼쪽 목록에서 '이 PC'
 LOCAL_PEER = "local"
+MOVE_BATCH = 200
+STREAM_PIECE = 2 * 1024 * 1024  # 다른 기기의 영상을 재생할 때 한 번에 받는 크기
 
 
 def _item(raw: dict) -> cloud.Item:
     return cloud.Item(raw["name"], raw["dir"], raw["size"], raw["mtime"], raw.get("locked") is True,
-                      raw.get("state") or "", raw.get("progress") or 0)
+                      raw.get("state") or "", raw.get("progress") or 0, tuple(raw.get("variants") or ()))
 
 
 class Source:
@@ -37,7 +39,8 @@ class Source:
     def _hub(self) -> hubmod.Hub:
         hub = self.node.hub()
         if hub is None:
-            raise p.ProtocolError("cloud_off")
+            state = self.node.cloud_state
+            raise p.ProtocolError({"off": "cloud_off", "missing": "store_missing"}.get(state, "store_locked"))
         return hub
 
     def _header(self, path: str, **fields) -> dict:
@@ -64,6 +67,55 @@ class Source:
         with Image.open(io.BytesIO(data)) as im:
             im.load()
             return im.copy()
+
+    def read_variant(self, path: str, role: str, limit: int) -> bytes:
+        """허브가 만든 딸린 버전(§17.4) 전체. 없으면 not_found."""
+        if not self.local:
+            return self.node.cloud_read(self.sid, path, limit, variant=role)
+        size, _, read = self._hub().open_file(cloud.parse_path(path), self._header(path), LOCAL_PEER, role)
+        if size > limit:
+            raise p.ProtocolError("too_large")
+        return b"".join(read(0))
+
+    def stream(self, path: str, role: str | None = None) -> media.Source:
+        """재생용으로 중간부터 읽을 수 있는 원본(또는 딸린 버전). 다른 기기면 2 MiB씩 범위로 받는다."""
+        if self.local:
+            hub = self._hub()
+            parts = cloud.parse_path(path)
+            node = hub.store.node_at(parts, self._header(path), LOCAL_PEER)
+            first = media.store_source(hub.store, node, role)
+
+            def checked(offset: int, length: int):
+                # 읽을 때마다 잠긴 폴더 열쇠를 다시 확인한다(닫히거나 PIN을 바꾼 뒤에는 그 주소로도 못 읽는다)
+                live = self._hub().store.node_at(parts, self._header(path), LOCAL_PEER)
+                return self._hub().store.read(live, offset, length, role)
+
+            return media.Source(first.size, checked, first.mime)
+        size = self.node.cloud_size(self.sid, path, role)
+
+        def read(offset: int, length: int):
+            end = offset + length
+            while offset < end:
+                part = min(STREAM_PIECE, end - offset)
+                data = self.node.cloud_read(self.sid, path, part, offset=offset, length=part, variant=role)
+                if not data:
+                    return
+                yield data
+                offset += len(data)
+
+        return media.Source(size, read, "video/mp2t" if role == "play" else "application/octet-stream")
+
+    def read_bytes(self, path: str, limit: int) -> bytes:
+        """파일 전체를 메모리로(라이트박스의 원본 보기). limit보다 크면 too_large. 잠긴 폴더 안이어도 디스크에 쓰지 않는다."""
+        if not self.local:
+            return self.node.cloud_read(self.sid, path, limit)
+        size, _, read = self._hub().open_file(cloud.parse_path(path), self._header(path), LOCAL_PEER)
+        if size > limit:
+            raise p.ProtocolError("too_large")
+        data = b"".join(read(0))
+        if len(data) != size:
+            raise p.ProtocolError("file_incomplete")
+        return data
 
     # ---------- 잠긴 폴더 ----------
     def open(self, path: str, pin: str | None = None, recovery: str | None = None) -> None:
@@ -110,6 +162,35 @@ class Source:
         self._hub().delete(cloud.parse_path(path), self._header(path), LOCAL_PEER)
         self.node._open_tokens.pop((LOCAL, path), None)
 
+    def move(self, paths: list[str], dest: str) -> tuple[list[dict], list[dict]]:
+        """§16: 여러 항목을 dest 폴더로 옮긴다. (옮긴 것, 안 된 것)."""
+        if not self.local:
+            return self.node.cloud_move(self.sid, paths, dest)
+        moved, failed = [], []
+        for start in range(0, len(paths), MOVE_BATCH):
+            batch = paths[start:start + MOVE_BATCH]
+            header = self._header(dest)
+            tokens = {self.node.token_for(self.sid, x) for x in batch} - {None, header.get("token")}
+            if tokens:
+                header = {**header, "tokens": sorted(tokens)}
+            got = self._hub().move([cloud.parse_path(x) for x in batch], cloud.parse_path(dest), header, LOCAL_PEER)
+            moved += got[0]
+            failed += got[1]
+        self.node.retarget_tokens(self.sid, moved, dest)
+        return moved, failed
+
+    def rename(self, items: list[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
+        """§18.2: [(경로, 새 이름)]. (바꾼 것, 안 된 것)."""
+        if not self.local:
+            return self.node.cloud_rename(self.sid, items)
+        tokens = sorted({self.node.token_for(self.sid, path) for path, _ in items} - {None})
+        header = {"token": tokens[0], "tokens": tokens} if tokens else {}
+        renamed, failed = self._hub().rename([(cloud.parse_path(path), name) for path, name in items], header,
+                                             LOCAL_PEER)
+        for item in renamed:
+            self.node.retarget_tokens(self.sid, [item], item["path"].rpartition("/")[0])
+        return renamed, failed
+
     def upload(self, paths: list[Path], folder: str) -> int:
         """다른 기기면 보낼 곳 목록에 넣고, 이 PC면 바로 복사한다(잠긴 폴더 안이면 암호화해 넣는다). 넣은 수."""
         if not self.local:
@@ -120,31 +201,13 @@ class Source:
             for file, rel_dir in _walk(src):
                 dest = "/".join(x for x in (folder, rel_dir) if x)
                 target = hub.put_target(dest, self._header(dest), LOCAL_PEER)
-                name = p.sanitize_filename(file.name)
-                if isinstance(target, Path):
-                    shutil.copy2(file, p.unique_path(target, name))
-                else:
-                    with target.vault.lock:
-                        rel = target.vault.free_name(f"{target.rel_dir}/{p.cloud_name(name)}" if target.rel_dir
-                                                     else p.cloud_name(name))
-                    target.vault.put_file(rel, file)
+                hub.store.import_file(target.folder, target.ring, file)  # 원본은 그대로 두고 암호화한 사본을 넣는다
                 count += 1
         return count
 
     def export(self, path: str, dest_dir: Path) -> Path:
-        """이 PC의 잠긴 폴더 안 파일을 저장 폴더로 풀어 꺼낸다(복호화한 사본)."""
-        size, _, read = self._hub().open_file(cloud.parse_path(path), self._header(path), LOCAL_PEER)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        target = p.unique_path(dest_dir, p.sanitize_filename(path.rsplit("/", 1)[-1]))
-        part = target.with_name(target.name + ".part")
-        with open(part, "wb") as out:
-            for block in read(0):
-                out.write(block)
-        if part.stat().st_size != size:
-            part.unlink(missing_ok=True)
-            raise p.ProtocolError("file_incomplete")
-        part.replace(target)
-        return target
+        """이 PC 저장소의 파일을 저장 폴더로 풀어 꺼낸다(복호화한 사본, 사용자가 고른 것만)."""
+        return self._hub().store.export(cloud.parse_path(path), self._header(path), LOCAL_PEER, dest_dir)
 
 
 def _walk(src: Path):

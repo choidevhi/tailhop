@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 라이트박스(2.1.0)의 버튼(검은 바탕 위 ghost): 누르면 rounded-md 안만 밝게 물든다 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="#33FFFFFF">
+    <item android:id="@android:id/mask"><shape android:shape="rectangle"><solid android:color="#FFFFFFFF" /><corners android:radius="8dp" /></shape></item>
+</ripple>

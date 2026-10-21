@@ -42,11 +42,19 @@
             </intent-filter>
         </activity>
 
+        <!-- 2.2.1: 돌림·폴드 펴기·접기에 다시 만들지 않는다(라이트박스가 보던 자리 그대로 남게) -->
         <activity android:name=".ChatActivity" android:exported="false"
-            android:parentActivityName=".MainActivity" android:windowSoftInputMode="adjustResize" />
+            android:parentActivityName=".MainActivity" android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
         <activity android:name=".CloudActivity" android:exported="false"
-            android:parentActivityName=".MainActivity" />
+            android:parentActivityName=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+
+        <!-- 앱 안 영상 재생(2.2.0): 돌려도 다시 만들지 않는다(재생이 끊기지 않게). 2.2.1: 화면 속 화면(홈을 누르면) -->
+        <activity android:name=".VideoActivity" android:exported="false" android:theme="@style/Lightbox"
+            android:supportsPictureInPicture="true" android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
 
         <activity
             android:name=".ShareActivity"
@@ -86,6 +94,12 @@
             android:name=".SendService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 보내기 서비스가 쉬는 동안(상대가 꺼져 있음, 2.2.0) 네트워크가 있을 때 15분마다 기다리는 PC에 닿아 본다(OutboxWake) -->
+        <service
+            android:name=".OutboxWakeJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <receiver android:name=".CopyReceiver" android:exported="false" />
         <receiver android:name=".PauseReceiver" android:exported="false" />

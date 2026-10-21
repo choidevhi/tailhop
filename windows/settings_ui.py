@@ -2,7 +2,8 @@
 
 - 일반: 언어, Windows 시작 시 실행, 미리보기, 탐색기 '보내기', 전역 단축키
 - 받기: 받기 켜기·1시간 멈춤, 받은 파일 저장 폴더(바꾸기·열기)
-- 클라우드: 이 PC를 클라우드로 쓰기, 클라우드 폴더(바꾸기·열기), 받은 파일도 클라우드에 모으기
+- 클라우드: 이 PC를 클라우드로 쓰기, 저장 위치(아무 드라이브·외장 SSD), 암호화 상태(만들기·열기·비밀번호·리셋),
+  받은 파일도 클라우드에 모으기
 - 기기: 연결된 기기(확인 코드, 연결 해제), 새 기기 연결
 - 업데이트: 지금 버전, 연결된 PC가 내주는 새 버전(Tailscale로 받아 바로 설치), 이 PC가 내주는 업데이트
 설정 값은 큰 창(App)의 변수·함수를 그대로 써서 두 창이 늘 같은 상태를 보인다.
@@ -13,14 +14,16 @@ import os
 import threading
 import tkinter as tk
 from pathlib import Path
+from tkinter import messagebox
 
 import customtkinter as ctk
 
 import i18n
 import store
+import store_ui
 import updates
 from i18n import t
-from ui import (BORDER, GREEN, GUTTER, HOVER, INK, INK_HOVER, INK_TEXT, KIND_ICON, RED, SECONDARY, TEXT, apply_glass,
+from ui import (fit_geometry, BORDER, GREEN, GUTTER, HOVER, INK, INK_HOVER, INK_TEXT, KIND_ICON, RED, SECONDARY, TEXT, apply_glass,
                 card, font, human_size, icon, round_icon)
 
 TARGET_TEXT = {"pc": "settings.target_pc", "android": "settings.target_android"}
@@ -41,7 +44,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.app = app
         self.node = app.node
         self.title(t("settings.title"))
-        self.geometry("620x720")
+        fit_geometry(self, 620, 720)
         self.minsize(520, 480)
         self.update_rows: ctk.CTkFrame | None = None
         self.update_note: ctk.CTkLabel | None = None
@@ -151,13 +154,65 @@ class SettingsWindow(ctk.CTkToplevel):
     def _cloud(self) -> None:
         box = self._section(t("cloud.title"), t("settings.cloud_desc"))
         self._switch(self._row(box, t("menu.cloud_on")), self.app.cloud_on_var, self._cloud_switch)
-        self._path_row(box, t("settings.cloud_dir"), self.node.cloud_dir, self._change_cloud_dir,
-                       lambda: _open_folder(self.node.cloud_dir))
+        row = self._row(box, t("settings.cloud_dir"), store_ui.place_text(self.node.cloud_dir))
+        _button(row, t("settings.change"), self._change_cloud_dir, width=64).pack(side="right")
+        state = self.node.cloud_state
+        if state != "off":
+            text, color = store_ui.state_text(state)
+            row = self._row(box, t("store.encryption"), "")
+            if state == "open":
+                text = "\n".join((text, t("store.cipher")))
+            ctk.CTkLabel(row.winfo_children()[0], text=text, font=font(11), text_color=color, anchor="w",
+                         justify="left", wraplength=360).pack(fill="x")
+            action = {"new": ("store.ok_create", "create"), "locked": ("store.ok_unlock", "unlock")}.get(state)
+            if action is not None:
+                _button(row, t(action[0]), lambda m=action[1]: store_ui.ask(self.app, self, m, self.app.store_changed),
+                        primary=True, width=90).pack(side="right")
+            if state == "open":
+                row = self._row(box, t("store.password_row"), t("store.password_row_hint"))
+                _button(row, t("store.ok_change"),
+                        lambda: store_ui.ask(self.app, self, "change", self.app.store_changed), width=90).pack(side="right")
+            if state in ("open", "locked"):
+                strong = tk.BooleanVar(value=self.node.settings.get("store_strong") is True)
+                row = self._row(box, t("store.strong_row"), t("store.strong_hint"))
+                self._switch(row, strong, lambda v=strong: self._set_strong(v),
+                             state="normal" if state == "open" or strong.get() else "disabled")
+                if strong.get():
+                    row = self._row(box, t("store.idle_row"), t("store.idle_hint"))
+                    choices = {t("store.idle_10"): 10, t("store.idle_30"): 30, t("store.idle_60"): 60,
+                               t("store.idle_off"): 0}
+                    now = self.node.settings.get("store_idle_min", 30)
+                    tabs = ctk.CTkSegmentedButton(row, values=list(choices), height=28, corner_radius=6, font=font(11),
+                                                  command=lambda label, c=choices: self.node.set_strong(
+                                                      True, c[label]))
+                    tabs.set(next((k for k, v in choices.items() if v == now), t("store.idle_30")))
+                    tabs.pack(side="right")
+                    if state == "open":
+                        row = self._row(box, t("store.lock_now_row"), "")
+                        _button(row, t("store.lock_now"), self._lock_now, width=90).pack(side="right")
+                row = self._row(box, t("store.reset_row"), t("store.reset_row_hint"))
+                ctk.CTkButton(row, text=t("store.ok_reset"), height=32, corner_radius=6, fg_color="transparent",
+                              hover_color=HOVER, text_color=RED, border_width=1, border_color=BORDER, font=font(12),
+                              width=90, command=lambda: store_ui.ask(self.app, self, "reset", self.app.store_changed)
+                              ).pack(side="right")
         self._switch(self._row(box, t("menu.cloud_collect"), t("settings.collect_hint")), self.app.cloud_collect_var,
                      self.app._on_collect_switch, state="normal" if self.node.cloud_on else "disabled")
         row = self._row(box, t("menu.cloud_open"))
         _button(row, t("settings.open"), self.app.open_cloud, width=64).pack(side="right")
         self._end(box)
+
+    def _set_strong(self, var: tk.BooleanVar) -> None:
+        try:
+            self.node.set_strong(bool(var.get()))
+        except Exception as exc:  # noqa: BLE001 - 잠겨 있으면 끌 수 없다(열어야 이 PC 사본을 만든다)
+            var.set(True)
+            messagebox.showerror(t("cloud.title"), str(exc), parent=self)
+        self.app.store_changed()
+
+    def _lock_now(self) -> None:
+        st = self.node.store()
+        if st is not None and st.lock_now():
+            self.app._handle_event("store_changed", {"peer": "", "state": st.state})
 
     def _cloud_switch(self) -> None:
         self.app._on_cloud_switch()

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 라이트박스(2.2.1) 필름 띠의 지금 칸: 흰 테두리 2dp(칸 위에 겹친다) -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true"><shape android:shape="rectangle"><stroke android:width="2dp" android:color="#FFFFFFFF" /><corners android:radius="6dp" /></shape></item>
+    <item><color android:color="@android:color/transparent" /></item>
+</selector>

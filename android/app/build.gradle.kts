@@ -18,8 +18,8 @@ android {
         applicationId = "com.choidev.tailhop"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "2.0.0"
+        versionCode = 14
+        versionName = "2.2.1"
     }
 
     signingConfigs {
@@ -77,6 +77,9 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // 앱 안 영상 재생(2.2.0, Apache-2.0). 디스크 캐시 모듈(SimpleCache)은 쓰지 않는다 — CloudVideo가 메모리로만 받는다
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

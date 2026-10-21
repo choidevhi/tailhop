@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 영상 재생기(2.2.1) 칩 글자: 고르면 검정(흰 면 위), 아니면 흰색 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true" android:color="#FF09090B" />
+    <item android:color="#FFFFFFFF" />
+</selector>

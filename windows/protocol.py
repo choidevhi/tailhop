@@ -436,8 +436,7 @@ def cloud_name(name: str) -> str:
     return name or "file"
 
 
-def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, peer: str, book,
-                       cloud_names: bool = False) -> Path:
+def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, peer: str, book) -> Path:
     """§11.2: offset부터 받아 이어 쓰고, 트레일러의 SHA-256으로 파일 전체를 확인한다.
     끊기면 조각을 남기고(book.keep), 규칙 위반·해시 불일치면 지운다(book.drop)."""
     size, xfer, offset = header["size"], header["xfer"], header.get("offset", 0)
@@ -461,10 +460,7 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
             book.drop(peer, xfer, part)
             raise ProtocolError("resume_lost") from exc
     else:
-        name = sanitize_filename(header["name"])
-        if cloud_names or kind == "cloud_put":
-            name = cloud_name(name)  # 클라우드 목록에서 사라지지 않을 이름으로
-        final, part, out = _open_part(save_dir, name)
+        final, part, out = _open_part(save_dir, sanitize_filename(header["name"]))
         book.begin(peer, xfer, size, part, final, kind)
         digest = hashlib.sha256()
 
@@ -507,42 +503,60 @@ def _receive_xfer_file(ch: Channel, header: dict, save_dir: Path, on_progress, p
     return final
 
 
-def _receive_into_vault(ch: Channel, header: dict, target, on_progress, peer: str, book) -> Path:
-    """§14: 보관함 안으로 올리기. 이어받기는 하지 않는다(조각을 평문으로 남기지 않으려고). 끊기면 처음부터 다시 받는다."""
-    size, xfer, offset = header["size"], header["xfer"], header.get("offset", 0)
-    if offset != 0:
-        raise ProtocolError("resume_lost")
-    v = target.vault
-    name = cloud_name(sanitize_filename(header["name"]))
-    rel = f"{target.rel_dir}/{name}" if target.rel_dir else name
-    writer = v.writer(rel, size, int(time.time() * 1000))
-    digest = hashlib.sha256()
-    got = 0
+def _receive_into_store(ch: Channel, header: dict, target, on_progress, peer: str, book) -> str:
+    """§17: 암호화 저장소로 바로 받는다(평문 조각을 디스크에 두지 않는다). xfer가 있으면 청크 단위로 이어 받고
+    트레일러의 SHA-256으로 확인한다. 끊기면 다 쓴 청크까지 남긴다. 저장된 이름을 돌려준다."""
+    size, xfer, offset = header["size"], header.get("xfer"), header.get("offset", 0)
+    if not _is_int(offset) or not 0 <= offset <= size or (offset and xfer is None):
+        raise ProtocolError("bad_xfer")
+    if free_bytes(target.store.root) < size - offset + DISK_RESERVE:
+        raise ProtocolError("disk_full")
+    if offset:
+        up = target.resume(peer, xfer, size, offset)
+    else:
+        name = cloud_name(sanitize_filename(header["name"]))
+        up = target.begin(name, size, int(time.time() * 1000), peer, xfer or new_xfer())
+    got = offset
     try:
         while True:
-            data, last = ch.recv()
-            if last:
+            data, last = _recv_data(ch)
+            if last and xfer is not None:
                 trailer = data
                 break
-            if not data:
+            if not data and not last:
                 raise ProtocolError("bad_xfer")
             got += len(data)
-            writer.write(data)
-            digest.update(data)
+            if got > size:
+                raise ProtocolError("file_too_big")
+            up.write(data)
             if on_progress:
                 on_progress(got, size)
-        try:
-            sha = json.loads(bytes(trailer).decode("utf-8")).get("sha256")
-        except (UnicodeDecodeError, ValueError, AttributeError) as exc:
-            raise ProtocolError("bad_xfer") from exc
-        if not isinstance(sha, str) or not hmac.compare_digest(sha, digest.hexdigest()):
-            raise ProtocolError("hash_mismatch")
-        rel = writer.commit(unique=True)  # 같은 이름이 있으면 번호(목록을 잠근 채로 정한다, §12.2)
+            if last:
+                break
+        if got != size:
+            raise ProtocolError("file_incomplete")
+        if xfer is not None:
+            try:
+                sha = json.loads(bytes(trailer).decode("utf-8")).get("sha256")
+            except (UnicodeDecodeError, ValueError, AttributeError) as exc:
+                raise ProtocolError("bad_xfer") from exc
+            if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
+                raise ProtocolError("bad_xfer")
+            if not hmac.compare_digest(sha, up.digest.hexdigest()):
+                raise ProtocolError("hash_mismatch")
+        stored = up.commit(unique=True)  # 같은 이름이 있으면 번호(§12.2)
+    except _NetDrop as exc:
+        if xfer is not None:
+            up.keep()
+        else:
+            up.abort()
+        raise ProtocolError("disconnected") from exc
     except BaseException:
-        writer.abort()
+        up.abort()
         raise
-    book.finish(peer, xfer)
-    return Path(rel.rsplit("/", 1)[-1])
+    if xfer is not None:
+        book.finish(peer, xfer)
+    return stored
 
 
 @dataclass
@@ -550,13 +564,15 @@ class Received:
     header: dict
     path: Path | None = None
     dup: bool = False  # 이미 받은 xfer를 다시 받음(응답이 사라져 상대가 다시 보냄). 기록·알림하지 않는다
+    stored: str | None = None  # 암호화 저장소에 넣은 이름(cloud_put·모으기, §17)
 
 
 # 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
 CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir", "cloud_thumb", "cloud_search",
-                  "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin")
+                  "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin", "cloud_move", "cloud_rename")
+STORE_REQUESTS = ("store_unlock", "store_lock")  # 저장소가 잠겨 있어도 받는다(§18.3)
 CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
-_EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS
+_EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS + STORE_REQUESTS
 
 
 def _is_int(value: object) -> bool:
@@ -577,12 +593,14 @@ def receive_message(
     peer: str = "",
     book=None,
     cloud=None,
-    cloud_names: bool = False,
+    collect=None,
+    cloud_off: str = "cloud_off",
 ) -> Received:
     """헤더와 본문을 받아 검증한다. 파일은 .part로 받은 뒤 검증되면 이름을 바꾼다.
 
     peer·book(resume.ResumeBook): §11 확장(hello, xfer 이어받기·중복 무시)을 쓸 때. book이 없으면 예전 v1만 받는다.
-    cloud(cloud.CloudFolder): 클라우드 모드가 켜져 있을 때(§12). 없으면 클라우드 요청은 cloud_off로 거부한다.
+    cloud(hub.HubAccess): 클라우드 저장소가 열려 있을 때(§12, §17). 없으면 클라우드 요청은 cloud_off(또는 그 이유)로 거부한다.
+    collect(hub.StoreTarget): "받은 파일도 클라우드에 모으기"면 대화방 파일을 저장소 맨 위로 받는다.
     클라우드 요청(목록·가져오기·지우기·폴더)은 헤더만 검사해 돌려주고, 답은 부른 쪽이 만든다."""
     raw, last = ch.recv()
     if last:
@@ -591,12 +609,13 @@ def receive_message(
         header = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError("bad_header") from exc
-    known = ("text", "file", "unpair") + (("hello", "update_get") + CLOUD_TYPES if book is not None else ())
+    known = ("text", "file", "unpair") + (("hello", "update_get") + CLOUD_TYPES + STORE_REQUESTS
+                                           if book is not None else ())
     if not isinstance(header, dict) or header.get("v") != 1 or header.get("type") not in known:
         raise ProtocolError("unsupported")
     guard.check_and_add(header.get("id"), header.get("ts"))
     if header["type"] in CLOUD_TYPES and cloud is None:
-        raise ProtocolError("cloud_off")
+        raise ProtocolError(cloud_off)
 
     if header["type"] in _EMPTY_BODY:
         # unpair: 상대가 페어링을 취소했다(§6). hello: 능력·이어받기 위치 확인(§11.1). 응답은 부른 쪽이 만든다.
@@ -621,18 +640,17 @@ def receive_message(
         if xfer is None:
             raise ProtocolError("bad_xfer")  # 클라우드에 올리기는 이어받기·트레일러가 필수다(§12.2)
         target = cloud.put_target(header.get("dir", ""), header)
-        if not isinstance(target, Path):  # 잠긴 폴더 안(§14): 평문을 디스크에 두지 않고 바로 암호화해 넣는다
-            return Received(header, _receive_into_vault(ch, header, target, on_progress, peer, book))
-        save_dir = target
+        return Received(header, stored=_receive_into_store(ch, header, target, on_progress, peer, book))
+    if collect is not None:
+        return Received(header, stored=_receive_into_store(ch, header, collect, on_progress, peer, book))
     save_dir.mkdir(parents=True, exist_ok=True)
     if xfer is not None:
-        return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book,
-                                                   cloud_names or header["type"] == "cloud_put"))
+        return Received(header, _receive_xfer_file(ch, header, save_dir, on_progress, peer, book))
 
     if free_bytes(save_dir) < size + DISK_RESERVE:
         raise ProtocolError("disk_full")
     name = sanitize_filename(header["name"])
-    final, part, out = _open_part(save_dir, cloud_name(name) if cloud_names else name)
+    final, part, out = _open_part(save_dir, name)
     got = 0
     try:
         with out:

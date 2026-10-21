@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 클라우드 목록 줄: 누르면 물들고(bg_row_press와 같음), 다중 선택(2.1.0)에서 골라지면(activated) 옅은 덧칠 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="@color/pressed">
+    <item android:id="@android:id/mask"><color android:color="#FFFFFFFF" /></item>
+    <item>
+        <selector>
+            <item android:state_activated="true"><color android:color="@color/tile" /></item>
+            <item><color android:color="@android:color/transparent" /></item>
+        </selector>
+    </item>
+</ripple>

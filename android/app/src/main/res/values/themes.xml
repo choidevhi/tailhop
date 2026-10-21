@@ -220,6 +220,47 @@
         <item name="android:background">@drawable/bg_btn_ghost</item>
         <item name="android:tint">@color/label</item>
     </style>
+    <!-- 다중 선택 동작 막대의 버튼(2.1.0): 아이콘 위·글자 아래, shadcn ghost처럼 누르면 안만 물든다 -->
+    <style name="ActBtn">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">56dp</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">6dp</item>
+        <item name="android:background">@drawable/bg_btn_ghost</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+    <style name="ActIcon">
+        <item name="android:layout_width">22dp</item>
+        <item name="android:layout_height">22dp</item>
+        <item name="android:tint">@color/label</item>
+        <item name="android:importantForAccessibility">no</item>
+    </style>
+    <style name="ActLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">4dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">@color/label</item>
+        <item name="android:maxLines">1</item>
+    </style>
+    <!-- 라이트박스(2.1.0): 검은 바탕 전체 화면 창. 상태바·내비바는 투명하고 아이콘은 밝게(검은 바탕 위) -->
+    <style name="Lightbox" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
     <!-- 유리 카드 안 줄 앞의 아이콘 칸(rounded-lg) -->
     <style name="RowTile">
         <item name="android:layout_width">36dp</item>

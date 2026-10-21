@@ -31,7 +31,7 @@ class IconTests(unittest.TestCase):
             self.assertEqual(img.getpixel((0, 0))[3], 0)  # 바탕은 투명
 
     def test_app_icons_exist(self):
-        source = "\n".join((ROOT / name).read_text("utf-8") for name in ("app.py", "cloud_ui.py", "settings_ui.py", "ui.py", "cloud_source.py"))
+        source = "\n".join((ROOT / name).read_text("utf-8") for name in ("app.py", "cloud_ui.py", "settings_ui.py", "ui.py", "cloud_source.py", "lightbox.py", "store_ui.py", "player.py"))
         names = set(re.findall(r'icon\("([a-z-]+)"', source))
         names |= set(re.findall(r'(?:ghost_button|round_icon|CircleButton)\([^,]+, "([a-z-]+)"', source))
         names |= {"smartphone", "laptop", "tailhop-logo"}

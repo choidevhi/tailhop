@@ -80,6 +80,24 @@ object Outbox {
     /** 이 줄의 다음 건: 실패하지 않은 건 중 가장 먼저 넣은 것(줄마다 차례로 보낸다). */
     @Synchronized fun head(ctx: Context, lane: String): OutboxJob? = list(ctx).firstOrNull { it.lane == lane && !it.failed }
 
+    /** 줄마다 맨 앞 건(2.2.0, Idle: 모두 상대가 꺼져 기다리는지 볼 때). */
+    @Synchronized fun heads(ctx: Context): List<OutboxJob> = list(ctx).filter { !it.failed }.distinctBy { it.lane }
+
+    /** 30일(Retry.KEEP_MS)이 지나도록 기다리기만 한 건을 포기로 둔다(Retry.expire). 포기한 건을 돌려준다(알림은 부른 쪽). */
+    @Synchronized
+    fun expire(ctx: Context, now: Long): List<OutboxJob> {
+        val l = list(ctx)
+        val out = ArrayList<OutboxJob>()
+        for (i in l.indices) Retry.expire(l[i], now)?.let { l[i] = it; out += it }
+        if (out.isNotEmpty()) commit(ctx)
+        return out
+    }
+
+    /** 영구로 받아 둔 읽기 권한(Idle.needsGrant). 읽지 못하면 빈 집합(= 모두 임시로 본다, 쉬지 않는다). */
+    fun persistedUris(ctx: Context): Set<String> =
+        try { ctx.contentResolver.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri.toString() }.toSet() }
+        catch (e: Exception) { emptySet() }
+
     @Synchronized
     private fun add(ctx: Context, jobs: List<OutboxJob>) {
         val l = list(ctx)

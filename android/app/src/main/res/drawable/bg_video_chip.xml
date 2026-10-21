@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 영상 재생기(2.2.1) 속도 칩·알약 버튼(검은 바탕 위 shadcn Toggle): 고르면 흰 면, 아니면 옅은 흰 면 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="#33FFFFFF">
+    <item>
+        <selector>
+            <item android:state_selected="true"><shape android:shape="rectangle"><solid android:color="#FFFFFFFF" /><corners android:radius="999dp" /></shape></item>
+            <item><shape android:shape="rectangle"><solid android:color="#26FFFFFF" /><stroke android:width="1dp" android:color="#33FFFFFF" /><corners android:radius="999dp" /></shape></item>
+        </selector>
+    </item>
+</ripple>

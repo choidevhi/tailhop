@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 클라우드 목록의 한 줄(유리 카드 안): PC, 폴더, 파일, 전송(올리기·가져오기). 홈의 줄과 같은 모양 -->
+<!-- 클라우드 목록의 한 줄(유리 카드 안): PC, 폴더, 파일, 전송(올리기·가져오기). 홈의 줄과 같은 모양.
+     2.1.0: 다중 선택이면 끝에 체크 원, 골라진 줄은 옅게 덧칠(activated) -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="60dp"
     android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="14dp" android:paddingEnd="14dp"
     android:paddingTop="8dp" android:paddingBottom="8dp" android:baselineAligned="false"
-    android:background="@drawable/bg_row_press" android:clickable="true" android:focusable="true">
+    android:background="@drawable/bg_row_select" android:clickable="true" android:focusable="true">
     <ImageView android:id="@+id/icon" style="@style/RowTile" android:importantForAccessibility="no" android:src="@drawable/ic_doc" />
     <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
         android:orientation="vertical" android:layout_marginStart="14dp">
@@ -16,5 +17,8 @@
     </LinearLayout>
     <ImageView android:id="@+id/trail" android:layout_width="18dp" android:layout_height="18dp"
         android:layout_marginStart="8dp" android:src="@drawable/ic_chevron_right" android:tint="@color/secondary"
+        android:importantForAccessibility="no" />
+    <ImageView android:id="@+id/check" android:layout_width="22dp" android:layout_height="22dp"
+        android:layout_marginStart="8dp" android:src="@drawable/sel_off" android:visibility="gone"
         android:importantForAccessibility="no" />
 </LinearLayout>
