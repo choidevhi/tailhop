@@ -2,7 +2,9 @@
 
 - 폴더를 잠그면 안의 파일을 하나씩 암호화해 `<클라우드>\\.tailhop-vault\\<id>`로 옮기고 원본은 휴지통을 거치지 않고 지운다.
   허브의 탐색기에서는 암호문만 보인다. 이름·크기·폴더 구조도 암호화한 목록(index.bin)에만 있다.
-- 보관함 키(VK)는 PIN에서 scrypt로 만든 키와 복구 코드에서 만든 키로 각각 감싸 둔다. PIN 없이는 허브 디스크로도 못 연다.
+- 보관함 키(VK)는 PIN에서 scrypt로 만든 키와 복구 코드에서 만든 키로 각각 감싸 둔다. PIN으로 감싼 것은 한 번 더
+  이 PC의 Windows 계정 보호(DPAPI)로 감싼다: 디스크를 복사해 가도 이 PC의 Windows 로그인 없이는 PIN을 맞혀 볼 수조차 없다.
+  (복구 코드 쪽은 160비트라 DPAPI 없이 둔다. Windows를 다시 깔아도 복구 코드로는 열린다.)
 - 앱에서 PIN을 넣으면 그 기기에 30분짜리 열쇠(token)를 준다. 쓰일 때마다 연장되고 앱이 꺼지면 사라진다.
 - 잠그기·풀기는 뒤에서 하나씩 하고, 앱이 꺼졌다 켜지면 남은 것부터 이어 한다(파일을 보관함에 넣고 목록을 쓴 다음에야 원본을 지운다).
 """
@@ -34,6 +36,8 @@ HEAD = 4 + 8 + 8  # "THV1" + 파일 nonce 접두 + 크기
 SCRYPT = {"n": 32768, "r": 8, "p": 1}
 TOKEN_TTL = 1800
 MAX_FAILS = 5
+MIN_PIN = 6
+SAVE_EVERY = 64  # 잠글 때 목록을 이만큼마다 한 번 쓴다(파일마다 쓰면 많은 파일에서 느리다)
 CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _HIDDEN_SYSTEM = 0x2 | 0x4
 
@@ -76,7 +80,34 @@ def normalize_code(text: str) -> str:
 
 
 def valid_pin(pin: object) -> bool:
-    return isinstance(pin, str) and 4 <= len(pin) <= 64 and pin == pin.strip()
+    return isinstance(pin, str) and MIN_PIN <= len(pin) <= 64 and pin == pin.strip()
+
+
+def _seal_local(text: str) -> str:
+    """PIN으로 감싼 키를 이 PC의 Windows 계정으로 한 번 더 감싼다(DPAPI)."""
+    return _b64(store._dpapi(text.encode(), True))
+
+
+def _open_local(text: str) -> str:
+    return store._dpapi(_unb64(text), False).decode()
+
+
+def _make_writable(path: Path) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+
+
+def _forget_thumb(path: Path) -> None:
+    """잠그기 전에 만들어 둔 미리보기 캐시를 지운다(캐시는 원본 사진을 알아볼 만한 크기다)."""
+    import thumbs  # 썸네일 모듈은 Pillow·셸을 불러오므로 쓸 때만
+    try:
+        cached = thumbs.cache_path(path)
+    except OSError:
+        cached = None
+    if cached is not None:
+        cached.unlink(missing_ok=True)
 
 
 def _hide(path: Path) -> None:
@@ -104,6 +135,7 @@ class Vault:
         self.vk = vk
         self.aead = AESGCM(vk)
         self.lock = threading.RLock()
+        self.writers = 0
         self.entries: dict[str, Entry] = self._load_index()
 
     # 목록
@@ -150,17 +182,28 @@ class Vault:
     def writer(self, rel: str, size: int, mtime: int) -> "ObjectWriter":
         return ObjectWriter(self, rel, size, mtime)
 
-    def put_file(self, rel: str, src: Path) -> None:
+    def put_file(self, rel: str, src: Path, save: bool = True) -> None:
         st = src.stat()
         w = self.writer(rel, st.st_size, st.st_mtime_ns // 1_000_000)
         try:
             with open(src, "rb") as f:
                 for block in iter(lambda: f.read(CHUNK), b""):
                     w.write(block)
-            w.commit()
+            w.commit(save=save)
         except BaseException:
             w.abort()
             raise
+
+    def free_name(self, rel: str) -> str:
+        """같은 이름이 있으면 `이름 (1).확장자`. 부르는 쪽이 self.lock을 잡고 있어야 한다."""
+        folder, _, name = rel.rpartition("/")
+        stem, dot, ext = name.rpartition(".")
+        n, candidate = 1, rel
+        while candidate in self.entries:
+            numbered = f"{stem} ({n}).{ext}" if dot and stem else f"{name} ({n})"
+            candidate = f"{folder}/{numbered}" if folder else numbered
+            n += 1
+        return candidate
 
     # 파일 읽기
     def read(self, rel: str, offset: int = 0) -> Iterator[bytes]:
@@ -222,6 +265,8 @@ class ObjectWriter:
         self.index = 0
         self.written = 0
         self.count = max(1, -(-size // CHUNK))
+        with vault.lock:
+            vault.writers += 1  # 쓰는 중에는 잠금 풀기가 기다리게(늦게 끝난 올리기가 사라지지 않게)
 
     def _flush(self, data: bytes) -> None:
         last = self.index == self.count - 1
@@ -238,27 +283,36 @@ class ObjectWriter:
             self._flush(bytes(self.buf[:CHUNK]))
             del self.buf[:CHUNK]
 
-    def commit(self) -> None:
+    def commit(self, unique: bool = False, save: bool = True) -> str:
+        """목록에 넣는다. unique면 같은 이름이 있을 때 번호를 붙인다(목록을 잠근 채로 정해 동시에 올려도 겹치지 않게).
+        save=False면 목록 파일은 부른 쪽이 나중에 쓴다. 넣은 상대 경로를 돌려준다."""
         if self.written != self.size:
             raise p.ProtocolError("file_incomplete")
         self._flush(bytes(self.buf))
         self.out.close()
         with self.vault.lock:
+            if unique:
+                self.rel = self.vault.free_name(self.rel)
             parent = self.rel.rpartition("/")[0]
             self.vault.ensure_dirs(parent)
             old = self.vault.entries.get(self.rel)
             if old is not None and old.is_dir:
                 raise p.ProtocolError("bad_path")
             self.vault.entries[self.rel] = Entry(False, self.size, self.mtime, self.obj)
-            self.vault.save_index()
+            if save:
+                self.vault.save_index()
             if old is not None and old.obj:
                 (self.vault.folder / "objects" / old.obj).unlink(missing_ok=True)
+            self.vault.writers -= 1
+        return self.rel
 
     def abort(self) -> None:
         try:
             self.out.close()
         finally:
             self.path.unlink(missing_ok=True)
+            with self.vault.lock:
+                self.vault.writers -= 1
 
 
 # ---------- 클라우드 폴더 하나의 보관함들 ----------
@@ -287,13 +341,16 @@ class VaultManager:
         self.open_vaults: dict[str, Vault] = {}  # 열쇠가 하나라도 살아 있는 보관함(잠그기·풀기가 끝난 뒤에만 만든다)
         self.keys: dict[str, bytes] = {}  # 열린 보관함의 VK(메모리에만, 열쇠가 모두 끝나면 버린다)
         self.tokens: dict[str, Token] = {}
-        self.fails: dict[str, tuple[int, float]] = {}  # vid: (틀린 횟수, 막힌 끝 시각)
+        # (보관함, 기기): (틀린 횟수, 막힌 끝 시각). 기기마다 따로 세서 한 기기가 다른 기기(주인의 PC 앱)를 막지 못한다
+        self.fails: dict[tuple[str, str], tuple[int, float]] = {}
+        self.attempt_locks: dict[str, threading.Lock] = {}  # 보관함마다 PIN 확인을 한 번에 하나씩(동시에 넣어 횟수를 피하지 못하게)
         self.jobs: dict[str, threading.Thread] = {}
         self._pending_keys: dict[str, bytes] = {}
         self._load()
 
     # 등록부
     def _load(self) -> None:
+        import cloud  # cloud는 보관함을 모르므로 거꾸로 불러도 고리가 생기지 않는다
         try:
             data = json.loads((self.base / "vaults.json").read_text("utf-8"))
         except (OSError, ValueError):
@@ -301,9 +358,10 @@ class VaultManager:
         for raw in data.get("vaults", []) if isinstance(data, dict) else []:
             try:
                 m = Mount(str(raw["id"]), str(raw["mount"]), str(raw.get("state", "locked")))
-            except (KeyError, TypeError):
+                ok = bool(cloud.parse_path(m.mount)) and m.state in ("locked", "locking", "unlocking")
+            except (KeyError, TypeError, p.ProtocolError):
                 continue
-            if len(m.id) == 32 and (self.base / m.id / "vault.json").exists():
+            if ok and len(m.id) == 32 and (self.base / m.id / "vault.json").exists():
                 self.mounts[m.mount] = m
 
     def _save(self) -> None:
@@ -312,32 +370,45 @@ class VaultManager:
         data = {"vaults": [{"id": m.id, "mount": m.mount, "state": m.state} for m in self.mounts.values()]}
         store._write_private(self.base / "vaults.json", json.dumps(data))
 
+    # 경로 비교는 대소문자를 가리지 않는다(Windows 폴더 이름처럼). 'Secret'을 잠그면 'SECRET'도 같은 잠긴 폴더다.
     def mount_of(self, path: str) -> tuple[Mount, str] | None:
         """path가 잠긴 폴더 자리이거나 그 안이면 (보관함, 안쪽 상대 경로)."""
+        folded = path.casefold()
         with self.lock:
             for mount, m in self.mounts.items():
-                if path == mount:
+                key = mount.casefold()
+                if folded == key:
                     return m, ""
-                if path.startswith(mount + "/"):
+                if folded.startswith(key + "/"):
                     return m, path[len(mount) + 1:]
         return None
 
     def mounts_under(self, path: str) -> list[Mount]:
         """path 폴더 바로 아래에 있는 잠긴 폴더들(목록에 보일 것)."""
-        prefix = path + "/" if path else ""
+        prefix = (path + "/" if path else "").casefold()
         with self.lock:
-            return [m for k, m in self.mounts.items() if k.startswith(prefix) and "/" not in k[len(prefix):]]
+            return [m for k, m in self.mounts.items()
+                    if k.casefold().startswith(prefix) and "/" not in k[len(prefix):]]
 
     def any_inside(self, path: str) -> bool:
-        prefix = path + "/" if path else ""
+        folded = path.casefold()
+        prefix = folded + "/" if path else ""
         with self.lock:
-            return any(k == path or k.startswith(prefix) for k in self.mounts)
+            return any(k.casefold() == folded or k.casefold().startswith(prefix) for k in self.mounts)
+
+    def display_state(self, m: Mount) -> str:
+        """목록에 보일 상태. 잠그거나 풀던 작업이 멈췄으면 stalled(메뉴에서 되돌리거나 PIN으로 열면 이어 한다)."""
+        if m.state != "locked" and not (m.id in self.jobs and self.jobs[m.id].is_alive()):
+            return "stalled"
+        return m.state
 
     # 잠그기
     def lock_folder(self, path: str, folder: Path, pin: str) -> str:
         """폴더를 잠근다. 키를 만들어 두고 바로 복구 코드를 돌려준다. 파일은 뒤에서 하나씩 옮긴다."""
-        if not path or not valid_pin(pin):
-            raise p.ProtocolError("bad_path" if not path else "vault_pin")
+        if not path:
+            raise p.ProtocolError("bad_path")
+        if not valid_pin(pin):
+            raise p.ProtocolError("vault_pin")
         if self.mount_of(path) is not None or self.any_inside(path):
             raise p.ProtocolError("bad_path")
         if not folder.is_dir():
@@ -346,7 +417,8 @@ class VaultManager:
         vk = os.urandom(32)
         code = new_recovery_code()
         salt, rsalt = os.urandom(16), os.urandom(16)
-        meta = {"v": 1, "kdf": "scrypt", **SCRYPT, "salt": _b64(salt), "wrapped": _wrap(_kek(pin, salt), vk, vid),
+        meta = {"v": 1, "kdf": "scrypt", **SCRYPT, "salt": _b64(salt),
+                "wrapped": _seal_local(_wrap(_kek(pin, salt), vk, vid)),
                 "rsalt": _b64(rsalt), "rwrapped": _wrap(_kek(code, rsalt), vk, vid)}
         vfolder = self.base / vid
         (vfolder / "objects").mkdir(parents=True)
@@ -378,38 +450,80 @@ class VaultManager:
         with self.lock:
             return next((m for m in self.mounts.values() if m.id == vid), None)
 
+    @staticmethod
+    def _plain_files(src_root: Path) -> list[Path]:
+        files = []
+        for folder, dirs, names in os.walk(src_root, followlinks=False):
+            here = Path(folder)
+            dirs[:] = [d for d in dirs if not (here / d).is_symlink() and not (here / d).is_junction()]
+            for name in names:
+                path = here / name
+                try:
+                    if not path.is_symlink() and stat.S_ISREG(os.lstat(path).st_mode):
+                        files.append(path)
+                except OSError:
+                    continue
+        return files
+
     def _run_lock(self, vid: str) -> None:
+        """평문을 하나씩 보관함에 넣는다. 목록을 쓴 다음에야 그 원본들을 지운다(중간에 꺼져도 잃지 않는다).
+        도중에 새로 생긴 파일도 넣도록 다시 훑고, 지우지 못한 파일(사용 중 등)은 다음 번에 다시 해 본다.
+        끝에는 빈 폴더만 지운다(남은 것이 있으면 폴더째 지우지 않는다)."""
         m = self._mount_by_id(vid)
         vk = self._pending_keys.get(vid)
         if m is None or vk is None:
             return
         vault = Vault(self.base / vid, vid, vk)
         src_root = self.root.joinpath(*m.mount.split("/"))
-        files = []
-        for folder, dirs, names in os.walk(src_root, followlinks=False):
-            here = Path(folder)
-            dirs[:] = [d for d in dirs if not (here / d).is_symlink() and not (here / d).is_junction()]
-            for d in dirs:
-                rel = (here / d).relative_to(src_root).as_posix()
-                vault.ensure_dirs(rel, (here / d).stat().st_mtime_ns // 1_000_000)
-            for name in names:
-                path = here / name
-                if not path.is_symlink() and stat.S_ISREG(os.lstat(path).st_mode):
-                    files.append(path)
-        total = sum(f.stat().st_size for f in files) or 1
-        done = 0
-        for path in files:
-            rel = path.relative_to(src_root).as_posix()
-            vault.put_file(rel, path)  # 보관함에 넣고 목록을 쓴 다음
-            done += path.stat().st_size
-            os.remove(path)  # 원본을 지운다(휴지통을 거치지 않음)
-            m.progress = min(99, done * 100 // total)
+        failed: set[Path] = set()
+        for _ in range(4):  # 새로 생긴 파일·실패한 파일을 몇 번 더 본다
+            files = [f for f in self._plain_files(src_root) if f not in failed] if src_root.is_dir() else []
+            if not files:
+                break
+            total = sum(f.stat().st_size for f in files) or 1
+            done, batch = 0, []
+            for path in files:
+                rel = path.relative_to(src_root).as_posix()
+                try:
+                    _forget_thumb(path)
+                    with vault.lock:
+                        vault.ensure_dirs(rel.rpartition("/")[0])
+                    vault.put_file(rel, path, save=False)
+                    batch.append(path)
+                    done += path.stat().st_size
+                except (OSError, p.ProtocolError):
+                    failed.add(path)  # 읽는 중 바뀜·사용 중: 다음 번에
+                if len(batch) >= SAVE_EVERY:
+                    self._commit_batch(vault, batch, failed)
+                    batch = []
+                m.progress = min(99, done * 100 // total)
+            self._commit_batch(vault, batch, failed)
+            failed.clear() if not failed else None
         vault.save_index()
-        shutil.rmtree(src_root, ignore_errors=True)
+        for folder, _dirs, _files in sorted(os.walk(src_root, followlinks=False), key=lambda x: -len(x[0])):
+            try:
+                os.rmdir(folder)  # 빈 폴더만 지운다
+            except OSError:
+                pass
+        left = self._plain_files(src_root) if src_root.is_dir() else []
         with self.lock:
-            m.state, m.progress = "locked", 100
-            self._save()
-            self._pending_keys.pop(vid, None)
+            if not left:
+                m.state, m.progress = "locked", 100
+                self._pending_keys.pop(vid, None)
+            self._save()  # 남은 것이 있으면 locking으로 둔다(목록에는 stalled로 보이고 되돌릴 수 있다)
+
+    @staticmethod
+    def _commit_batch(vault: Vault, batch: list[Path], failed: set[Path]) -> None:
+        """넣은 파일들의 목록을 한 번에 쓰고, 그 다음에 원본을 지운다(휴지통을 거치지 않음)."""
+        if not batch:
+            return
+        vault.save_index()
+        for path in batch:
+            try:
+                _make_writable(path)
+                os.remove(path)
+            except OSError:
+                failed.add(path)
 
     # 열기
     def _meta(self, vid: str) -> dict:
@@ -420,36 +534,46 @@ class VaultManager:
         if found is None or found[1]:
             raise p.ProtocolError("not_found")
         m = found[0]
-        vk = self._check_secret(m.id, pin, recovery)
+        vk = self._check_secret(m.id, peer, pin, recovery)
         with self.lock:
             self.keys[m.id] = vk
             token = os.urandom(16).hex()
             self.tokens[token] = Token(m.id, peer, self.clock() + TOKEN_TTL)
-            stalled = m.state != "locked" and not (m.id in self.jobs and self.jobs[m.id].is_alive())
-            if stalled:  # 잠그거나 풀다가 앱이 꺼졌다: 키를 얻었으니 이어 한다
+            stalled = self.display_state(m) == "stalled"
+            if stalled:  # 잠그거나 풀다가 멈췄다: 키를 얻었으니 이어 한다
                 self._pending_keys[m.id] = vk
         if stalled:
             self._start(m.id, self._run_lock if m.state == "locking" else self._run_unlock)
         return token
 
-    def _check_secret(self, vid: str, pin: str | None, recovery: str | None) -> bytes:
-        now = self.clock()
-        count, until = self.fails.get(vid, (0, 0.0))
-        if now < until:
-            raise p.ProtocolError("vault_wait", retry=int(until - now) + 1)
-        meta = self._meta(vid)
-        vk = None
-        if isinstance(pin, str) and valid_pin(pin):
-            vk = _unwrap(_kek(pin, _unb64(meta["salt"])), meta["wrapped"], vid)
-        elif isinstance(recovery, str) and recovery:
-            vk = _unwrap(_kek(normalize_code(recovery), _unb64(meta["rsalt"])), meta["rwrapped"], vid)
-        if vk is None:
+    def _check_secret(self, vid: str, peer: str, pin: str | None, recovery: str | None) -> bytes:
+        """PIN·복구 코드를 확인한다. 보관함마다 한 번에 하나씩, 틀린 횟수는 확인 전에 미리 올려 둔다."""
+        with self.lock:
+            gate = self.attempt_locks.setdefault(vid, threading.Lock())
+        with gate:
+            now = self.clock()
+            key = (vid, peer)
+            count, until = self.fails.get(key, (0, 0.0))
+            if now < until:
+                raise p.ProtocolError("vault_wait", retry=int(until - now) + 1)
             count += 1
             wait = 0.0 if count < MAX_FAILS else min(3600.0, 60.0 * 2 ** (count - MAX_FAILS))
-            self.fails[vid] = (count, now + wait)
-            raise p.ProtocolError("vault_pin")
-        self.fails.pop(vid, None)
-        return vk
+            self.fails[key] = (count, now + wait)  # 맞으면 아래에서 지운다
+            meta = self._meta(vid)
+            vk = None
+            if isinstance(pin, str) and valid_pin(pin):
+                try:
+                    wrapped = _open_local(meta["wrapped"])
+                except OSError:
+                    wrapped = None  # 다른 PC·다른 Windows 계정: PIN으로는 못 연다(복구 코드로)
+                if wrapped is not None:
+                    vk = _unwrap(_kek(pin, _unb64(meta["salt"])), wrapped, vid)
+            elif isinstance(recovery, str) and recovery:
+                vk = _unwrap(_kek(normalize_code(recovery), _unb64(meta["rsalt"])), meta["rwrapped"], vid)
+            if vk is None:
+                raise p.ProtocolError("vault_pin")
+            self.fails.pop(key, None)
+            return vk
 
     def vault_for(self, mount: Mount, token: object, peer: str) -> Vault:
         """열쇠를 확인하고 열린 보관함을 돌려준다(30분 연장). 잠그기·풀기 중이면 vault_busy."""
@@ -476,19 +600,33 @@ class VaultManager:
             self.open_vaults = {k: v for k, v in self.open_vaults.items() if k in alive}
             self.keys = {k: v for k, v in self.keys.items() if k in alive}
 
+    def _forget(self, vid: str) -> None:
+        """그 보관함의 열쇠·키를 모두 버린다(풀기·지우기·PIN 바꾸기 뒤)."""
+        with self.lock:
+            self.tokens = {k: v for k, v in self.tokens.items() if v.vid != vid}
+            self.open_vaults.pop(vid, None)
+            self.keys.pop(vid, None)
+
     # 풀기·PIN 바꾸기·지우기
-    def unlock_folder(self, path: str, pin: str) -> None:
+    def unlock_folder(self, path: str, pin: str, peer: str = "local") -> None:
+        """잠금을 풀어 평문 폴더로 되돌린다. 잠그다 멈춘 것(stalled)도 이것으로 되돌린다."""
         found = self.mount_of(path)
         if found is None or found[1]:
             raise p.ProtocolError("not_found")
         m = found[0]
-        if m.state != "locked":
+        state = self.display_state(m)
+        if state not in ("locked", "stalled"):
             raise p.ProtocolError("vault_busy")
-        vk = self._check_secret(m.id, pin, None)
+        with self.lock:
+            open_vault = self.open_vaults.get(m.id)
+            if open_vault is not None and open_vault.writers > 0:
+                raise p.ProtocolError("vault_busy")  # 지금 올리는 중인 파일이 있다
+        vk = self._check_secret(m.id, peer, pin, None)
         with self.lock:
             m.state, m.progress = "unlocking", 0
             self._save()
             self._pending_keys[m.id] = vk
+        self._forget(m.id)
         self._start(m.id, self._run_unlock)
 
     def _run_unlock(self, vid: str) -> None:
@@ -498,6 +636,11 @@ class VaultManager:
             return
         vault = Vault(self.base / vid, vid, vk)
         dest = self.root.joinpath(*m.mount.split("/"))
+        here = self.root
+        for part in m.mount.split("/"):  # 되돌릴 자리 가운데 링크가 끼어 있으면 하지 않는다
+            here = here / part
+            if here.is_symlink() or (here.exists() and here.is_junction()):
+                return
         dest.mkdir(parents=True, exist_ok=True)
         items = sorted(vault.entries.items())
         total = sum(e.size for _, e in items) or 1
@@ -508,6 +651,8 @@ class VaultManager:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target = p.unique_path(target.parent, target.name)  # 잠그다 멈춰 남아 있던 평문과 겹치면 번호를
             tmp = target.with_name(target.name + ".part")
             with open(tmp, "wb") as out:
                 for block in vault.read(rel):
@@ -519,29 +664,29 @@ class VaultManager:
         shutil.rmtree(self.base / vid, ignore_errors=True)
         with self.lock:
             self.mounts.pop(m.mount, None)
-            self.open_vaults.pop(vid, None)
-            self.tokens = {k: v for k, v in self.tokens.items() if v.vid != vid}
             self._pending_keys.pop(vid, None)
             self._save()
+        self._forget(vid)
 
-    def repin(self, path: str, new_pin: str, pin: str | None = None, recovery: str | None = None) -> None:
+    def repin(self, path: str, new_pin: str, pin: str | None = None, recovery: str | None = None,
+              peer: str = "local") -> None:
         found = self.mount_of(path)
         if found is None or found[1]:
             raise p.ProtocolError("not_found")
         if not valid_pin(new_pin):
             raise p.ProtocolError("vault_pin")
         m = found[0]
-        vk = self._check_secret(m.id, pin, recovery)
+        vk = self._check_secret(m.id, peer, pin, recovery)
         meta = self._meta(m.id)
         salt = os.urandom(16)
-        meta["salt"], meta["wrapped"] = _b64(salt), _wrap(_kek(new_pin, salt), vk, m.id)
+        meta["salt"], meta["wrapped"] = _b64(salt), _seal_local(_wrap(_kek(new_pin, salt), vk, m.id))
         store._write_private(self.base / m.id / "vault.json", json.dumps(meta))
+        self._forget(m.id)  # 예전 PIN으로 연 열쇠도 끝낸다
 
     def destroy(self, mount: Mount) -> None:
         """잠긴 폴더째 영구히 지운다(열쇠가 있을 때만 부른다)."""
         with self.lock:
             self.mounts.pop(mount.mount, None)
-            self.open_vaults.pop(mount.id, None)
-            self.tokens = {k: v for k, v in self.tokens.items() if v.vid != mount.id}
             self._save()
+        self._forget(mount.id)
         shutil.rmtree(self.base / mount.id, ignore_errors=True)

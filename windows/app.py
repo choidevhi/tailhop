@@ -45,7 +45,7 @@ from node import PAIR_WINDOW_SEC, Node
 APP_NAME = "TailHop"
 CHAT_FILTERS = {"all": "chat.filter_all", "text": "chat.filter_text", "media": "chat.filter_media",
                 "file": "chat.filter_file"}
-APP_VERSION = "1.9.1"
+APP_VERSION = "2.0.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -1486,7 +1486,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self._quit()
         elif kind in ("cloud_in", "cloud_changed"):
             if kind == "cloud_in":
-                self._notify(t("notify.cloud_in", peer=data["peer"], name=data["name"]))
+                self._notify(t("notify.cloud_in", peer=data["peer"], name=data["name"]) if data["name"]
+                             else t("notify.cloud_in_locked", peer=data["peer"]))
             self._refresh_cloud_window(local=True)
         elif kind == "cloud_sent":
             self._flash(t("flash.cloud_sent", name=data["name"]))

@@ -28,8 +28,8 @@ import store
 from cloud_source import LOCAL, Source
 from i18n import t
 from ui import (AMBER, BORDER, BUBBLE, DROP, GREEN, GUTTER, HOVER, INK, INK_HOVER, INK_TEXT, KIND_ICON, MAIN_BG, MONO,
-                RED, SECONDARY, SELECTED, SIDEBAR_BG, TEXT, apply_glass, bind_tree, card, font, ghost_button, human_size,
-                icon, round_icon)
+                RED, SECONDARY, SELECTED, SIDEBAR_BG, TEXT, apply_glass, bind_tree, card, copy_secret, font, ghost_button,
+                human_size, icon, round_icon)
 
 RENDER_PAGE = 100  # 한 번에 그리는 항목 수(CTk 위젯이 무거워 나눠 그린다)
 CLOUD_KINDS = ("cloud_put", "cloud_get")
@@ -112,7 +112,7 @@ class PinDialog(ctk.CTkToplevel):
             if self.new.get() != self.again.get():
                 self.error.configure(text=t("vault.mismatch"))
                 return
-            if not 4 <= len(self.new.get()) <= 64:
+            if not 6 <= len(self.new.get()) <= 64:
                 self.error.configure(text=t("vault.pin_rule"))
                 return
             values["new_pin"] = self.new.get()
@@ -151,8 +151,7 @@ def show_recovery(parent, code: str) -> None:
     row.pack(fill="x", side="bottom", padx=20, pady=16)
 
     def copy() -> None:
-        win.clipboard_clear()
-        win.clipboard_append(code)
+        copy_secret(win, code)
         copy_button.configure(text=t("vault.copied"))
 
     copy_button = ctk.CTkButton(row, text=t("vault.copy"), command=copy, height=34, corner_radius=6,
@@ -642,6 +641,8 @@ class CloudWindow(ctk.CTkToplevel):
             return t("vault.locking", pct=item.progress)
         if item.state == "unlocking":
             return t("vault.unlocking", pct=item.progress)
+        if item.state == "stalled":
+            return t("vault.stalled")
         return t("vault.locked")
 
     # ---------- 미리보기 ----------
@@ -718,6 +719,9 @@ class CloudWindow(ctk.CTkToplevel):
             menu.add_command(label=t("cloud.open"), command=lambda: self.activate(item, full))
             if self._has_cloud2():
                 menu.add_command(label=t("vault.lock_menu"), command=lambda: self.ask_lock(item.name, full))
+        if item.locked and item.state == "stalled":
+            menu.add_command(label=t("vault.resume_menu"), command=lambda: self.ask_open(item.name, full))
+            menu.add_command(label=t("vault.unlock_menu"), command=lambda: self.ask_unlock(item.name, full))
         if item.locked and item.state == "locked":
             menu.add_command(label=t("cloud.open"), command=lambda: self.activate(item, full))
             menu.add_command(label=t("vault.unlock_menu"), command=lambda: self.ask_unlock(item.name, full))
@@ -802,9 +806,14 @@ class CloudWindow(ctk.CTkToplevel):
             self._show_local(self.node.cloud_dir.joinpath(*full.split("/")))
             return
         src = self._src()  # 잠긴 폴더 안: 저장 폴더로 풀어 꺼낸다
-        self._bg(lambda: src.export(full, self.node.save_dir),
-                 lambda path, e: self._show_local(path) if e is None else
-                 messagebox.showerror(t("cloud.title"), str(e), parent=self))
+        def exported(path, error) -> None:
+            if error is not None:
+                messagebox.showerror(t("cloud.title"), str(error), parent=self)
+                return
+            self.app.flash(t("vault.exported"))  # 꺼낸 것은 평문 사본이다
+            self._show_local(path)
+
+        self._bg(lambda: src.export(full, self.node.save_dir), exported)
 
     def delete(self, item: cloud.Item, full: str) -> None:
         where = self._source_name(self.source)

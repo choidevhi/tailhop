@@ -83,15 +83,15 @@ class Source:
         if not self.local:
             self.node.cloud_unlock(self.sid, path, pin)
             return
-        self._hub().unlock(cloud.parse_path(path), pin)
+        self._hub().unlock(cloud.parse_path(path), pin, LOCAL_PEER)
         self.node._open_tokens.pop((LOCAL, path), None)
 
     def repin(self, path: str, new_pin: str, pin: str | None = None, recovery: str | None = None) -> None:
         if not self.local:
             self.node.cloud_repin(self.sid, path, new_pin, pin, recovery)
             return
-        header = {"new_pin": new_pin, **({"pin": pin} if pin is not None else {"recovery": recovery})}
-        self._hub().repin(cloud.parse_path(path), header)
+        header = {"new_pin": new_pin, "pin": pin, "recovery": recovery}
+        self._hub().repin(cloud.parse_path(path), header, LOCAL_PEER)
 
     def is_open(self, path: str) -> bool:
         return self.node.token_for(self.sid, path) is not None
@@ -124,7 +124,10 @@ class Source:
                 if isinstance(target, Path):
                     shutil.copy2(file, p.unique_path(target, name))
                 else:
-                    target.vault.put_file(_free_name(target, p.cloud_name(name)), file)
+                    with target.vault.lock:
+                        rel = target.vault.free_name(f"{target.rel_dir}/{p.cloud_name(name)}" if target.rel_dir
+                                                     else p.cloud_name(name))
+                    target.vault.put_file(rel, file)
                 count += 1
         return count
 
@@ -155,13 +158,3 @@ def _walk(src: Path):
             rel = file.parent.relative_to(base.parent).as_posix()
             yield file, rel
 
-
-def _free_name(target: hubmod.VaultTarget, name: str) -> str:
-    rel_dir = target.rel_dir
-    stem, dot, ext = name.rpartition(".")
-    rel, n = (f"{rel_dir}/{name}" if rel_dir else name), 1
-    while rel in target.vault.entries:
-        numbered = f"{stem} ({n}).{ext}" if dot and stem else f"{name} ({n})"
-        rel = f"{rel_dir}/{numbered}" if rel_dir else numbered
-        n += 1
-    return rel

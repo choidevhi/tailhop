@@ -514,14 +514,7 @@ def _receive_into_vault(ch: Channel, header: dict, target, on_progress, peer: st
         raise ProtocolError("resume_lost")
     v = target.vault
     name = cloud_name(sanitize_filename(header["name"]))
-    stem, dot, ext = name.rpartition(".")
-    rel_dir = target.rel_dir
-    rel = f"{rel_dir}/{name}" if rel_dir else name
-    n = 1
-    while rel in v.entries:  # 같은 이름이 있으면 번호를 붙인다(§12.2)
-        numbered = f"{stem} ({n}).{ext}" if dot and stem else f"{name} ({n})"
-        rel = f"{rel_dir}/{numbered}" if rel_dir else numbered
-        n += 1
+    rel = f"{target.rel_dir}/{name}" if target.rel_dir else name
     writer = v.writer(rel, size, int(time.time() * 1000))
     digest = hashlib.sha256()
     got = 0
@@ -544,7 +537,7 @@ def _receive_into_vault(ch: Channel, header: dict, target, on_progress, peer: st
             raise ProtocolError("bad_xfer") from exc
         if not isinstance(sha, str) or not hmac.compare_digest(sha, digest.hexdigest()):
             raise ProtocolError("hash_mismatch")
-        writer.commit()
+        rel = writer.commit(unique=True)  # 같은 이름이 있으면 번호(목록을 잠근 채로 정한다, §12.2)
     except BaseException:
         writer.abort()
         raise

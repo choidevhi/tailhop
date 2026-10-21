@@ -49,6 +49,9 @@ class Cloud2Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name)
+        import thumbs
+        self._thumb_cache = thumbs.CACHE_DIR
+        thumbs.CACHE_DIR = self.root / "thumbs"  # 실제 %LOCALAPPDATA%\TailHop\thumbs에 쓰지 않게
         self.table = {IP_A: tsnet.Peer("nodeA", USER, "pc-a"), IP_B: tsnet.Peer("nodeB", USER, "pc-b"),
                       IP_C: tsnet.Peer("nodeC", USER, "pc-c")}
         self.nodes = []
@@ -71,6 +74,8 @@ class Cloud2Tests(unittest.TestCase):
         outbox.BACKOFF = (0.05,) * 5
 
     def tearDown(self):
+        import thumbs
+        thumbs.CACHE_DIR = self._thumb_cache
         outbox.BACKOFF = self._backoff
         for n in self.nodes:
             n.stop()
@@ -86,7 +91,7 @@ class Cloud2Tests(unittest.TestCase):
         return n
 
     def lock_private(self) -> str:
-        code = self.b.cloud_lock("nodeA", "개인", "4321")
+        code = self.b.cloud_lock("nodeA", "개인", "432100")
         self.assertTrue(wait_for(lambda: any(x.locked and x.state == "locked"
                                              for x in self.b.cloud_list("nodeA", "")[0]), 20))
         return code
@@ -130,9 +135,9 @@ class Cloud2Tests(unittest.TestCase):
         self.assertEqual([x["path"] for x in self.b.cloud_search("nodeA", "", "얼굴")[0]], [])
 
         with self.assertRaises(p.ProtocolError) as ctx:
-            self.b.cloud_open("nodeA", "개인", pin="0000")
+            self.b.cloud_open("nodeA", "개인", pin="000000")
         self.assertEqual(ctx.exception.code, "vault_pin")
-        self.b.cloud_open("nodeA", "개인", pin="4321")
+        self.b.cloud_open("nodeA", "개인", pin="432100")
         self.assertEqual(sorted(x.name for x in self.b.cloud_list("nodeA", "개인")[0]), ["얼굴.png", "일기.txt"])
         with Image.open(io.BytesIO(self.b.cloud_thumb("nodeA", "개인/얼굴.png", 64))) as im:
             self.assertEqual(im.format, "JPEG")
@@ -158,20 +163,20 @@ class Cloud2Tests(unittest.TestCase):
 
     def test_unlock_restores_and_recovery_repin(self):
         code = self.lock_private()
-        self.b.cloud_repin("nodeA", "개인", "9999", recovery=code)
+        self.b.cloud_repin("nodeA", "개인", "999999", recovery=code)
         with self.assertRaises(p.ProtocolError):
-            self.b.cloud_open("nodeA", "개인", pin="4321")
-        self.b.cloud_unlock("nodeA", "개인", "9999")
+            self.b.cloud_open("nodeA", "개인", pin="432100")
+        self.b.cloud_unlock("nodeA", "개인", "999999")
         self.assertTrue(wait_for(lambda: (self.hub_dir / "개인" / "일기.txt").exists()
                                  and not any(x.locked for x in self.b.cloud_list("nodeA", "")[0]), 20))
         self.assertEqual((self.hub_dir / "개인" / "얼굴.png").read_bytes(), self.secret)
 
     def test_cannot_delete_folder_holding_vault_or_lock_twice(self):
         (self.hub_dir / "상위" / "안").mkdir(parents=True)
-        self.b.cloud_lock("nodeA", "상위/안", "4321")
+        self.b.cloud_lock("nodeA", "상위/안", "432100")
         self.assertTrue(wait_for(lambda: any(x.locked for x in self.b.cloud_list("nodeA", "상위")[0]), 20))
-        for call in (lambda: self.b.cloud_delete("nodeA", "상위"), lambda: self.b.cloud_lock("nodeA", "상위", "4321"),
-                     lambda: self.b.cloud_lock("nodeA", "", "4321")):
+        for call in (lambda: self.b.cloud_delete("nodeA", "상위"), lambda: self.b.cloud_lock("nodeA", "상위", "432100"),
+                     lambda: self.b.cloud_lock("nodeA", "", "432100")):
             with self.assertRaises(p.ProtocolError) as ctx:
                 call()
             self.assertEqual(ctx.exception.code, "bad_path")
@@ -180,11 +185,11 @@ class Cloud2Tests(unittest.TestCase):
         self.lock_private()
         for _ in range(vault.MAX_FAILS):
             with self.assertRaises(p.ProtocolError):
-                self.b.cloud_open("nodeA", "개인", pin="0000")
+                self.b.cloud_open("nodeA", "개인", pin="000000")
         sock, pairing = self.b._connect("nodeA")
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self.b._send_key(pairing))
-            ch.send(json.dumps(p.new_header("cloud_open", "B", path="개인", pin="4321")).encode(), last=False)
+            ch.send(json.dumps(p.new_header("cloud_open", "B", path="개인", pin="432100")).encode(), last=False)
             ch.send(b"", last=True)
             raw, _ = ch.recv()
         reply = json.loads(bytes(raw).decode())

@@ -284,7 +284,7 @@
   "vault.unlock_title": "解除锁定",
   "vault.repin_title": "更改 PIN",
   "vault.open_hint": "请输入“{name}”的 PIN。在关闭此应用之前（30 分钟不使用则关闭）保持打开。",
-  "vault.lock_hint": "将加密“{name}”中的文件。在中心电脑的资源管理器中只能看到无法读取的文件，只有在 TailHop 中输入 PIN 才能打开。",
+  "vault.lock_hint": "将加密“{name}”中的文件，原文件不经回收站直接删除。在中心电脑的资源管理器中只能看到无法读取的文件，只有在 TailHop 中输入 PIN 才能打开。已经在回收站、OneDrive、卷影副本或 Windows 搜索索引中的副本无法删除。",
   "vault.unlock_hint": "将“{name}”恢复为普通文件夹（解密文件并放回原处）。",
   "vault.repin_hint": "请输入当前 PIN 或恢复码，然后设置新 PIN。",
   "vault.ok": "确定",
@@ -293,10 +293,10 @@
   "vault.use_pin": "使用 PIN",
   "vault.pin": "PIN",
   "vault.recovery": "恢复码",
-  "vault.new_pin": "新 PIN（4–64 个字符）",
+  "vault.new_pin": "新 PIN（6–64 个字符）",
   "vault.new_pin_again": "再次输入新 PIN",
   "vault.mismatch": "两次 PIN 不一致。",
-  "vault.pin_rule": "PIN 需为 4–64 个字符。",
+  "vault.pin_rule": "PIN 需为 6–64 个字符。",
   "vault.working": "正在确认…",
   "vault.recovery_title": "恢复码",
   "vault.recovery_hint": "忘记 PIN 时只能用此代码打开。只在现在显示一次，请记在安全的地方。",
@@ -317,5 +317,9 @@
   "chat.filter_media": "照片和视频",
   "chat.filter_file": "文件",
   "chat.no_results": "没有匹配的消息。",
-  "chat.no_media": "此聊天中没有照片或视频。"
+  "chat.no_media": "此聊天中没有照片或视频。",
+  "notify.cloud_in_locked": "{peer} 向已锁定的文件夹上传了文件",
+  "vault.exported": "已在保存文件夹中创建解密后的副本",
+  "vault.stalled": "锁定已停止 · 可在菜单中继续或撤销",
+  "vault.resume_menu": "继续锁定（PIN）…"
 }

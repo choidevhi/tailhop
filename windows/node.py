@@ -417,7 +417,10 @@ class Node:
             return
         if kind == "cloud_put":
             p.send_reply(ch, True, name=got.path.name)
-            self.on_event("cloud_in", {"peer": pairing.name, "peer_id": pairing.stable_id, "name": got.path.name})
+            hidden = hub is not None and hub.is_vault_path(str(got.header.get("dir") or ""))
+            # 잠긴 폴더에 들어온 이름은 알림(Windows 알림 기록에 남는다)에 쓰지 않는다
+            self.on_event("cloud_in", {"peer": pairing.name, "peer_id": pairing.stable_id,
+                                       "name": "" if hidden else got.path.name})
             return
         if got.dup:  # 이미 받은 글(응답이 사라져 다시 옴): 기록·알림 없이 받았다고만 답한다
             p.send_reply(ch, True)
@@ -487,10 +490,10 @@ class Node:
             if kind == "cloud_lock":
                 p.send_reply(ch, True, recovery=hub.lock(parts, header.get("pin")))
             elif kind == "cloud_unlock":
-                hub.unlock(parts, header.get("pin"))
+                hub.unlock(parts, header.get("pin"), peer)
                 p.send_reply(ch, True)
             elif kind == "cloud_repin":
-                hub.repin(parts, header)
+                hub.repin(parts, header, peer)
                 p.send_reply(ch, True)
                 changed = False
             elif kind == "cloud_mkdir":
@@ -527,7 +530,8 @@ class Node:
 
     @staticmethod
     def _refuse(conn: socket.socket, ch: p.Channel, exc: p.ProtocolError) -> None:
-        extra = {"retry": exc.kw["retry"]} if "retry" in exc.kw else {}  # vault_wait: 몇 초 뒤에 다시(§14.2)
+        # vault_wait: 몇 초 뒤에 다시, vault_locked: 어느 잠긴 폴더인지(§14.2)
+        extra = {k: exc.kw[k] for k in ("retry", "mount") if k in exc.kw}
         try:
             p.send_reply(ch, False, exc, **extra)
             _close_gently(conn)

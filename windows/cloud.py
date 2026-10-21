@@ -107,9 +107,9 @@ class CloudFolder:
         if len(real_parts) != len(parts):
             raise p.ProtocolError("bad_path")
         for asked, actual in zip(parts, real_parts):
-            if actual != asked and (actual.casefold() != asked.casefold() or not _visible_name(actual)):
-                raise p.ProtocolError("not_found")
-            if not _visible_name(actual):
+            # 실제 이름과 글자 하나라도 다르면(대소문자만 달라도) 없는 것으로 친다. 앱은 목록에서 받은 이름 그대로 쓴다.
+            # (대소문자 별칭으로 잠긴 폴더 확인·숨긴 이름 규칙을 돌아가지 못하게)
+            if actual != asked or not _visible_name(actual):
                 raise p.ProtocolError("not_found")
         return here
 

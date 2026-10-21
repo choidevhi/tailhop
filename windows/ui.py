@@ -181,6 +181,35 @@ def apply_glass(win) -> bool:
     return bool(ctypes.windll.user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data)))
 
 
+def copy_secret(widget, text: str) -> None:
+    """비밀(복구 코드)을 클립보드에 넣되 Windows 클립보드 기록(Win+V)과 기기 간 동기화에서는 빠지게 표시한다."""
+    widget.clipboard_clear()
+    widget.clipboard_append(text)
+    widget.update()
+    try:
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        if not user32.OpenClipboard(None):
+            return
+        try:
+            for name in ("ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory",
+                         "CanUploadToCloudClipboard"):
+                fmt = user32.RegisterClipboardFormatW(name)
+                handle = kernel32.GlobalAlloc(0x0002, 4)  # GMEM_MOVEABLE, DWORD 0 = 기록·동기화 안 함
+                ptr = kernel32.GlobalLock(handle)
+                ctypes.memset(ptr, 0, 4)
+                kernel32.GlobalUnlock(handle)
+                user32.SetClipboardData(fmt, handle)
+        finally:
+            user32.CloseClipboard()
+    except (AttributeError, OSError):
+        pass
+
+
 def card(parent, **kw) -> ctk.CTkFrame:
     """shadcn Card: 둥근 모서리(rounded-xl) + 테두리, 불투명."""
     return ctk.CTkFrame(parent, fg_color=kw.pop("fg_color", CARD_BG), corner_radius=12, border_width=1,

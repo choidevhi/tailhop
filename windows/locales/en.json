@@ -284,7 +284,7 @@
   "vault.unlock_title": "Remove lock",
   "vault.repin_title": "Change PIN",
   "vault.open_hint": "Enter the PIN for '{name}'. It stays open until you close this app (or 30 minutes without use).",
-  "vault.lock_hint": "Files in '{name}' will be encrypted. Explorer on the hub PC only shows unreadable files; it opens only with the PIN in TailHop.",
+  "vault.lock_hint": "Files in '{name}' are encrypted and the originals are deleted without going to the Recycle Bin. Explorer on the hub PC only shows unreadable files; it opens only with the PIN in TailHop. Copies already in the Recycle Bin, OneDrive, shadow copies or the Windows search index can't be removed.",
   "vault.unlock_hint": "Turn '{name}' back into a normal folder (files are decrypted in place).",
   "vault.repin_hint": "Enter the current PIN or the recovery code, then choose a new PIN.",
   "vault.ok": "OK",
@@ -293,10 +293,10 @@
   "vault.use_pin": "Use PIN",
   "vault.pin": "PIN",
   "vault.recovery": "Recovery code",
-  "vault.new_pin": "New PIN (4–64 characters)",
+  "vault.new_pin": "New PIN (6–64 characters)",
   "vault.new_pin_again": "New PIN again",
   "vault.mismatch": "The PINs don't match.",
-  "vault.pin_rule": "The PIN must be 4–64 characters.",
+  "vault.pin_rule": "The PIN must be 6–64 characters.",
   "vault.working": "Checking…",
   "vault.recovery_title": "Recovery code",
   "vault.recovery_hint": "If you forget the PIN, only this code opens the folder. It's shown only now. Write it down somewhere safe.",
@@ -317,5 +317,9 @@
   "chat.filter_media": "Photos & videos",
   "chat.filter_file": "Files",
   "chat.no_results": "No matching messages.",
-  "chat.no_media": "No photos or videos in this chat."
+  "chat.no_media": "No photos or videos in this chat.",
+  "notify.cloud_in_locked": "{peer} uploaded a file to a locked folder",
+  "vault.exported": "A decrypted copy was saved to your save folder",
+  "vault.stalled": "Locking stopped · resume or revert from the menu",
+  "vault.resume_menu": "Continue locking (PIN)…"
 }

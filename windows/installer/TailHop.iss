@@ -1,5 +1,5 @@
 #define AppName "TailHop"
-#define AppVersion "1.9.1"
+#define AppVersion "2.0.0"
 #define AppExe "TailHop.exe"
 
 [Setup]

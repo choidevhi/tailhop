@@ -38,7 +38,7 @@ class VaultTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def lock(self, pin: str = "2468") -> str:
+    def lock(self, pin: str = "246810") -> str:
         code = self.vm.lock_folder("개인", self.root / "개인", pin)
         self.assertTrue(wait_state(self.vm, "개인", "locked"))
         return code
@@ -50,7 +50,7 @@ class VaultTests(unittest.TestCase):
         raw = b"".join(x.read_bytes() for x in (self.root / vault.VAULT_DIR).rglob("*") if x.is_file())
         self.assertNotIn(b"SECRET-MARKER", raw)
         self.assertNotIn("메모".encode(), raw)  # 이름도 암호문 안에만 있다
-        token = self.vm.open("개인", "peerA", pin="2468")
+        token = self.vm.open("개인", "peerA", pin="246810")
         m, _ = self.vm.mount_of("개인")
         v = self.vm.vault_for(m, token, "peerA")
         self.assertEqual(sorted(n for n, _ in v.children("")), ["메모.txt", "사진"])
@@ -61,7 +61,7 @@ class VaultTests(unittest.TestCase):
 
     def test_token_bound_to_peer_and_expires(self):
         self.lock()
-        token = self.vm.open("개인", "peerA", pin="2468")
+        token = self.vm.open("개인", "peerA", pin="246810")
         m, _ = self.vm.mount_of("개인")
         for bad in (None, "x" * 32, token):
             peer = "peerB" if bad == token else "peerA"
@@ -76,21 +76,21 @@ class VaultTests(unittest.TestCase):
         code = self.lock()
         for _ in range(vault.MAX_FAILS):
             with self.assertRaises(p.ProtocolError) as ctx:
-                self.vm.open("개인", "peerA", pin="0000")
+                self.vm.open("개인", "peerA", pin="000000")
             self.assertEqual(ctx.exception.code, "vault_pin")
         with self.assertRaises(p.ProtocolError) as ctx:
-            self.vm.open("개인", "peerA", pin="2468")  # 맞는 PIN도 잠시 막힌다
+            self.vm.open("개인", "peerA", pin="246810")  # 맞는 PIN도 잠시 막힌다
         self.assertEqual(ctx.exception.code, "vault_wait")
         self.now[0] += 61
         self.vm.open("개인", "peerA", recovery=code.lower().replace("-", " "))
-        self.vm.repin("개인", "13579", recovery=code)
+        self.vm.repin("개인", "1357911", recovery=code)
         with self.assertRaises(p.ProtocolError):
-            self.vm.open("개인", "peerA", pin="2468")
-        self.vm.open("개인", "peerA", pin="13579")
+            self.vm.open("개인", "peerA", pin="246810")
+        self.vm.open("개인", "peerA", pin="1357911")
 
     def test_write_delete_inside_vault(self):
         self.lock()
-        token = self.vm.open("개인", "peerA", pin="2468")
+        token = self.vm.open("개인", "peerA", pin="246810")
         m, _ = self.vm.mount_of("개인")
         v = self.vm.vault_for(m, token, "peerA")
         w = v.writer("새 폴더/b.txt", 5, 1)
@@ -105,7 +105,7 @@ class VaultTests(unittest.TestCase):
 
     def test_unlock_restores_exact_files(self):
         self.lock()
-        self.vm.unlock_folder("개인", "2468")
+        self.vm.unlock_folder("개인", "246810")
         self.assertTrue(wait_state(self.vm, "개인", None))
         for rel, data in self.files.items():
             self.assertEqual((self.root / rel).read_bytes(), data)
@@ -114,7 +114,7 @@ class VaultTests(unittest.TestCase):
     def test_survives_restart_and_resumes_stalled_lock(self):
         self.lock()
         again = vault.VaultManager(self.root)
-        token = again.open("개인", "peerB", pin="2468")
+        token = again.open("개인", "peerB", pin="246810")
         m, _ = again.mount_of("개인")
         self.assertEqual(b"".join(again.vault_for(m, token, "peerB").read("메모.txt")), self.files["개인/메모.txt"])
         # 잠그다 꺼진 것처럼: 상태만 locking으로 되돌리고 남은 평문을 둔다
@@ -123,22 +123,22 @@ class VaultTests(unittest.TestCase):
         m.state = "locking"
         again._save()
         third = vault.VaultManager(self.root)
-        third.open("개인", "peerC", pin="2468")
+        third.open("개인", "peerC", pin="246810")
         self.assertTrue(wait_state(third, "개인", "locked"))
-        token = third.open("개인", "peerC", pin="2468")
+        token = third.open("개인", "peerC", pin="246810")
         m3, _ = third.mount_of("개인")
         self.assertEqual(b"".join(third.vault_for(m3, token, "peerC").read("늦게.txt")), b"late")
         self.assertFalse((self.root / "개인").exists())
 
     def test_cannot_lock_root_nested_or_with_short_pin(self):
         with self.assertRaises(p.ProtocolError):
-            self.vm.lock_folder("", self.root, "2468")
+            self.vm.lock_folder("", self.root, "246810")
         with self.assertRaises(p.ProtocolError):
             self.vm.lock_folder("개인", self.root / "개인", "12")
         self.lock()
         (self.root / "다른").mkdir()
         with self.assertRaises(p.ProtocolError):
-            self.vm.lock_folder("개인/사진", self.root / "개인" / "사진", "2468")
+            self.vm.lock_folder("개인/사진", self.root / "개인" / "사진", "246810")
 
     def test_recovery_code_format(self):
         code = vault.new_recovery_code()

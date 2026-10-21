@@ -284,7 +284,7 @@
   "vault.unlock_title": "ロックを解除",
   "vault.repin_title": "PIN を変更",
   "vault.open_hint": "'{name}' の PIN を入れてください。このアプリを閉じるまで（30 分使わないと閉じます）開いたままです。",
-  "vault.lock_hint": "'{name}' の中のファイルを暗号化します。ハブ PC のエクスプローラーでは読めないファイルしか見えず、TailHop で PIN を入れたときだけ開けます。",
+  "vault.lock_hint": "'{name}' の中のファイルを暗号化し、元のファイルはごみ箱を通さずに削除します。ハブ PC のエクスプローラーでは読めないファイルしか見えず、TailHop で PIN を入れたときだけ開けます。すでにごみ箱・OneDrive・シャドウコピー・Windows 検索インデックスにあるコピーは消せません。",
   "vault.unlock_hint": "'{name}' を普通のフォルダーに戻します（ファイルを復号してその場に置きます）。",
   "vault.repin_hint": "今の PIN か復旧コードを入れて、新しい PIN を決めてください。",
   "vault.ok": "OK",
@@ -293,10 +293,10 @@
   "vault.use_pin": "PIN で",
   "vault.pin": "PIN",
   "vault.recovery": "復旧コード",
-  "vault.new_pin": "新しい PIN（4–64 文字）",
+  "vault.new_pin": "新しい PIN（6–64 文字）",
   "vault.new_pin_again": "新しい PIN をもう一度",
   "vault.mismatch": "2 つの PIN が違います。",
-  "vault.pin_rule": "PIN は 4–64 文字にしてください。",
+  "vault.pin_rule": "PIN は 6–64 文字にしてください。",
   "vault.working": "確認中…",
   "vault.recovery_title": "復旧コード",
   "vault.recovery_hint": "PIN を忘れたときは、このコードでしか開けません。表示は今回だけです。安全な場所に書き留めてください。",
@@ -317,5 +317,9 @@
   "chat.filter_media": "写真・動画",
   "chat.filter_file": "ファイル",
   "chat.no_results": "一致するメッセージはありません。",
-  "chat.no_media": "このチャットに写真・動画はありません。"
+  "chat.no_media": "このチャットに写真・動画はありません。",
+  "notify.cloud_in_locked": "{peer} がロックされたフォルダーにファイルをアップロードしました",
+  "vault.exported": "復号したコピーを保存先に作りました",
+  "vault.stalled": "ロックが止まりました · メニューから続ける・元に戻す",
+  "vault.resume_menu": "ロックを続ける（PIN）…"
 }

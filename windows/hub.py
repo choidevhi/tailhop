@@ -50,7 +50,12 @@ class Hub:
         if found is None:
             return None
         mount, inner = found
-        return mount, self.vaults.vault_for(mount, header.get("token"), peer), inner
+        try:
+            return mount, self.vaults.vault_for(mount, header.get("token"), peer), inner
+        except p.ProtocolError as exc:
+            if exc.code == "vault_locked":  # 어느 잠긴 폴더의 PIN을 물어야 하는지 알려 준다(§14.2)
+                raise p.ProtocolError("vault_locked", mount=mount.mount) from exc
+            raise
 
     # ---------- 목록 ----------
     def list(self, parts: list[str], cursor: int, header: dict, peer: str) -> tuple[list[dict], int | None]:
@@ -64,10 +69,11 @@ class Hub:
                      for name, e in v.children(inner)]
         else:
             locked = {m.mount.rsplit("/", 1)[-1]: m for m in self.vaults.mounts_under(path)}
-            items = [cloud.item_json(x) for x in self.folder.list_all(parts) if x.name not in locked]
+            hidden = {name.casefold() for name in locked}  # 잠그는 중 남은 평문 폴더는 숨긴다
+            items = [cloud.item_json(x) for x in self.folder.list_all(parts) if x.name.casefold() not in hidden]
             for name, m in locked.items():
-                items.append({"name": name, "dir": True, "size": 0, "mtime": 0, "locked": True, "state": m.state,
-                              "progress": m.progress})
+                items.append({"name": name, "dir": True, "size": 0, "mtime": 0, "locked": True,
+                              "state": self.vaults.display_state(m), "progress": m.progress})
         items.sort(key=lambda x: (not x["dir"], x["name"].casefold(), x["name"]))
         page = items[cursor:cursor + cloud.PAGE]
         return page, cursor + cloud.PAGE if cursor + cloud.PAGE < len(items) else None
@@ -194,17 +200,20 @@ class Hub:
         return self.vaults.open(cloud.join_path(parts), peer, pin if isinstance(pin, str) else None,
                                 recovery if isinstance(recovery, str) else None)
 
-    def unlock(self, parts: list[str], pin: object) -> None:
+    def unlock(self, parts: list[str], pin: object, peer: str) -> None:
         if not isinstance(pin, str):
             raise p.ProtocolError("vault_pin")
-        self.vaults.unlock_folder(cloud.join_path(parts), pin)
+        self.vaults.unlock_folder(cloud.join_path(parts), pin, peer)
 
-    def repin(self, parts: list[str], header: dict) -> None:
+    def repin(self, parts: list[str], header: dict, peer: str) -> None:
         pin, recovery, new_pin = header.get("pin"), header.get("recovery"), header.get("new_pin")
         if not isinstance(new_pin, str):
             raise p.ProtocolError("vault_pin")
         self.vaults.repin(cloud.join_path(parts), new_pin, pin if isinstance(pin, str) else None,
-                          recovery if isinstance(recovery, str) else None)
+                          recovery if isinstance(recovery, str) else None, peer)
+
+    def is_vault_path(self, path: str) -> bool:
+        return self.vaults.mount_of(path) is not None
 
 
 class HubAccess:

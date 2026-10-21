@@ -210,8 +210,8 @@ PC ↔ PC 값(`k_pc_host_to_joiner_hex`, `k_pc_joiner_to_host_hex`, `msg_pc_*`, 
 
 ## 15. 클라우드 미리보기·검색 (2.0.0, §12 확장)
 허브의 hello `caps`에 `"cloud2"`가 있으면 아래를 쓴다. 없으면 예전 목록만 쓴다.
-- `cloud_thumb`: `{"path":"<파일>","px":<64–512 정수>}` → 성공이면 `{"ok":true,"mime":"image/jpeg","w","h"}`(last=0) 뒤에 JPEG 데이터 프레임(마지막 last=1, 256 KiB 이하). 미리보기를 만들 수 없는 파일은 `not_found`. 허브는 썸네일을 `%LOCALAPPDATA%\TailHop\thumbs`에 캐시한다(잠긴 폴더의 것은 캐시하지 않고 메모리에서만 만든다).
-- `cloud_search`: `{"path":"<폴더>","query":"<0–100자>","kind":"all|image|video|audio|doc|archive|other","cursor":<정수>}` → `cloud_list`와 같은 모양의 응답이고, 항목마다 `"path"`(검색 시작 폴더 기준 상대 경로)를 더한다. 이름에 query가 들어 있는(대소문자 무시) 파일·폴더를 아래 폴더까지 찾는다. 한 번에 500개, 허브는 한 요청에 항목 50,000개·3초까지만 훑고 `"partial":true`를 붙일 수 있다. 숨김·`.part`·링크·잠긴 폴더 안(아래 §14의 열쇠가 없으면)은 건너뛴다.
+- `cloud_thumb`: `{"path":"<파일>","px":<64–512 정수>}` → 성공이면 `{"ok":true,"mime":"image/jpeg","w","h"}`(last=0) 뒤에 JPEG 데이터 프레임(마지막 last=1, 256 KiB 이하). 미리보기를 만들 수 없는 파일은 `not_found`. 허브는 사진·영상(§15 종류 image·video)만 만든다(잠긴 폴더 안은 사진만, 50 MB까지). 허브는 썸네일을 `%LOCALAPPDATA%\TailHop\thumbs`에 캐시한다(잠긴 폴더의 것은 캐시하지 않고 메모리에서만 만든다).
+- `cloud_search`: `{"path":"<폴더>","query":"<0–100자>","kind":"all|image|video|audio|doc|archive|other","cursor":<정수>}` → `cloud_list`와 같은 모양의 응답이고, 항목마다 `"path"`(검색 시작 폴더 기준 상대 경로)를 더한다. 이름에 query가 들어 있는(대소문자 무시) 파일·폴더를 아래 폴더까지 찾는다. 한 번에 500개, 허브는 한 요청에 항목 50,000개·3초까지만 훑고 `"partial":true`를 붙일 수 있다. 숨김·`.part`·링크·잠긴 폴더 안은 건너뛴다(검색을 잠긴 폴더 안에서 시작했으면 그 열쇠로 그 안만 찾는다). `partial`은 훑다가 멈췄다는 뜻이고, 찾은 것이 500개를 넘으면 그와 상관없이 `next`가 있다.
 - 종류는 확장자로 정한다(양쪽 구현이 같은 표를 쓴다, `docs/test_vectors.json`의 `file_kinds`).
 - `cloud_list` 항목에 `"kind"`를 더한다(위 종류).
 
@@ -220,17 +220,19 @@ PC ↔ PC 값(`k_pc_host_to_joiner_hex`, `k_pc_joiner_to_host_hex`, `msg_pc_*`, 
 ### 14.1 저장
 - 보관함 폴더: `<클라우드>\.tailhop-vault\` (숨김·시스템 속성, 목록에 보이지 않음). `vaults.json`(평문): `{"vaults":[{"id":"<32 hex>","mount":"<클라우드 경로>","state":"locked|locking|unlocking"}]}`. `mount`는 잠근 폴더의 자리이고 그 이름은 목록에 그대로 보인다(내용·안의 이름은 안 보인다).
 - 보관함마다 `<id>\vault.json`: `{"v":1,"kdf":"scrypt","n":32768,"r":8,"p":1,"salt":"<b64u 16B>","wrapped":"<b64u>","rsalt":"<b64u 16B>","rwrapped":"<b64u>"}`
-  - 보관함 키 VK = 32바이트 난수. PIN 키 = scrypt(PIN UTF-8, salt, N, r, p, 32). `wrapped` = nonce(12) ‖ AES-256-GCM(PIN 키, VK, aad=`"tailhop vault v1|" + id`). 복구 코드 키로 같은 방식의 `rwrapped`.
-  - 복구 코드: 20바이트 난수를 Crockford base32로 쓰고 4글자씩 `-`로 끊는다(32글자). 잠글 때 한 번만 보여 준다.
+  - 보관함 키 VK = 32바이트 난수. PIN 키 = scrypt(PIN UTF-8, salt, N, r, p, 32). PIN으로 감싼 값 = nonce(12) ‖ AES-256-GCM(PIN 키, VK, aad=`"tailhop vault v1|" + id`)이고, `wrapped`에는 그것을 허브 PC의 Windows 계정 보호(DPAPI, CurrentUser)로 한 번 더 감싼 것을 둔다. 디스크 사본만으로는 PIN을 맞혀 볼 수 없다(그 PC의 Windows 로그인이 필요하다). 복구 코드 키로 감싼 `rwrapped`는 DPAPI 없이 둔다(160비트라 맞힐 수 없고, Windows를 다시 깔아도 복구 코드로 열린다).
+  - 복구 코드: 20바이트 난수를 Crockford base32로 쓰고 4글자씩 `-`로 끊는다(32글자). 잠글 때 한 번만 보여 준다. 허브는 받은 코드에서 영숫자만 남기고 대문자로 바꾼 뒤 `O→0`, `I/L→1`로 읽는다(사용자가 띄어 쓰거나 `-`를 빼도 된다).
 - `<id>\index.bin`: nonce(12) ‖ AES-256-GCM(VK, JSON, aad=`"tailhop vault index|" + id`). JSON은 `{"entries":{"<보관함 안 상대 경로>":{"dir":<bool>,"size","mtime","obj":"<32 hex>"}}}`.
 - `<id>\objects\<obj>`: 머리 `"THV1"`(4) ‖ 파일 nonce 접두(8) ‖ 크기(8, big-endian) 뒤에 1 MiB씩 자른 조각마다 AES-256-GCM(VK, 평문, nonce = 접두 ‖ 조각 번호(4, big-endian), aad = obj ‖ 조각 번호(4) ‖ 마지막이면 1 아니면 0(1)). 조각 하나 = 평문 + 태그 16. 조각 i의 자리를 계산해 원하는 위치부터 읽는다(이어받기).
 ### 14.2 잠그기·열기
-- `cloud_lock`: `{"path":"<폴더>","pin":"<4–64자>"}` → 바로 `{"ok":true,"recovery":"<복구 코드>"}`로 답하고 허브가 뒤에서 파일을 하나씩 암호화한다. 하나를 보관함에 넣고 index를 쓴 다음에야 원본을 지운다(휴지통을 거치지 않음). 앱이 꺼졌다 켜지면 남은 것부터 이어 한다. 그동안 그 폴더는 목록에 `"locked":true,"state":"locking","progress":<0–100>`으로 보인다. 맨 위 폴더, 이미 잠긴 폴더 안·위, 잠긴 폴더를 품은 폴더는 `bad_path`.
-- `cloud_open`: `{"path":"<잠긴 폴더>","pin":"<PIN>"}` 또는 `{"path","recovery":"<코드>"}` → `{"ok":true,"token":"<32 hex>","ttl":1800}`. 틀리면 `vault_pin`. 보관함마다 5번 틀리면 60초, 그 뒤로 틀릴 때마다 두 배(최대 1시간) 동안 `vault_wait`(`"retry":<초>`).
+- `cloud_lock`: `{"path":"<폴더>","pin":"<6–64자>"}` → 바로 `{"ok":true,"recovery":"<복구 코드>"}`로 답하고 허브가 뒤에서 파일을 하나씩 암호화한다. 하나를 보관함에 넣고 index를 쓴 다음에야 원본을 지운다(휴지통을 거치지 않음). 새로 들어온 파일도 다시 훑어 넣고, 끝에는 빈 폴더만 지운다(남은 것이 있으면 폴더째 지우지 않는다). 사용 중인 파일 때문에 다 못 넣으면 목록에 `"state":"stalled"`로 보이고, PIN으로 열면 이어 하고 `cloud_unlock`으로 되돌릴 수 있다. 앱이 꺼졌다 켜져도 같다. 그동안 그 폴더는 목록에 `"locked":true,"state":"locking","progress":<0–100>`으로 보인다. 잠그기 전에 만들어 둔 미리보기 캐시는 지운다. 맨 위 폴더, 이미 잠긴 폴더 안·위, 잠긴 폴더를 품은 폴더는 `bad_path`.
+- `cloud_open`: `{"path":"<잠긴 폴더>","pin":"<PIN>"}` 또는 `{"path","recovery":"<코드>"}` → `{"ok":true,"token":"<32 hex>","ttl":1800}`. 틀리면 `vault_pin`. 보관함·기기마다 따로 세어(한 기기가 다른 기기를 막지 못하게) 5번 틀리면 60초, 그 뒤로는 틀릴 때마다 두 배(최대 1시간) 동안 `vault_wait`(`"retry":<초>`). 확인은 보관함마다 한 번에 하나씩 하고, 횟수는 확인 전에 올린다(동시에 넣어 횟수를 피하지 못하게).
 - 열쇠(token)는 그 상대 기기에만 묶이고, 쓰일 때마다 30분 연장된다. 허브 앱이 꺼지면 모두 사라진다.
-- 잠긴 폴더 안을 가리키는 §12·§15 요청(`cloud_list`·`get`·`put`·`del`·`mkdir`·`thumb`·`search`)은 헤더에 `"token"`을 더한다. 없거나 틀리면 `vault_locked`.
+- 잠긴 폴더 안을 가리키는 §12·§15 요청(`cloud_list`·`get`·`put`·`del`·`mkdir`·`thumb`·`search`)은 헤더에 `"token"`을 더한다. 없거나 틀리면 `vault_locked`이고 응답에 `"mount":"<잠긴 폴더 자리>"`를 붙인다(어느 폴더의 PIN을 물을지). 잠긴 폴더 자리는 대소문자를 가리지 않고 비교한다. 잠긴 폴더 밖에서 시작한 `cloud_search`는 잠긴 폴더를 늘 건너뛴다.
+- 허브는 요청 경로의 조각이 디스크의 실제 이름과 글자 하나까지 같을 때만 연다(대소문자 별칭·8.3 짧은 이름은 `not_found`). 앱은 목록에서 받은 이름을 그대로 쓴다.
+- 잠긴 폴더 안으로 올리는 동안(`cloud_put`) `cloud_unlock`은 `vault_busy`다. 잠긴 폴더에 올라온 파일 이름은 허브의 알림에 쓰지 않는다.
 - `cloud_unlock`: `{"path","pin"}` → 잠금을 풀어 평문 폴더로 되돌린다(뒤에서, `"state":"unlocking"`).
-- `cloud_repin`: `{"path","pin"|"recovery","new_pin"}` → PIN을 바꾼다(VK는 그대로, `wrapped`만 다시).
+- `cloud_repin`: `{"path","pin"|"recovery","new_pin"}` → PIN을 바꾼다(VK는 그대로, `wrapped`만 다시). 그 보관함의 열쇠는 모두 끝난다.
 - 잠긴 폴더 자체를 지우기(`cloud_del`)는 token이 있어야 한다. 보관함 폴더째 영구히 지운다.
 ### 14.3 오류 코드 추가
 | code | 뜻 |

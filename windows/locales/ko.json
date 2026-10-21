@@ -284,7 +284,7 @@
   "vault.unlock_title": "잠금 풀기",
   "vault.repin_title": "PIN 바꾸기",
   "vault.open_hint": "'{name}'의 PIN을 넣어 주세요. 이 앱을 끄기 전까지(30분 동안 쓰지 않으면 닫힘) 열려 있습니다.",
-  "vault.lock_hint": "'{name}' 안의 파일을 암호화합니다. 허브 PC의 탐색기에서는 알아볼 수 없는 파일만 보이고, TailHop 앱에서 PIN으로만 열립니다.",
+  "vault.lock_hint": "'{name}' 안의 파일을 암호화하고 원본은 휴지통을 거치지 않고 지웁니다. 허브 PC의 탐색기에서는 알아볼 수 없는 파일만 보이고, TailHop 앱에서 PIN으로만 열립니다. 이미 휴지통·OneDrive·섀도 복사본·Windows 검색 색인에 들어간 사본은 지우지 못합니다.",
   "vault.unlock_hint": "'{name}'을(를) 다시 평범한 폴더로 되돌립니다(파일을 복호화해 제자리에 둡니다).",
   "vault.repin_hint": "지금 PIN이나 복구 코드를 넣고 새 PIN을 정해 주세요.",
   "vault.ok": "확인",
@@ -293,10 +293,10 @@
   "vault.use_pin": "PIN으로",
   "vault.pin": "PIN",
   "vault.recovery": "복구 코드",
-  "vault.new_pin": "새 PIN(4–64자)",
+  "vault.new_pin": "새 PIN(6–64자)",
   "vault.new_pin_again": "새 PIN 한 번 더",
   "vault.mismatch": "두 PIN이 다릅니다.",
-  "vault.pin_rule": "PIN은 4–64자여야 합니다.",
+  "vault.pin_rule": "PIN은 6–64자여야 합니다.",
   "vault.working": "확인하는 중…",
   "vault.recovery_title": "복구 코드",
   "vault.recovery_hint": "PIN을 잊었을 때 이 코드로만 열 수 있습니다. 지금 한 번만 보여 드립니다. 안전한 곳에 적어 두세요.",
@@ -317,5 +317,9 @@
   "chat.filter_media": "사진·영상",
   "chat.filter_file": "파일",
   "chat.no_results": "찾는 대화가 없습니다.",
-  "chat.no_media": "이 대화방에 사진·영상이 없습니다."
+  "chat.no_media": "이 대화방에 사진·영상이 없습니다.",
+  "notify.cloud_in_locked": "{peer}이(가) 잠긴 폴더에 파일을 올렸습니다",
+  "vault.exported": "복호화한 사본을 저장 폴더에 만들었어요",
+  "vault.stalled": "잠그기 멈춤 · 메뉴에서 이어 하기·되돌리기",
+  "vault.resume_menu": "이어서 잠그기(PIN)…"
 }
