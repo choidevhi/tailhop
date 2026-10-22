@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
@@ -236,6 +237,8 @@ class SettingsWindow(ctk.CTkToplevel):
         if space:
             self._row(box, t("sync.this_space"), t("sync.space", free=human_size(space["free"]),
                                                     total=human_size(space["total"])))
+        self.copy_row = ctk.CTkFrame(box, fg_color="transparent")
+        self.copy_row.pack(fill="x", padx=2)
         self.sync_rows = ctk.CTkFrame(box, fg_color="transparent")
         self.sync_rows.pack(fill="x", padx=2)  # 카드 테두리를 덮지 않게
         self.refresh_sync()
@@ -245,9 +248,11 @@ class SettingsWindow(ctk.CTkToplevel):
         """허브마다 받은 사본(개수·크기·마지막으로 맞춘 때·상태)과 지금 동기화·사본 지우기."""
         if self.sync_rows is None or not self.sync_rows.winfo_exists():
             return
-        for child in self.sync_rows.winfo_children():
-            child.destroy()
+        for frame in (self.copy_row, self.sync_rows):
+            for child in frame.winfo_children():
+                child.destroy()
         syncer = self.node.syncer
+        self._copy_password_row(syncer)
         for sid, pairing in self.app._devices():
             found = syncer.mirror(sid)
             status = syncer.status.get(sid, {})
@@ -271,9 +276,99 @@ class SettingsWindow(ctk.CTkToplevel):
                                                                                                     padx=(6, 0))
             if syncer.enabled:
                 _button(row, t("sync.now"), lambda s=sid: syncer.poke(s), width=90).pack(side="right")
+        for archive in syncer.archive_list():  # §19.5 이전 사본(허브 초기화·연결 해제로 남은 것)
+            count, size = archive.usage()
+            when = archive.state.get("archived") or 0
+            name = archive.state.get("hub_name") or t("sync.unknown_hub")
+            detail = t("sync.archive_line", count=count, size=human_size(size),
+                       when=time.strftime("%Y-%m-%d", time.localtime(when)) if when else "")
+            if syncer.restoring is not None:
+                total = syncer.restoring.get("total") or 0
+                detail += " · " + t("sync.restoring", pct=int(syncer.restoring.get("done", 0) * 100 / total)
+                                     if total else 0)
+            row = self._row(self.sync_rows, t("sync.archive_name", name=name), detail)
+            ctk.CTkButton(row, text=t("sync.wipe"), height=32, corner_radius=6, fg_color="transparent",
+                          hover_color=HOVER, text_color=RED, border_width=1, border_color=BORDER, font=font(12),
+                          width=70, command=lambda a=archive, n=name: self._wipe_archive(a, n)).pack(side="right",
+                                                                                                   padx=(6, 0))
+            if syncer.restoring is None:
+                button = _button(row, t("sync.restore"), None, width=110)
+                button.configure(command=lambda a=archive, b=button: self._restore_menu(a, b))
+                button.pack(side="right")
+
+    def _copy_password_row(self, syncer) -> None:
+        """사본 비밀번호(§19.3): 정하기 / 열기·잠그기 / 잊었을 때."""
+        if not syncer.device.exists:
+            row = self._row(self.copy_row, t("sync.copy_password_row"), t("sync.copy_password_hint"))
+            _button(row, t("sync.copy_set"), lambda: self._ask_copy(), primary=True, width=90).pack(side="right")
+            return
+        locked = syncer.device.locked
+        row = self._row(self.copy_row, t("sync.copy_password_row"),
+                        t("sync.copy_is_locked") if locked else t("sync.copy_is_open"))
+        ctk.CTkButton(row, text=t("sync.copy_forgot"), height=32, corner_radius=6, fg_color="transparent",
+                      hover_color=HOVER, text_color=RED, border_width=1, border_color=BORDER, font=font(12), width=90,
+                      command=self._forgot_copy).pack(side="right", padx=(6, 0))
+        if locked:
+            _button(row, t("sync.copy_open"), lambda: self._ask_copy(), width=80).pack(side="right")
+        else:
+            _button(row, t("sync.copy_lock"), lambda: (syncer.lock(), self.refresh_sync()), width=80).pack(side="right")
+
+    def _ask_copy(self, then=None) -> None:
+        import cloud_ui  # 설정 창은 클라우드 창을 쓰지 않아도 열리게 쓸 때만 불러온다
+
+        cloud_ui.ask_copy_password(self, lambda: (self.refresh_sync(), then and then()))
+
+    def _forgot_copy(self) -> None:
+        if not messagebox.askyesno(t("sync.title"), t("sync.copy_forgot_confirm"), parent=self):
+            return
+        threading.Thread(target=self.node.syncer.forget_password, daemon=True, name="tailhop-sync-wipe").start()
+
+    def _wipe_archive(self, archive, name: str) -> None:
+        if not messagebox.askyesno(t("sync.title"), t("sync.archive_wipe_confirm", name=name), parent=self):
+            return
+        threading.Thread(target=self.node.syncer.wipe_archive, args=(archive,), daemon=True,
+                         name="tailhop-sync-wipe").start()
+
+    def _restore_menu(self, archive, button) -> None:
+        """복원할 허브 PC를 고른다(이 PC가 허브면 이 PC도 — 저장소가 열려 있어야 한다)."""
+        menu = tk.Menu(self, tearoff=0)
+        targets = [(sid, pairing.name) for sid, pairing in self.app._devices() if pairing.kind == "pc"]
+        if self.node.cloud_state == "open":
+            targets.insert(0, ("", t("cloud.this_pc")))
+        for sid, name in targets:
+            menu.add_command(label=name, command=lambda s=sid, n=name: self._restore(archive, s, n))
+        if not targets:
+            menu.add_command(label=t("sync.no_hub"), state="disabled")
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def _restore(self, archive, sid: str, name: str) -> None:
+        syncer = self.node.syncer
+        if syncer.device.locked:
+            self._ask_copy(lambda: self._restore(archive, sid, name))
+            return
+        if not messagebox.askyesno(t("sync.title"), t("sync.restore_confirm", name=name), parent=self):
+            return
+
+        def work() -> None:
+            try:
+                done, failed = syncer.restore(archive, sid)
+                text = t("sync.restored", count=done) if not failed else \
+                    t("sync.restored_some", count=done, failed=len(failed)) + "\n\n" + \
+                    "\n".join(f"{path.rsplit('/', 1)[-1]}: {why}" for path, why in failed[:6])
+            except Exception as exc:  # noqa: BLE001 - 이유를 보인다
+                text = str(exc)
+            self.app.events.put(("ui_call", {"fn": lambda: self.winfo_exists() and messagebox.showinfo(
+                t("sync.title"), text, parent=self)}))
+
+        threading.Thread(target=work, daemon=True, name="tailhop-restore").start()
+        self.refresh_sync()
 
     def _set_receive(self, var: tk.BooleanVar) -> None:
         on = bool(var.get())
+        if on and not self.node.syncer.device.exists:  # 받기 전에 사본 비밀번호부터
+            self.node.set_sync_receive(True)
+            self._ask_copy()
+            return
         if not on and any(self.node.syncer.mirror(sid) for sid in self.node.pairings) \
                 and not messagebox.askyesno(t("sync.title"), t("sync.receive_off_confirm"), parent=self):
             var.set(True)

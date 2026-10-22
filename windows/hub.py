@@ -141,6 +141,9 @@ class Hub:
     def sync_all(self, on: bool) -> None:
         self.store.set_sync_all(on)
 
+    def sync_raw(self, oid: object, offset: int, length: int | None) -> tuple[int, object]:
+        return self.store.read_raw(oid, offset, length)
+
     def sync_digest(self) -> str:
         return self.store.sync_manifest()[0]
 

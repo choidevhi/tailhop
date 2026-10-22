@@ -220,6 +220,27 @@ class CloudActivity : AppCompatActivity() {
 
     private val outboxListener: () -> Unit = { ui.post { onJobsChanged() } }
 
+    /**
+     * 사본이 다시 잠겼다(화면 꺼짐·앱을 5분 넘게 떠남, §19.3 2.3.1): 사본에서 연 것을 화면에서 지운다. 오프라인 사본을 보던 중이면
+     * 목록을 비우고 "잠김"을 보인다(다시 시도를 누르면 지문·화면 잠금을 묻는다).
+     */
+    private val lockListener: () -> Unit = {
+        ui.post {
+            if (isDestroyed) return@post
+            mirror = emptyMap()
+            if (offline && pc != null) {
+                lightbox?.close()
+                gen++
+                loading = false
+                items = emptyList()
+                next = null
+                loadError = getString(R.string.err_mirror_locked)
+                clearSelection()
+                render()
+            } else adapter.notifyDataSetChanged()
+        }
+    }
+
     private val pick = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.forEach { u -> try { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (e: Exception) { } }
         if (uris.isNotEmpty()) upload(uris)
@@ -339,6 +360,7 @@ class CloudActivity : AppCompatActivity() {
         })
         Outbox.addListener(outboxListener)
         MirrorStatus.addListener(mirrorListener)
+        MirrorLock.addListener(lockListener)
 
         val ip = savedInstanceState?.getString(S_IP) ?: intent.getStringExtra(EXTRA_IP)
         // 클라우드 화면을 엶: 동기화 사본을 맞춘다(허브마다 10분에 한 번까지, §19.3).
@@ -401,6 +423,7 @@ class CloudActivity : AppCompatActivity() {
         moveDrag.stop()
         Outbox.removeListener(outboxListener)
         MirrorStatus.removeListener(mirrorListener)
+        MirrorLock.removeListener(lockListener)
         ui.removeCallbacks(searchRun)
         io.shutdownNow()
         super.onDestroy()
@@ -431,8 +454,15 @@ class CloudActivity : AppCompatActivity() {
         load(reset = true, keep = false)
     }
 
-    /** 허브에 닿지 않을 때 이 기기의 동기화 사본을 읽기 전용으로 본다(§19.3). */
+    /** 허브에 닿지 않을 때 이 기기의 동기화 사본을 읽기 전용으로 본다(§19.3). 사본은 지문·화면 잠금으로 연 뒤에만(2.3.1). */
     private fun browseOffline(p: Pairing) {
+        MirrorUnlock.ensure(this) { ok ->
+            if (isDestroyed) return@ensure
+            if (ok) enterOffline(p) else toast(getString(R.string.err_mirror_locked))
+        }
+    }
+
+    private fun enterOffline(p: Pairing) {
         pc = p
         offline = true
         path = ""
@@ -734,6 +764,10 @@ class CloudActivity : AppCompatActivity() {
                     if (reset) { items = emptyList(); next = null; loadError = Errors.text(this, e) }
                     else toast(getString(R.string.failed, Errors.text(this, e)))
                     render()
+                    // 보는 사이 사본이 다시 잠겼다(화면 꺼짐·5분): 지문·화면 잠금으로 열고 다시 읽는다
+                    if (reset && off && (e as? ProtocolException)?.code == "mirror_locked") {
+                        MirrorUnlock.ensure(this) { ok -> if (ok && !isDestroyed && pc === p && offline) load(reset = true, keep = false) }
+                    }
                     // 잠긴 폴더 안인데 열쇠가 없다(만료·앱을 다시 켬): 그 폴더를 알면 PIN을 묻고 다시 읽는다.
                     if (reset && (e as? ProtocolException)?.code == "vault_locked") {
                         // 허브가 알려 준 자리(§14.2 mount)를 먼저, 없으면 이 폰이 아는 자리로.
@@ -1009,6 +1043,8 @@ class CloudActivity : AppCompatActivity() {
             !item.dir -> fileMenu(item, target)
             item.busy -> toast(getString(R.string.err_vault_busy))
             item.stalled -> folderMenu(item, target) // 멈춘 잠그기: 들어갈 수 없다(이어서 잠그기·잠금 풀기만)
+            // 오프라인 사본의 잠긴 폴더(§19.6): 이 폰이 PIN으로 연다(허브에 묻지 않는다)
+            offline && item.locked -> askMirrorVault(p, target)
             item.locked && !vault.has(p.pcIp, target) -> askOpen(target) { open(target) }
             else -> open(target)
         }
@@ -1235,6 +1271,26 @@ class CloudActivity : AppCompatActivity() {
             check = { v, rec -> firstOk(v[0], rec) },
             work = { v, rec -> Net.cloudOpen(p, mount, if (rec) null else v[0], if (rec) Vault.normalizeRecovery(v[0]) else null) },
             done = { if (pc === p) then() })
+    }
+
+    /**
+     * 오프라인 사본의 잠긴 폴더(§19.6)를 PIN 또는 복구 코드로 연다. 사본(지문)이 먼저 열려 있어야 하고, 확인은 이 폰이 한다
+     * (Argon2id — 몇 초 걸린다). 5번 틀리면 기다린다(허브와 같다). 열리면 들어간다. 사본을 잠그면 함께 닫힌다.
+     */
+    private fun askMirrorVault(p: Pairing, path: String) {
+        val app = applicationContext
+        MirrorUnlock.ensure(this) { ok ->
+            if (!ok || isDestroyed || pc !== p) return@ensure
+            pinForm(getString(R.string.vault_open_title, CloudPath.name(path)), getString(R.string.mirror_vault_msg),
+                listOf(R.string.vault_pin_hint), recoveryToggle = true, positive = R.string.vault_open_btn,
+                check = { v, rec -> firstOk(v[0], rec) },
+                work = { v, rec ->
+                    val m = Mirror.peek(app, p.pcIp) ?: throw ProtocolException("not_found")
+                    val vid = m.vaultAt(path) ?: throw ProtocolException("not_found")
+                    m.openVault(vid, if (rec) null else v[0], if (rec) v[0] else null)
+                },
+                done = { if (pc === p && offline) { refreshMirror(p); open(path) } })
+        }
     }
 
     /** 잠그기: PIN 두 번 → 허브가 복구 코드를 한 번만 돌려준다 → 보여 주고 목록을 다시 읽는다(잠그는 중 n%). */

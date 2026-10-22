@@ -129,13 +129,83 @@ object SyncManifest {
 
     private val ID_RE = Regex("[0-9a-f]{32}")
 
-    /** 목록의 한 줄. 폴더면 size·mtime·ver 없음. thumb·tver는 허브 미리보기가 있을 때만(없으면 0·null). */
+    /**
+     * 목록의 한 줄. 폴더면 size·mtime·ver 없음. thumb·tver는 허브 미리보기가 있을 때만(없으면 0·null).
+     * vault: 잠긴 폴더 줄(§19.6)의 봉인들 — 그 폴더 안은 따로 VaultRow로 온다.
+     */
     data class Item(
         val id: String, val path: String, val dir: Boolean,
         val size: Long = 0, val mtime: Long = 0, val ver: String = "", val thumb: Long = 0, val tver: String? = null,
+        val vault: VaultLine? = null,
     )
 
-    data class Page(val digest: String, val items: List<Item>, val next: Int?)
+    /** 잠긴 폴더 줄의 봉인(§19.6): ring, PIN·복구 코드 봉인(§17.1 seal_secret JSON 문자열 그대로), 각 봉인의 AD. */
+    data class VaultLine(val ring: String, val pin: String, val recovery: String, val pinAd: String, val recoveryAd: String) {
+        fun json(): JSONObject = JSONObject().put("ring", ring).put("pin", JSONObject(pin)).put("recovery", JSONObject(recovery))
+            .put("pin_ad", pinAd).put("recovery_ad", recoveryAd)
+
+        companion object {
+            /** 모양이 틀리면 null(허브 mirror.py와 같은 검사: ring 32 hex, 봉인의 alg·salt·blob 문자열 4096자 미만·t·m·p 0 이상 정수, AD 300자 이하). */
+            fun parse(v: Any?): VaultLine? {
+                val o = v as? JSONObject ?: return null
+                val ring = (o.opt("ring") as? String)?.takeIf { ID_RE.matches(it) } ?: return null
+                val pin = (o.opt("pin") as? JSONObject)?.takeIf { sealOk(it) } ?: return null
+                val rec = (o.opt("recovery") as? JSONObject)?.takeIf { sealOk(it) } ?: return null
+                val pinAd = (o.opt("pin_ad") as? String)?.takeIf { it.length <= 300 } ?: return null
+                val recAd = (o.opt("recovery_ad") as? String)?.takeIf { it.length <= 300 } ?: return null
+                return VaultLine(ring, clean(pin).toString(), clean(rec).toString(), pinAd, recAd)
+            }
+
+            private fun sealOk(o: JSONObject): Boolean =
+                listOf("alg", "salt", "blob").all { (o.opt(it) as? String)?.let { s -> s.length < 4096 } == true } &&
+                    listOf("t", "m", "p").all { (Xfer.jsonLong(o.opt(it)) ?: -1) >= 0 }
+
+            /** 아는 필드만 남긴다(모르는 값을 사본에 옮겨 두지 않게). */
+            private fun clean(o: JSONObject): JSONObject = JSONObject().put("alg", o.get("alg")).put("t", o.get("t"))
+                .put("m", o.get("m")).put("p", o.get("p")).put("salt", o.get("salt")).put("blob", o.get("blob"))
+        }
+    }
+
+    /** 잠긴 폴더의 객체 하나(§19.6 objs): 허브의 객체 id와 암호문 파일 크기. */
+    data class RawObj(val o: String, val s: Long)
+
+    /**
+     * 잠긴 폴더 안의 줄 하나(§19.6): vault = 그 잠긴 폴더의 id(목록의 id), path = 그 잠긴 폴더 경로, row·parent·ring(32 hex),
+     * meta(그 폴더 열쇠로 잠긴 Tink 암호문, base64url — 받은 그대로 둔다), objs(16개까지).
+     */
+    data class VaultRow(val vault: String, val path: String, val row: String, val parent: String, val ring: String,
+                        val meta: String, val objs: List<RawObj>) {
+        fun json(): JSONObject = JSONObject().put("vault", vault).put("row", row).put("parent", parent).put("ring", ring)
+            .put("meta", meta).put("objs", JSONArray().also { a -> objs.forEach { a.put(JSONObject().put("o", it.o).put("s", it.s)) } })
+
+        companion object {
+            const val META_MAX = 65536
+            const val OBJS_MAX = 16
+            /** 잠긴 폴더 객체 암호문의 최대 크기(평문 4 GiB + 청크마다 덧붙는 것, 허브와 같다). */
+            const val RAW_MAX = Protocol.MAX_FILE + (Protocol.MAX_FILE shr 10)
+
+            /** 목록 줄(path는 이미 검사함) 또는 사본에 둔 줄(vault 필드)을 읽는다. 틀리면 null. */
+            fun parse(o: JSONObject, vault: String, path: String): VaultRow? {
+                fun hex(k: String) = (o.opt(k) as? String)?.takeIf { ID_RE.matches(it) }
+                val row = hex("row") ?: return null
+                val parent = hex("parent") ?: return null
+                val ring = hex("ring") ?: return null
+                val meta = (o.opt("meta") as? String)?.takeIf { it.length in 1..META_MAX && Protocol.b64uDecode(it) != null } ?: return null
+                val arr = o.opt("objs") as? JSONArray ?: return null
+                if (arr.length() > OBJS_MAX) return null
+                val objs = ArrayList<RawObj>()
+                for (i in 0 until arr.length()) {
+                    val x = arr.opt(i) as? JSONObject ?: return null
+                    val oid = (x.opt("o") as? String)?.takeIf { ID_RE.matches(it) } ?: return null
+                    val s = Xfer.jsonLong(x.opt("s"))?.takeIf { it in 0..RAW_MAX } ?: return null
+                    objs += RawObj(oid, s)
+                }
+                return VaultRow(vault, path, row, parent, ring, meta, objs)
+            }
+        }
+    }
+
+    data class Page(val digest: String, val items: List<Item>, val next: Int?, val rows: List<VaultRow> = emptyList())
 
     fun fields(cursor: Int): JSONObject {
         require(cursor >= 0)
@@ -151,6 +221,7 @@ object SyncManifest {
         val id = (o.opt("id") as? String)?.takeIf { ID_RE.matches(it) } ?: return null
         val path = (o.opt("path") as? String)?.takeIf { it.isNotEmpty() && CloudPath.isVisiblePath(it) } ?: return null
         val dir = o.opt("dir") as? Boolean ?: return null
+        if (dir && o.has("vault")) return VaultLine.parse(o.opt("vault"))?.let { Item(id, path, true, vault = it) }
         if (dir) return Item(id, path, true)
         val size = Xfer.jsonLong(o.opt("size"))?.takeIf { it in 0..Protocol.MAX_FILE } ?: return null
         val mtime = Xfer.jsonLong(o.opt("mtime"))?.takeIf { it >= 0 } ?: return null
@@ -170,15 +241,26 @@ object SyncManifest {
         val arr = reply.opt("items") as? JSONArray ?: throw ProtocolException("bad_reply")
         if (arr.length() > MAX_PAGE) throw ProtocolException("bad_reply")
         val items = ArrayList<Item>(arr.length())
-        for (i in 0 until arr.length()) item(arr.opt(i))?.let { items += it }
+        val rows = ArrayList<VaultRow>()
+        for (i in 0 until arr.length()) {
+            val o = arr.opt(i) as? JSONObject
+            if (o != null && o.has("row")) row(o)?.let { rows += it } else item(o)?.let { items += it }
+        }
         val nextRaw = Xfer.field(reply, "next")
         val next = if (nextRaw == null) null else Xfer.jsonLong(nextRaw)?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()
             ?: throw ProtocolException("bad_reply")
-        return Page(digest, items, next)
+        return Page(digest, items, next, rows)
     }
 
-    /** 끝까지 받은 목록: 요약값과 항목(같은 id·같은 경로는 처음 것만, 받은 순서 = 경로 순서). */
-    data class Full(val digest: String, val items: List<Item>)
+    /** 잠긴 폴더 안의 줄(§19.6): id(그 잠긴 폴더)·path도 보통 줄처럼 검사한다. 틀리면 null(그 줄만 버린다). */
+    fun row(o: JSONObject): VaultRow? {
+        val id = (o.opt("id") as? String)?.takeIf { ID_RE.matches(it) } ?: return null
+        val path = (o.opt("path") as? String)?.takeIf { it.isNotEmpty() && CloudPath.isVisiblePath(it) } ?: return null
+        return VaultRow.parse(o, id, path)
+    }
+
+    /** 끝까지 받은 목록: 요약값과 항목(같은 id·같은 경로는 처음 것만, 받은 순서 = 경로 순서), 잠긴 폴더 안의 줄(같은 row는 처음 것만). */
+    data class Full(val digest: String, val items: List<Item>, val rows: List<VaultRow> = emptyList())
 
     /**
      * 모든 쪽을 받는다(fetch(cursor)). 쪽 사이에 digest가 바뀌면 처음(cursor 0)부터 다시(MAX_RESTARTS번까지, 넘으면 cloud_changed —
@@ -189,6 +271,7 @@ object SyncManifest {
         var cursor = 0
         var digest: String? = null
         val items = ArrayList<Item>()
+        val rows = ArrayList<VaultRow>()
         while (true) {
             if (stop()) throw ProtocolException("disconnected")
             val page = fetch(cursor)
@@ -197,11 +280,13 @@ object SyncManifest {
                 digest = null
                 cursor = 0
                 items.clear()
+                rows.clear()
                 continue
             }
             digest = page.digest
             items += page.items
-            if (items.size > MAX_ITEMS) throw ProtocolException("bad_reply")
+            rows += page.rows
+            if (items.size + rows.size > MAX_ITEMS) throw ProtocolException("bad_reply")
             val next = page.next ?: break
             if (next <= cursor) throw ProtocolException("bad_reply")
             cursor = next
@@ -209,119 +294,62 @@ object SyncManifest {
         val ids = HashSet<String>()
         val paths = HashSet<String>()
         val unique = items.filter { ids.add(it.id) && paths.add(it.path) }
-        return Full(digest!!, unique)
+        // 안의 줄은 목록에 있는 잠긴 폴더의 것만(같은 row는 처음 것만)
+        val vaults = unique.filter { it.vault != null }.associate { it.id to it.path }
+        val seen = HashSet<String>()
+        val inside = rows.filter { vaults[it.vault] == it.path && seen.add(it.row) }
+        return Full(digest!!, unique, inside)
     }
 }
 
 /**
- * 사본의 한 항목(§19.3, 암호화된 목록 안에만 있다). id·ver·tver는 허브 값, obj·tobj는 이 폰의 객체 파일 이름(32자 hex),
- * fkey는 파일 열쇠를 Keystore 열쇠로 잠근 것(base64url). 파일은 obj가 있어야 다 받은 것이다.
+ * 사본의 한 항목(§19.3): 개인키로 푼 목록(메모리에만)의 한 줄. id·ver·tver는 허브 값, obj·tobj는 이 폰의 객체 파일 이름(32자 hex).
+ * 열쇠는 여기에 두지 않는다(Mirror가 따로 들고 잠그면 지운다). 파일은 obj가 있어야 다 받은 것이다.
+ * §19.6: vault = 잠긴 폴더 자체(sealed = 아직 PIN으로 열지 않음), raw = 잠긴 폴더 안의 항목이면 그 잠긴 폴더 id
+ * (id는 허브의 row, obj·tobj는 허브의 객체 id — 받은 암호문 그대로라 그 폴더 열쇠로 푼다).
  */
 data class MirrorEntry(
     val id: String, val path: String, val dir: Boolean,
     val size: Long = 0, val mtime: Long = 0, val ver: String = "", val tver: String? = null,
-    val obj: String? = null, val tobj: String? = null, val fkey: String? = null,
+    val obj: String? = null, val tobj: String? = null,
+    val vault: Boolean = false, val sealed: Boolean = false, val raw: String? = null,
 ) {
     val complete: Boolean get() = dir || obj != null
-
-    fun json(): JSONObject {
-        val o = JSONObject().put("id", id).put("path", path).put("dir", dir)
-        if (dir) return o
-        o.put("size", size).put("mtime", mtime).put("ver", ver)
-        tver?.let { o.put("tver", it) }
-        obj?.let { o.put("obj", it) }
-        tobj?.let { o.put("tobj", it) }
-        fkey?.let { o.put("fkey", it) }
-        return o
-    }
-
-    companion object {
-        private val HEX32 = Regex("[0-9a-f]{32}")
-
-        /** 목록에서 읽은 한 줄(이 폰이 쓴 것이지만 형식은 다시 본다). 틀리면 null. */
-        fun parse(v: Any?): MirrorEntry? {
-            val o = v as? JSONObject ?: return null
-            val id = (o.opt("id") as? String)?.takeIf { HEX32.matches(it) } ?: return null
-            val path = (o.opt("path") as? String)?.takeIf { it.isNotEmpty() && CloudPath.isValid(it) } ?: return null
-            val dir = o.opt("dir") as? Boolean ?: return null
-            if (dir) return MirrorEntry(id, path, true)
-            fun hex(k: String) = (o.opt(k) as? String)?.takeIf { HEX32.matches(it) }
-            val size = Xfer.jsonLong(o.opt("size"))?.takeIf { it in 0..Protocol.MAX_FILE } ?: return null
-            val mtime = Xfer.jsonLong(o.opt("mtime")) ?: return null
-            val ver = hex("ver") ?: return null
-            val fkey = (o.opt("fkey") as? String)?.takeIf { Protocol.b64uDecode(it) != null }
-            val obj = hex("obj")?.takeIf { fkey != null }
-            return MirrorEntry(id, path, false, size, mtime, ver, hex("tver"), obj, hex("tobj")?.takeIf { obj != null }, fkey)
-        }
-    }
-}
-
-/**
- * 사본 목록(암호화해 index.bin에 둔다): 항목(허브 id → 항목)과 마지막으로 다 맞춘 요약값. 받다 만 파일(part)은 따로 둔다.
- */
-class MirrorIndex(val entries: LinkedHashMap<String, MirrorEntry> = LinkedHashMap(), var digest: String? = null) {
-    fun encode(): ByteArray {
-        val arr = JSONArray()
-        entries.values.forEach { arr.put(it.json()) }
-        val o = JSONObject().put("v", 1).put("items", arr)
-        digest?.let { o.put("digest", it) }
-        return o.toString().toByteArray(Charsets.UTF_8)
-    }
-
-    /** 다 받은 파일 수와 그 크기 합(설정의 사용량). */
-    fun usage(): Pair<Int, Long> {
-        var n = 0
-        var bytes = 0L
-        for (e in entries.values) if (!e.dir && e.complete) { n++; bytes += e.size }
-        return n to bytes
-    }
-
-    /** 이 목록이 쓰는 객체 파일 이름들(남은 것 정리에). */
-    fun objects(): Set<String> {
-        val out = HashSet<String>()
-        for (e in entries.values) { e.obj?.let { out += it }; e.tobj?.let { out += it } }
-        return out
-    }
-
-    companion object {
-        fun parse(raw: ByteArray): MirrorIndex {
-            val o = try { JSONObject(String(raw, Charsets.UTF_8)) } catch (e: Exception) { throw ProtocolException("mirror_damaged") }
-            val arr = o.opt("items") as? JSONArray ?: throw ProtocolException("mirror_damaged")
-            val out = MirrorIndex(digest = SyncDigest.parse(o.opt("digest")))
-            for (i in 0 until arr.length()) MirrorEntry.parse(arr.opt(i))?.let { out.entries[it.id] = it }
-            return out
-        }
-    }
 }
 
 /**
  * 받다 만 파일 하나(§19.3 "받다 끊기면 다 쓴 청크부터 이어 받는다"). 같은 id·ver·size·mtime일 때만 이어 받는다.
+ * fkey는 그 파일 열쇠(base64url)이고 장부(인증 없이 여는 열쇠로 잠김)에만, 받는 동안만 둔다(§19.3 2.3.1).
  */
 data class MirrorPart(val id: String, val ver: String, val size: Long, val mtime: Long, val obj: String, val fkey: String) {
-    fun encode(): ByteArray = JSONObject().put("id", id).put("ver", ver).put("size", size).put("mtime", mtime)
-        .put("obj", obj).put("fkey", fkey).toString().toByteArray(Charsets.UTF_8)
+    fun json(): JSONObject = JSONObject().put("id", id).put("ver", ver).put("size", size).put("mtime", mtime)
+        .put("obj", obj).put("fkey", fkey)
+
+    fun encode(): ByteArray = json().toString().toByteArray(Charsets.UTF_8)
 
     fun matches(want: SyncManifest.Item): Boolean = id == want.id && ver == want.ver && size == want.size && mtime == want.mtime
 
     companion object {
         private val HEX32 = Regex("[0-9a-f]{32}")
 
-        fun parse(raw: ByteArray): MirrorPart? = try {
-            val o = JSONObject(String(raw, Charsets.UTF_8))
+        fun parse(raw: ByteArray): MirrorPart? = try { fromJson(JSONObject(String(raw, Charsets.UTF_8))) } catch (e: Exception) { null }
+
+        fun fromJson(o: JSONObject): MirrorPart? {
             val id = (o.opt("id") as? String)?.takeIf { HEX32.matches(it) }
             val ver = (o.opt("ver") as? String)?.takeIf { HEX32.matches(it) }
             val obj = (o.opt("obj") as? String)?.takeIf { HEX32.matches(it) }
-            val fkey = (o.opt("fkey") as? String)?.takeIf { Protocol.b64uDecode(it) != null }
+            val fkey = (o.opt("fkey") as? String)?.takeIf { Protocol.b64uDecode(it)?.size == 32 }
             val size = Xfer.jsonLong(o.opt("size"))?.takeIf { it in 0..Protocol.MAX_FILE }
             val mtime = Xfer.jsonLong(o.opt("mtime"))
-            if (id == null || ver == null || obj == null || fkey == null || size == null || mtime == null) null
+            return if (id == null || ver == null || obj == null || fkey == null || size == null || mtime == null) null
             else MirrorPart(id, ver, size, mtime, obj, fkey)
-        } catch (e: Exception) { null }
+        }
     }
 }
 
 /**
  * 맞추기 계획(§19.3): 받을 것(없거나 ver가 다름), 경로·정보만 고칠 것(같은 id·ver), 지울 것(목록에 없음), 미리보기만 받을 것.
+ * 잠긴 채로 세운다(2.3.1): 사본 쪽은 장부(경로 대신 ih = 경로·크기·수정 시각의 열쇠 붙은 해시)만 본다.
  */
 object SyncPlan {
     data class Plan(
@@ -333,7 +361,7 @@ object SyncPlan {
         val idle: Boolean get() = fetch.isEmpty() && moves.isEmpty() && drop.isEmpty() && thumbs.isEmpty()
     }
 
-    fun make(have: Map<String, MirrorEntry>, want: List<SyncManifest.Item>): Plan {
+    fun make(have: Map<String, LedgerItem>, want: List<SyncManifest.Item>, ih: (SyncManifest.Item) -> String): Plan {
         val fetch = ArrayList<SyncManifest.Item>()
         val moves = ArrayList<SyncManifest.Item>()
         val thumbs = ArrayList<SyncManifest.Item>()
@@ -342,12 +370,11 @@ object SyncPlan {
             seen += w.id
             val old = have[w.id]
             if (w.dir) {
-                if (old == null || !old.dir || old.path != w.path) moves += w
+                if (old == null || !old.dir || old.ih != ih(w)) moves += w
                 continue
             }
-            val complete = old != null && !old.dir && old.complete && old.ver == w.ver && old.size == w.size
-            if (!complete) { fetch += w; continue }
-            if (old!!.path != w.path || old.mtime != w.mtime || (w.tver == null && old.tver != null)) moves += w
+            if (old == null || old.dir || old.obj == null || old.ver != w.ver) { fetch += w; continue }
+            if (old.ih != ih(w) || (w.tver == null && old.tver != null)) moves += w
             if (w.tver != null && (old.tver != w.tver || old.tobj == null)) thumbs += w
         }
         val drop = have.keys.filter { it !in seen }
@@ -366,6 +393,7 @@ object MirrorTree {
     fun list(entries: Collection<MirrorEntry>, dir: String): List<CloudItem> {
         val prefix = if (dir.isEmpty()) "" else "$dir/"
         val folders = HashMap<String, Long>()
+        val sealed = HashSet<String>()
         val items = ArrayList<CloudItem>()
         for (e in entries) {
             if (!e.path.startsWith(prefix) || e.path.length == prefix.length) continue
@@ -374,12 +402,16 @@ object MirrorTree {
             if (slash < 0) {
                 if (e.dir) folders.putIfAbsent(rest, 0L)
                 else if (e.complete) items += CloudItem(rest, false, e.size, e.mtime, sync = true)
+                // 아직 PIN으로 열지 않은 잠긴 폴더(§19.6): 자물쇠로 보인다
+                if (e.vault && e.sealed) sealed += rest
             } else if (e.dir || e.complete) {
                 val sub = rest.substring(0, slash)
                 folders[sub] = maxOf(folders[sub] ?: 0L, if (e.dir) 0L else e.mtime)
             }
         }
-        folders.forEach { (name, t) -> items += CloudItem(name, true, 0, t, sync = true) }
+        folders.forEach { (name, t) ->
+            items += if (name in sealed) CloudItem(name, true, 0, t, locked = true, state = "locked", sync = true) else CloudItem(name, true, 0, t, sync = true)
+        }
         return items.sortedWith(CloudListing.ORDER)
     }
 
@@ -407,8 +439,8 @@ object MirrorTree {
 }
 
 /**
- * 열쇠 하나로 작은 값을 잠그고 여는 것(§19.3). Android는 Keystore 열쇠(MirrorKeystore), 사본마다의 목록 열쇠와 JVM 테스트는
- * 평범한 AES 열쇠(AesSealKey). 잠근 모양 = nonce(12) ‖ AES-256-GCM(평문, aad) — 다른 자리에 옮겨 쓰지 못하게 aad에 용도를 넣는다.
+ * 열쇠 하나로 작은 값을 잠그고 여는 것(§19.3). Android의 장부 열쇠는 인증 없는 Keystore AES(KeystoreAes), 상자 조각·하이브리드의
+ * 데이터 열쇠와 JVM 테스트는 평범한 AES 열쇠(AesSealKey). 잠근 모양 = nonce(12) ‖ AES-256-GCM(평문, aad) — 다른 자리에 옮겨 쓰지 못하게 aad에 용도를 넣는다.
  */
 interface SealKey {
     fun seal(plain: ByteArray, aad: ByteArray): ByteArray
@@ -584,10 +616,10 @@ object MirrorObject {
     /**
      * 읽기(원하는 위치부터, 조각 하나씩 풀어 메모리에만). 파일 길이가 머리의 크기와 맞지 않거나 태그가 틀리면 mirror_damaged.
      */
-    class Reader(file: File, private val key: ByteArray) : AutoCloseable {
+    class Reader(file: File, private val key: ByteArray) : MirrorReader() {
         private val raf = try { RandomAccessFile(file, "r") } catch (e: IOException) { throw ProtocolException("mirror_damaged") }
         private val prefix: ByteArray
-        val size: Long
+        override val size: Long
         private var cachedIndex = -1L
         private var cached = ByteArray(0)
 
@@ -599,7 +631,7 @@ object MirrorObject {
         }
 
         /** pos부터 len바이트까지 out에 담는다. 담은 수(끝이면 -1). */
-        fun read(pos: Long, out: ByteArray, off: Int, len: Int): Int {
+        override fun read(pos: Long, out: ByteArray, off: Int, len: Int): Int {
             if (pos >= size) return -1
             if (len == 0) return 0
             val i = pos / CHUNK
@@ -614,18 +646,77 @@ object MirrorObject {
             return n
         }
 
-        /** 전체를 메모리로(max 바이트 이하일 때만, 넘으면 too_large). */
-        fun readAll(max: Long): ByteArray {
-            if (size > max || size > Int.MAX_VALUE - 16) throw ProtocolException("too_large")
-            val out = ByteArray(size.toInt())
-            var pos = 0L
-            while (pos < size) pos += read(pos, out, pos.toInt(), (size - pos).toInt())
-            return out
-        }
-
         override fun close() {
             try { raf.close() } catch (e: IOException) { }
             java.util.Arrays.fill(cached, 0)
         }
+    }
+}
+
+/**
+ * 사본에서 푼 내용을 읽는 것(메모리 조각 하나에만 평문): 이 폰이 받아 잠근 객체(MirrorObject.Reader)와
+ * 잠긴 폴더 안의 받은 그대로인 암호문(§19.6 VaultReader)이 같은 모양으로 읽힌다.
+ */
+abstract class MirrorReader : AutoCloseable {
+    abstract val size: Long
+
+    /** pos부터 len바이트까지 out에 담는다(한 조각 안에서). 담은 수(끝이면 -1). 손상이면 mirror_damaged. */
+    abstract fun read(pos: Long, out: ByteArray, off: Int, len: Int): Int
+
+    /** 처음부터 차례로 읽는 스트림(허브로 복원 §19.5 — 평문은 메모리 조각 하나에만). 닫으면 이 Reader도 닫힌다. */
+    fun stream(): java.io.InputStream = object : java.io.InputStream() {
+        private var pos = 0L
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            return if (read(one, 0, 1) <= 0) -1 else one[0].toInt() and 0xff
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val n = this@MirrorReader.read(pos, b, off, len)
+            if (n < 0) return -1
+            pos += n
+            return n
+        }
+
+        override fun close() { this@MirrorReader.close() }
+    }
+
+    /** 전체를 메모리로(max 바이트 이하일 때만, 넘으면 too_large). */
+    fun readAll(max: Long): ByteArray {
+        if (size > max || size > Int.MAX_VALUE - 16) throw ProtocolException("too_large")
+        val out = ByteArray(size.toInt())
+        var pos = 0L
+        while (pos < size) {
+            val n = read(pos, out, pos.toInt(), (size - pos).toInt())
+            if (n <= 0) throw ProtocolException("mirror_damaged")
+            pos += n
+        }
+        return out
+    }
+}
+
+/** §19.6 sync_raw의 첫 프레임: {"ok":true,"size":<암호문 전체 크기>}(last=0). 거부는 §3 응답 한 프레임(last=1). */
+object SyncRaw {
+    sealed class First {
+        data class Ok(val size: Long) : First()
+        data class Refused(val reply: JSONObject) : First()
+    }
+
+    fun fields(oid: String, offset: Long, length: Long): JSONObject {
+        require(Regex("[0-9a-f]{32}").matches(oid) && offset >= 0 && length >= 0)
+        return JSONObject().put("oid", oid).put("offset", offset).put("length", length)
+    }
+
+    fun parseFirst(raw: ByteArray, last: Boolean): First {
+        val o = try { JSONObject(String(raw, Charsets.UTF_8)) } catch (e: Exception) { throw ProtocolException("unreadable_reply") }
+        if (o.opt("ok") != true) {
+            if (!last) throw ProtocolException("bad_reply")
+            return First.Refused(o)
+        }
+        if (last) throw ProtocolException("bad_reply")
+        val size = Xfer.jsonLong(o.opt("size"))?.takeIf { it in 0..SyncManifest.VaultRow.RAW_MAX } ?: throw ProtocolException("bad_reply")
+        return First.Ok(size)
     }
 }

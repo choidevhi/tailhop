@@ -130,7 +130,8 @@ object Thumbs {
      */
     fun mirror(ctx: Context, ip: String, e: MirrorEntry, px: Int, job: Job): Bitmap? {
         if (job.cancelled) return null
-        val bytes = Mirror.peek(ctx, ip)?.thumb(e) ?: return null
+        // 사본이 잠겨 있으면(mirror_locked, §19.3 2.3.1) 미리보기 없이
+        val bytes = try { Mirror.peek(ctx, ip)?.thumb(e) } catch (x: Exception) { null } ?: return null
         return try {
             if (job.cancelled) return null
             val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }

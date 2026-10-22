@@ -61,6 +61,12 @@ class SyncTest {
         assertNull(old.sync) // 16자 소문자 hex만
         assertFalse(old.syncAll) // true일 때만
         assertNull(Xfer.parseHello(JSONObject("""{"ok":true,"caps":[],"sync":""}""")).sync) // 빈 값 = 대상 없음
+        // 2.3.1(§19.5): 저장소 번호는 32자 소문자 hex만
+        assertEquals("0123456789abcdef".repeat(2), Xfer.parseHello(JSONObject("""{"ok":true,"store_id":"${"0123456789abcdef".repeat(2)}"}""")).storeId)
+        for (bad in listOf("\"${"A".repeat(32)}\"", "\"abc\"", "12", "null", "true")) {
+            assertNull(bad, Xfer.parseHello(JSONObject("""{"ok":true,"store_id":$bad}""")).storeId)
+        }
+        assertNull(h.storeId)
         // 이 폰의 hello 응답에 싣는 용량
         val reply = Xfer.helloReply(0, false, false, DeviceSpace(3, 4))
         assertEquals(DeviceSpace(3, 4), DeviceSpace.parse(reply.opt("space")))
@@ -171,10 +177,15 @@ class SyncTest {
 
     // ---------- 맞추기 계획 ----------
 
-    private fun have(vararg e: MirrorEntry) = e.associateBy { it.id }
+    // 장부(잠긴 채로 세우는 계획, 2.3.1): 경로 대신 ih(경로·크기·시각의 열쇠 붙은 해시)
+    private val ledger = Ledger.fresh()
+
+    private fun ih(w: SyncManifest.Item) = ledger.ih(w)
+
+    private fun have(vararg e: LedgerItem) = e.associateBy { it.id }
 
     private fun done(id: String, path: String, ver: String = VER1, tver: String? = null) =
-        MirrorEntry(id, path, false, 10, 5, ver, tver, obj = "e".repeat(32), tobj = tver?.let { "f".repeat(32) }, fkey = "AAAA")
+        LedgerItem(id, false, ledger.ih(false, path, 10, 5), ver, tver, obj = "e".repeat(32), tobj = tver?.let { "f".repeat(32) })
 
     @Test fun planRenameOnlyDownloadDelete() {
         val old = have(
@@ -183,35 +194,37 @@ class SyncTest {
             done(ID3, "gone.jpg"), // 목록에 없음: 지우기
         )
         val want = listOf(item(ID1, "new/name.jpg"), item(ID2, "b.jpg", ver = VER2), item("9".repeat(32), "new.jpg"))
-        val plan = SyncPlan.make(old, want)
+        val plan = SyncPlan.make(old, want, ::ih)
         assertEquals(listOf("new/name.jpg"), plan.moves.map { it.path })
         assertEquals(listOf("b.jpg", "new.jpg"), plan.fetch.map { it.path })
         assertEquals(listOf(ID3), plan.drop)
         assertTrue(plan.thumbs.isEmpty())
         assertFalse(plan.idle)
         // 다 맞으면 할 일이 없다
-        assertTrue(SyncPlan.make(have(done(ID1, "a.jpg")), listOf(item(ID1, "a.jpg"))).idle)
+        assertTrue(SyncPlan.make(have(done(ID1, "a.jpg")), listOf(item(ID1, "a.jpg")), ::ih).idle)
     }
 
     @Test fun planIncompleteDirsAndThumbs() {
-        // 다 받지 못한 것(obj 없음)은 같은 ver여도 다시 받는다(받다 만 청크부터)
-        val partial = MirrorEntry(ID1, "a.jpg", false, 10, 5, VER1, fkey = "AAAA")
-        assertEquals(listOf("a.jpg"), SyncPlan.make(have(partial), listOf(item(ID1, "a.jpg"))).fetch.map { it.path })
+        // 장부에 없는 것(받다 만 것은 장부 줄이 없다)은 같은 ver여도 받는다(받다 만 청크부터)
+        assertEquals(listOf("a.jpg"), SyncPlan.make(emptyMap(), listOf(item(ID1, "a.jpg")), ::ih).fetch.map { it.path })
         // 폴더: 없거나 자리가 바뀌면 고친다
         val dirWant = SyncManifest.Item(ID2, "f", true)
-        assertEquals(listOf("f"), SyncPlan.make(emptyMap(), listOf(dirWant)).moves.map { it.path })
-        assertTrue(SyncPlan.make(have(MirrorEntry(ID2, "f", true)), listOf(dirWant)).idle)
+        assertEquals(listOf("f"), SyncPlan.make(emptyMap(), listOf(dirWant), ::ih).moves.map { it.path })
+        assertTrue(SyncPlan.make(have(LedgerItem(ID2, true, ih(dirWant))), listOf(dirWant), ::ih).idle)
+        assertEquals(1, SyncPlan.make(have(LedgerItem(ID2, true, ih(dirWant))), listOf(dirWant.copy(path = "g")), ::ih).moves.size)
         // 미리보기만 바뀜: 내용은 그대로 두고 미리보기만 받는다
         val withThumb = item(ID3, "t.jpg").copy(thumb = 100, tver = TVER2)
-        val p = SyncPlan.make(have(done(ID3, "t.jpg", tver = TVER)), listOf(withThumb))
+        val p = SyncPlan.make(have(done(ID3, "t.jpg", tver = TVER)), listOf(withThumb), ::ih)
         assertEquals(listOf("t.jpg"), p.thumbs.map { it.path })
         assertTrue(p.fetch.isEmpty() && p.moves.isEmpty())
         // 미리보기가 없어짐: 정보만 고친다(미리보기 객체를 지운다)
-        assertEquals(listOf("t.jpg"), SyncPlan.make(have(done(ID3, "t.jpg", tver = TVER)), listOf(item(ID3, "t.jpg"))).moves.map { it.path })
+        assertEquals(listOf("t.jpg"), SyncPlan.make(have(done(ID3, "t.jpg", tver = TVER)), listOf(item(ID3, "t.jpg")), ::ih).moves.map { it.path })
         // 수정 시각만 바뀜(ver 같음): 정보만
-        val moved = SyncPlan.make(have(done(ID1, "a.jpg")), listOf(item(ID1, "a.jpg").copy(mtime = 99)))
+        val moved = SyncPlan.make(have(done(ID1, "a.jpg")), listOf(item(ID1, "a.jpg").copy(mtime = 99)), ::ih)
         assertEquals(1, moved.moves.size)
         assertTrue(moved.fetch.isEmpty())
+        // ih는 사본마다 다른 열쇠: 다른 장부의 ih와는 맞지 않는다(장부만으로 경로를 맞혀 볼 수 없다)
+        assertFalse(Ledger.fresh().ih(item(ID1, "a.jpg")) == ih(item(ID1, "a.jpg")))
     }
 
     // ---------- 남은 공간 ----------
@@ -355,40 +368,54 @@ class SyncTest {
 
     // ---------- 사본 목록 ----------
 
-    @Test fun indexRoundTripAndTree() {
-        val idx = MirrorIndex(digest = "0123456789abcdef")
-        val a = MirrorEntry(ID1, "photos", true)
-        val b = done(ID2, "photos/2024/a.jpg", tver = TVER)
-        val c = MirrorEntry(ID3, "photos/b.jpg", false, 10, 5, VER1, fkey = "AAAA") // 다 받지 못함
-        listOf(a, b, c).forEach { idx.entries[it.id] = it }
-        val back = MirrorIndex.parse(idx.encode())
+    @Test fun ledgerRoundTripAndTree() {
+        // 장부: 경로·크기 없이 id·ih·ver·객체 이름만(2.3.1)
+        val l = Ledger.fresh()
+        l.digest = "0123456789abcdef"
+        l.storeId = "a".repeat(32)
+        l.hub = "Desk PC"
+        val li = LedgerItem(ID2, false, l.ih(false, "photos/2024/a.jpg", 10, 5), VER1, TVER, "e".repeat(32), "f".repeat(32))
+        l.items[ID1] = LedgerItem(ID1, true, l.ih(true, "photos", 0, 0))
+        l.items[ID2] = li
+        val back = Ledger.parse(l.encode())
         assertEquals("0123456789abcdef", back.digest)
-        assertEquals(listOf(a, b, c), back.entries.values.toList())
-        assertEquals(1 to 10L, back.usage())
+        assertEquals("a".repeat(32), back.storeId)
+        assertEquals("Desk PC", back.hub)
+        assertEquals(listOf(l.items[ID1], li), back.items.values.toList())
+        assertEquals(l.ih(false, "x", 1, 2), back.ih(false, "x", 1, 2)) // HMAC 열쇠도 그대로
+        assertEquals(1, back.files())
         assertEquals(setOf("e".repeat(32), "f".repeat(32)), back.objects())
+        assertFalse(String(l.encode(), Charsets.UTF_8).contains("photos")) // 경로가 장부에 없다
+        // 형식이 틀린 줄은 버린다(객체 이름은 32자 hex만)
+        assertNull(LedgerItem.parse(li.json().put("obj", "../../etc")))
+        assertNull(LedgerItem.parse(JSONObject().put("id", "x").put("d", true).put("ih", "")))
+        rejects("mirror_damaged") { Ledger.parse("nope".toByteArray()) }
+        rejects("mirror_damaged") { Ledger.parse(JSONObject(String(l.encode())).put("v", 1).toString().toByteArray()) }
+
+        // 푼 목록(메모리)에서 폴더 보기
+        val a = MirrorEntry(ID1, "photos", true)
+        val b = MirrorEntry(ID2, "photos/2024/a.jpg", false, 10, 5, VER1, TVER, "e".repeat(32), "f".repeat(32))
+        val c = MirrorEntry(ID3, "photos/b.jpg", false, 10, 5, VER1) // 다 받지 못함
+        val all = listOf(a, b, c)
         // 맨 위: photos 폴더 하나. photos 안: 2024(파일 경로에서 생긴 폴더), 다 받지 못한 b.jpg는 보이지 않는다
-        assertEquals(listOf("photos"), MirrorTree.list(back.entries.values, "").map { it.name })
-        val inside = MirrorTree.list(back.entries.values, "photos")
+        assertEquals(listOf("photos"), MirrorTree.list(all, "").map { it.name })
+        val inside = MirrorTree.list(all, "photos")
         assertEquals(listOf("2024"), inside.map { it.name })
         assertTrue(inside[0].dir && inside[0].sync)
-        assertEquals(listOf("a.jpg"), MirrorTree.list(back.entries.values, "photos/2024").map { it.name })
-        assertNotNull(MirrorTree.find(back.entries.values, "photos/2024/a.jpg"))
-        assertNull(MirrorTree.find(back.entries.values, "photos/b.jpg"))
-        assertEquals(listOf("2024/a.jpg"), MirrorTree.search(back.entries.values, "photos", "A.J", FileKinds.ALL).map { it.path })
-        assertTrue(MirrorTree.search(back.entries.values, "", "", FileKinds.VIDEO).isEmpty())
+        assertEquals(listOf("a.jpg"), MirrorTree.list(all, "photos/2024").map { it.name })
+        assertNotNull(MirrorTree.find(all, "photos/2024/a.jpg"))
+        assertNull(MirrorTree.find(all, "photos/b.jpg"))
+        assertEquals(listOf("2024/a.jpg"), MirrorTree.search(all, "photos", "A.J", FileKinds.ALL).map { it.path })
+        assertTrue(MirrorTree.search(all, "", "", FileKinds.VIDEO).isEmpty())
         // 같은 경로·크기·수정 시각이면 사본에서 연다
         assertTrue(MirrorTree.same(b, CloudItem("a.jpg", false, 10, 5)))
         assertFalse(MirrorTree.same(b, CloudItem("a.jpg", false, 10, 6)))
         assertFalse(MirrorTree.same(null, CloudItem("a.jpg", false, 10, 5)))
-        // 형식이 틀린 줄은 버린다
-        assertNull(MirrorEntry.parse(JSONObject().put("id", "x").put("path", "a").put("dir", true)))
-        assertNull(MirrorEntry.parse(JSONObject().put("id", ID1).put("path", "../a").put("dir", true)))
-        assertNull(MirrorEntry.parse(b.json().put("obj", "../../etc"))?.obj) // 객체 이름은 32자 hex만
-        rejects("mirror_damaged") { MirrorIndex.parse("nope".toByteArray()) }
     }
 
     @Test fun partMatches() {
-        val p = MirrorPart(ID1, VER1, 10, 5, "e".repeat(32), "AAAA")
+        val p = MirrorPart(ID1, VER1, 10, 5, "e".repeat(32), Protocol.b64uEncode(ByteArray(32) { 1 }))
+        assertNull(MirrorPart.parse(p.copy(fkey = "AAAA").encode())) // 파일 열쇠는 32바이트만
         assertEquals(p, MirrorPart.parse(p.encode()))
         assertTrue(p.matches(item(ID1, "x")))
         assertFalse(p.matches(item(ID1, "x", ver = VER2)))

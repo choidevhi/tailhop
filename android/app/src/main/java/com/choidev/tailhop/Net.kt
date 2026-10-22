@@ -239,7 +239,9 @@ object Net {
     fun syncSet(p: Pairing, paths: List<String>, on: Boolean): SyncSet.Result = SyncSet.run(paths) { chunk ->
         val h = header("sync_set")
         SyncSet.fields(chunk, on).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
-        val toks = CloudMove.sourceTokens(chunk, null) { VaultTokens.shared.tokenFor(p.pcIp, it) }
+        // 잠긴 폴더 자체는 열쇠 없이 고른다(§19.6). 열쇠는 그 안의 경로에만(허브가 sync_vault로 답하게).
+        val inside = chunk.filter { VaultTokens.shared.mountOf(p.pcIp, it)?.equals(it, ignoreCase = true) != true }
+        val toks = CloudMove.sourceTokens(inside, null) { VaultTokens.shared.tokenFor(p.pcIp, it) }
         if (toks.isNotEmpty()) h.put("token", toks[0])
         if (toks.size > 1) h.put("tokens", JSONArray(toks))
         try { cloudCall { SyncSet.parse(request(p, h)) } } catch (e: ProtocolException) {
@@ -260,6 +262,33 @@ object Net {
         val h = header("sync_manifest")
         SyncManifest.fields(cursor).let { f -> f.keys().forEach { k -> h.put(k, f.get(k)) } }
         return cloudCall { SyncManifest.parse(request(p, h, token)) }
+    }
+
+    /**
+     * §19.6 sync_raw: 동기화하는 잠긴 폴더 안 객체의 암호문을 offset부터 length만큼 받아 out에 그대로 쓴다(풀지 않는다).
+     * 허브가 알린 암호문 전체 크기를 돌려준다. offset이 그보다 크면(그 사이 바뀜) cloud_changed.
+     */
+    fun syncRaw(p: Pairing, oid: String, offset: Long, length: Long, token: SendToken? = null, out: OutputStream): Long {
+        val hh = header("sync_raw")
+        SyncRaw.fields(oid, offset, length).let { f -> f.keys().forEach { k -> hh.put(k, f.get(k)) } }
+        return cloudCall {
+            connect(p.pcIp, p.pcPort, token).use { s ->
+                val ch = msgChannel(p, s)
+                ch.send(hh.toString().toByteArray(Charsets.UTF_8), last = false)
+                ch.send(ByteArray(0), last = true)
+                token?.tick()
+                val (raw, last) = try { ch.recv() } catch (e: ProtocolException) { throw e } catch (e: IOException) {
+                    throw ProtocolException("pc_forgot")
+                }
+                val size = when (val first = SyncRaw.parseFirst(raw, last)) {
+                    is SyncRaw.First.Refused -> throw refusal(first.reply)
+                    is SyncRaw.First.Ok -> first.size
+                }
+                if (offset > size) throw ProtocolException("cloud_changed")
+                CloudWire.readData(ch, offset, minOf(size, offset + length), out) { token?.tick() }
+                size
+            }
+        }
     }
 
     /** §15 cloud_search: path 폴더 아래에서 이름에 query가 든 것(kind로 거름). 잠긴 폴더 안에서 찾으면 그 열쇠를 붙인다. */
@@ -513,12 +542,20 @@ object Net {
      * cloudDir가 있으면 클라우드 올리기(§12.2 cloud_put, 같은 형식에 `dir`만 더함)다. 상대의 응답을 돌려준다(cloud_put은 저장된 name).
      */
     fun sendFileXfer(ctx: Context, uri: Uri, meta: FileMeta, p: Pairing, xfer: String, offset: Long,
-                     token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null, cloudDir: String? = null): JSONObject {
+                     token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null, cloudDir: String? = null): JSONObject =
+        sendStreamXfer({ openSource(ctx, uri) }, meta, p, xfer, offset, token, onProgress, cloudDir)
+
+    /**
+     * sendFileXfer와 같고 원천만 스트림이다(허브로 복원 §19.5: 사본을 메모리에서 풀며 바로 보낸다 — 평문을 디스크·캐시에 쓰지 않는다).
+     * open은 처음부터 읽는 새 스트림을 연다(닫는 것은 여기서).
+     */
+    fun sendStreamXfer(open: () -> InputStream, meta: FileMeta, p: Pairing, xfer: String, offset: Long,
+                       token: SendToken? = null, onProgress: ((Long, Long) -> Unit)? = null, cloudDir: String? = null): JSONObject {
         if (meta.size > Protocol.MAX_FILE) throw ProtocolException("file_too_large")
         if (offset < 0 || offset > meta.size) throw ProtocolException("bad_xfer")
         val md = Xfer.sha256()
         val buf = ByteArray(Protocol.CHUNK)
-        openSource(ctx, uri).use { src ->
+        open().use { src ->
             var left = offset
             while (left > 0) {
                 val n = readFully(src, buf, minOf(left, buf.size.toLong()).toInt())

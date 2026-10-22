@@ -1,8 +1,10 @@
 """2.3.0 모든 기기 동기화·기기 용량(docs/PROTOCOL.md §19). 임시 폴더만 쓴다."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -88,13 +90,51 @@ class HubSyncSetTests(unittest.TestCase):
         self.assertEqual(items[0]["ver"], items2[0]["ver"])
         self.assertEqual(items2[0]["path"], "d.txt")
 
-    def test_locked_folder_cannot_sync(self):
+    def test_locked_folder_syncs_only_when_chosen_and_stays_encrypted(self):
+        """§19.6: 잠긴 폴더는 폴더째로 직접 고른 것만, 암호문 그대로."""
         self.st.lock(["v"], "123456")
-        changed, failed = self.set("v", True)
-        self.assertEqual(changed, 0)
-        self.assertEqual(failed, [{"path": "v", "code": "sync_vault"}])
         self.st.set_sync_all(True)
-        self.assertNotIn("v", paths(self.st.sync_manifest()[1]))  # 전체여도 잠긴 폴더는 빠진다
+        self.assertNotIn("v", paths(self.st.sync_manifest()[1]))  # 전체여도 잠긴 폴더는 따라가지 않는다
+        self.assertEqual(self.set("v", True), (1, []))
+        _, items = self.st.sync_manifest()
+        vault = next(x for x in items if x["path"] == "v" and "vault" in x)
+        rows = [x for x in items if x.get("row")]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["objs"])
+        self.assertIn("pin", vault["vault"])
+        blob = json.dumps(items, ensure_ascii=False)
+        self.assertNotIn("secret.txt", blob)  # 안의 이름은 암호문뿐
+        self.assertNotIn("v/secret", blob)
+        oid = rows[0]["objs"][0]["o"]
+        size, pieces = self.st.read_raw(oid)
+        raw = b"".join(pieces)
+        self.assertEqual(len(raw), size)
+        self.assertNotIn(b"v/secret.txt", raw)  # 내용도 암호문 그대로
+        with self.assertRaises(cs.p.ProtocolError):
+            self.st.read_raw("f" * 32)  # 동기화하지 않는 객체는 내주지 않는다
+        # 위 폴더를 넣고 빼도 잠긴 폴더의 표시는 그대로
+        self.set("a", True)
+        self.st.set_sync_all(False)
+        self.assertIn("v", paths(self.st.sync_manifest()[1]))
+        # 잠긴 폴더 안의 항목은 따로 못 고른다
+        token = self.st.open_vault(["v"], "local", "123456", None)
+        changed, failed = self.st.sync_set([["v", "secret.txt"]], True, {"token": token}, "local")
+        self.assertEqual(failed, [{"path": "v/secret.txt", "code": "sync_vault"}])
+        listed = {x["name"]: x for x in self.st.list_children([], {}, "local")}
+        self.assertTrue(listed["v"].get("sync"))  # 배지
+        self.assertEqual(self.set("v", False), (1, []))
+        self.assertNotIn("v", paths(self.st.sync_manifest()[1]))
+
+    def test_reset_store_forgets_sync_list(self):
+        """리셋하고 새로 만든 저장소가 예전 동기화 목록(캐시)을 내보내지 않는다."""
+        self.st.set_sync_all(True)
+        self.assertTrue(self.st.sync_manifest()[1])
+        old = self.st.id
+        self.st.reset()
+        self.st.create(PW)
+        self.assertNotEqual(self.st.id, old)
+        self.assertEqual(self.st.sync_manifest(), ("", []))
+        self.assertFalse(self.st.sync_all)
 
     def test_marks_survive_reopen(self):
         self.set("a/1.jpg", True)
@@ -109,15 +149,24 @@ class HubSyncSetTests(unittest.TestCase):
             again.close()
 
 
+COPY_PW = "copy password 1234"
+
+
 class MirrorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.base = Path(self.tmp.name) / "Mirror"
+        self.device = mm.DeviceKey(self.base)
+        self.device.create(COPY_PW)
+        self.ledger = mm.ledger_aead(self.base)
         self.files = {"x/a.bin": os.urandom(cs.CHUNK * 2 + 77), "b.txt": b"hello"}
         self.calls = 0
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def mirror(self, hub="hubA"):
+        return mm.Mirror(mm.mirror_dir(self.base, hub), self.device, self.ledger)
 
     def wants(self, files=None, ver="1" * 32):
         files = self.files if files is None else files
@@ -136,35 +185,58 @@ class MirrorTests(unittest.TestCase):
         return get
 
     def test_apply_read_and_no_plaintext_on_disk(self):
-        m = mm.Mirror(self.base, "hubA")
+        m = self.mirror()
         got = m.apply("a" * 16, self.wants(), self.fetch(), lambda path: b"")
         self.assertEqual(got, 2)
         info = m.find("x/a.bin", len(self.files["x/a.bin"]), 5)
         self.assertEqual(b"".join(m.read(info)), self.files["x/a.bin"])
         self.assertEqual([x.name for x in m.list_dir("")], ["x", "b.txt"])
-        disk = b"".join(f.read_bytes() for f in m.dir.rglob("*") if f.is_file())
+        disk = b"".join(f.read_bytes() for f in self.base.rglob("*") if f.is_file())
         self.assertNotIn(self.files["x/a.bin"][100:200], disk)
         self.assertNotIn(b"a.bin", disk)  # 이름도 암호문
         m.close()
-        again = mm.Mirror(self.base, "hubA")  # 다시 열어도(DPAPI로 잠근 열쇠) 그대로
+        again = self.mirror()
         self.assertEqual(again.digest, "a" * 16)
         self.assertEqual(again.usage(), (2, sum(map(len, self.files.values()))))
         again.close()
 
+    def test_locked_copy_syncs_but_cannot_be_read(self):
+        """잠긴 채로도 받는다(공개키로 쓴다). 읽기는 사본 비밀번호로 연 동안만(§19.3)."""
+        self.device.lock()
+        m = self.mirror()
+        self.assertEqual(m.apply("a" * 16, self.wants(), self.fetch(), lambda path: b""), 2)
+        self.assertEqual(m.usage()[0], 2)  # 장부로는 센다
+        for read in (lambda: m.find("b.txt"), lambda: m.list_dir(""), lambda: m.entries):
+            with self.assertRaises(cs.p.ProtocolError) as ctx:
+                read()
+            self.assertEqual(ctx.exception.code, "mirror_locked")
+        fresh = mm.DeviceKey(self.base)  # 다시 켠 앱: 잠겨 있다
+        self.assertTrue(fresh.locked)
+        self.assertFalse(fresh.unlock("wrong password 1234"))
+        self.assertTrue(fresh.unlock(COPY_PW))
+        reopened = mm.Mirror(m.dir, fresh, self.ledger)
+        self.assertEqual(b"".join(reopened.read(reopened.find("b.txt"))), b"hello")
+        # 다 받은 파일의 열쇠는 장부(DPAPI)에 남지 않는다: 장부만으로는 내용을 풀 수 없다
+        self.assertTrue(all("pk" not in line for line in reopened.book.values()))
+        m.close()
+        reopened.close()
+
     def test_rename_only_and_delete(self):
-        m = mm.Mirror(self.base, "hubA")
+        m = self.mirror()
         m.apply("a" * 16, self.wants(), self.fetch(), lambda path: b"")
         before = self.calls
         moved = [w if w.path != "b.txt" else mm.Want(w.id, "c.txt", False, w.size, w.mtime, w.ver)
                  for w in self.wants() if w.path != "x/a.bin"]
-        m.apply("b" * 16, moved, self.fetch(), lambda path: b"")
+        self.device.lock()
+        m.apply("b" * 16, moved, self.fetch(), lambda path: b"")  # 잠긴 채로 이름만 고친다
+        self.device.unlock(COPY_PW)
         self.assertEqual(self.calls, before)  # 이름만 바뀌면 다시 받지 않는다
         self.assertIsNotNone(m.find("c.txt"))
         self.assertIsNone(m.find("x/a.bin"))  # 목록에서 빠진 것은 지운다
         m.close()
 
     def test_resume_after_interruption(self):
-        m = mm.Mirror(self.base, "hubA")
+        m = self.mirror()
         big = {"big.bin": os.urandom(mm.PIECE * 2 + 10)}
         sent = []
 
@@ -198,17 +270,25 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual((thumbless.thumb, thumbless.tver), (0, ""))
 
     def test_space_guard(self):
-        m = mm.Mirror(self.base, "hubA")
+        m = self.mirror()
         huge = mm.Want("e" * 32, "huge.bin", False, 1 << 50, 1, "f" * 32)
         with self.assertRaises(mm.SpaceError):
             m.apply("a" * 16, [huge], self.fetch(), lambda path: b"")
         m.close()
 
-    def test_wipe(self):
-        m = mm.Mirror(self.base, "hubA")
+    def test_archive_and_wipe(self):
+        m = self.mirror()
         m.apply("a" * 16, self.wants(), self.fetch(), lambda path: b"")
-        m.wipe()
-        self.assertFalse(m.dir.exists())
+        m.set_info(hub_name="작업실 PC", store_id="c" * 32)
+        old = m.dir
+        moved = m.archive()
+        self.assertFalse(old.exists())
+        self.assertEqual(mm.archives(self.base), [moved])
+        kept = mm.Mirror(moved, self.device, self.ledger)
+        self.assertEqual(kept.state["hub_name"], "작업실 PC")
+        self.assertEqual(b"".join(kept.read(kept.find("b.txt"))), b"hello")
+        kept.wipe()
+        self.assertEqual(mm.archives(self.base), [])
 
 
 class NodeSyncTests(unittest.TestCase):
@@ -226,6 +306,7 @@ class NodeSyncTests(unittest.TestCase):
         self.st = open_hub(self.a, self.root / "A" / "cloud")
         for path in ("photos/1.jpg", "photos/2.jpg", "docs/x.txt"):
             seed(self.st, path, os.urandom(3000) + path.encode())
+        self.b.syncer.setup(COPY_PW)
 
     def tearDown(self):
         for n in self.nodes:
@@ -248,34 +329,116 @@ class NodeSyncTests(unittest.TestCase):
         self.assertLessEqual(free, total)
         self.assertTrue(wait_for(lambda: "nodeB" in self.a.peer_space))  # 요청 헤더로도 알렸다
 
+    def test_no_copy_until_password_is_set(self):
+        self.b.syncer.forget_password()
+        self.b.sync_set("nodeA", ["photos"], True)
+        self.b.syncer.sync_one("nodeA")
+        self.assertEqual(self.b.syncer.status["nodeA"]["state"], "setup")
+        self.assertIsNone(self.b.syncer.mirror("nodeA"))
+
     def test_device_sets_target_and_gets_encrypted_copy(self):
         changed, failed = self.b.sync_set("nodeA", ["photos"], True)
         self.assertEqual((changed, failed), (1, []))
+        self.b.syncer.lock()  # 잠긴 채로도 받는다
         self.b.syncer.sync_one("nodeA")
         m = self.b.syncer.mirror("nodeA")
         self.assertIsNotNone(m)
         self.assertEqual(self.b.syncer.status["nodeA"]["state"], "ok")
+        self.assertEqual(m.usage()[0], 2)
+        self.assertTrue(self.b.syncer.unlock(COPY_PW))
         self.assertEqual(sorted(x.name for x in m.list_dir("photos")), ["1.jpg", "2.jpg"])
         want = read_hub(self.st, "photos/2.jpg")
         self.assertEqual(b"".join(m.read(m.find("photos/2.jpg"))), want)
         self.assertEqual(m.digest, self.st.sync_manifest()[0])
+        self.assertEqual(m.store_id, self.st.id)
         # 허브에서 빼면 다음 맞추기에서 사본도 지운다
         self.b.sync_set("nodeA", ["photos/1.jpg"], False)
         self.b.syncer.sync_one("nodeA")
         self.assertIsNone(m.find("photos/1.jpg"))
-        # 대상이 모두 없어지면 사본 폴더째로
+        # 같은 저장소에서 대상이 모두 없어지면 사본 폴더째로
         self.b.sync_set("nodeA", ["photos"], False)
         self.b.syncer.sync_one("nodeA")
         self.assertIsNone(self.b.syncer.mirror("nodeA"))
 
-    def test_sync_all_and_unpair_wipes(self):
+    def test_hub_reset_keeps_copy_as_archive_and_restores(self):
+        """§19.5: 허브가 저장소를 새로 만들면 사본을 지우지 않고 이전 사본으로 두고, 그것을 허브로 복원한다."""
         self.b.sync_all("nodeA", True)
         self.b.syncer.sync_one("nodeA")
-        m = self.b.syncer.mirror("nodeA")
-        self.assertEqual(m.usage()[0], 3)
-        folder = m.dir
+        originals = {p: read_hub(self.st, p) for p in ("photos/1.jpg", "photos/2.jpg", "docs/x.txt")}
+        # 허브 초기화: 저장소를 잃고 새로 만든다(대상 없음)
+        self.st.reset()
+        self.st.create(PW)
+        self.b.syncer.sync_one("nodeA")
+        self.assertIsNone(self.b.syncer.mirror("nodeA"))  # 새 저장소엔 대상이 없지만
+        archives = self.b.syncer.archive_list()
+        self.assertEqual(len(archives), 1)  # 사본은 이전 사본으로 남았다
+        self.assertEqual(archives[0].usage()[0], 3)
+        done, failed = self.b.syncer.restore(archives[0], "nodeA")
+        self.assertEqual((done, failed), (3, []))
+        for path, data in originals.items():
+            self.assertEqual(read_hub(self.st, path), data)
+        self.assertEqual(len([x for x in self.st.sync_manifest()[1] if not x["dir"]]), 3)  # 다시 동기화 대상
+
+    def test_unpair_keeps_archive_and_receive_off_keeps_archives(self):
+        self.b.sync_all("nodeA", True)
+        self.b.syncer.sync_one("nodeA")
+        folder = self.b.syncer.mirror("nodeA").dir
         self.b.unpair("nodeA")
-        self.assertTrue(wait_for(lambda: not folder.exists()))
+        self.assertTrue(wait_for(lambda: not folder.exists() and len(self.b.syncer.archive_list()) == 1))
+        self.b.set_sync_receive(False)
+        time.sleep(0.5)
+        self.assertEqual(len(self.b.syncer.archive_list()), 1)  # 이전 사본은 백업이라 남긴다
+
+    def test_restore_into_this_pc(self):
+        """이 PC가 허브일 때 이전 사본을 이 PC 저장소로 복원한다(stable_id "")."""
+        self.b.sync_all("nodeA", True)
+        self.b.syncer.sync_one("nodeA")
+        archive_dir = self.b.syncer.mirror("nodeA").archive()
+        archive = mm.Mirror(archive_dir, self.b.syncer.device, self.b.syncer._ledger_aead())
+        hub_b = open_hub(self.b, self.root / "B" / "cloud")
+        done, failed = self.b.syncer.restore(archive, "")
+        self.assertEqual((done, failed), (3, []))
+        self.assertEqual(read_hub(hub_b, "docs/x.txt"), read_hub(self.st, "docs/x.txt"))
+
+    def test_locked_folder_copy_needs_copy_password_and_pin(self):
+        """§19.6: 잠긴 폴더를 잠긴 채로 받고, 오프라인에서 사본 비밀번호 + PIN으로 연다. 틀리면 기다린다."""
+        from cloud_source import Source
+        seed(self.st, "safe/plan.txt", b"top secret plan")
+        self.st.lock(["safe"], "246810")
+        self.b.sync_set("nodeA", ["safe"], True)
+        self.b.syncer.lock()
+        self.b.syncer.sync_one("nodeA")  # 잠긴 채로 받는다
+        m = self.b.syncer.mirror("nodeA")
+        disk = b"".join(f.read_bytes() for f in m.dir.rglob("*") if f.is_file())
+        self.assertNotIn(b"top secret plan", disk)
+        self.assertNotIn(b"plan.txt", disk)
+        off = Source(self.b, "nodeA", offline=True)
+        with self.assertRaises(Exception) as ctx:
+            off.list("")
+        self.assertEqual(getattr(ctx.exception, "code", ""), "mirror_locked")  # 사본 비밀번호부터
+        self.assertTrue(self.b.syncer.unlock(COPY_PW))
+        top = {x.name: x for x in off.list("")[0]}
+        self.assertTrue(top["safe"].locked)
+        self.assertFalse(off.is_open("safe"))
+        self.assertEqual(off.list("safe")[0], [])  # 닫힌 잠긴 폴더 안은 안 보인다
+        for _ in range(cs.MAX_FAILS):
+            with self.assertRaises(Exception):
+                off.open("safe", "000000")
+        with self.assertRaises(Exception) as ctx:
+            off.open("safe", "246810")
+        self.assertEqual(getattr(ctx.exception, "code", ""), "vault_wait")  # 5번 틀리면 맞아도 기다린다
+        m.state["vfail"].clear()
+        off.open("safe", "246810")
+        self.assertTrue(off.is_open("safe"))
+        self.assertEqual([x.name for x in off.list("safe")[0]], ["plan.txt"])
+        self.assertEqual(off.read_bytes("safe/plan.txt", 1 << 20), b"top secret plan")
+        self.b.syncer.lock()  # 사본을 잠그면 연 잠긴 폴더도 닫힌다
+        self.assertTrue(self.b.syncer.unlock(COPY_PW))
+        self.assertFalse(off.is_open("safe"))
+        # 허브에서 동기화를 빼면 기기에서도 사라진다
+        self.b.sync_set("nodeA", ["safe"], False)
+        self.b.syncer.sync_one("nodeA")
+        self.assertIsNone(self.b.syncer.mirror("nodeA"))
 
     def test_source_reads_copy_offline_and_online(self):
         from cloud_source import Source
@@ -292,6 +455,11 @@ class NodeSyncTests(unittest.TestCase):
         self.assertEqual(getattr(ctx.exception, "code", ""), "sync_readonly")
         out = off.export("photos/1.jpg", self.root / "out")  # 사용자가 고른 것만 풀어 꺼낸다
         self.assertEqual(out.read_bytes(), want)
+        self.b.syncer.lock()
+        with self.assertRaises(Exception) as ctx:
+            off.list("photos")
+        self.assertEqual(getattr(ctx.exception, "code", ""), "mirror_locked")  # 잠기면 오프라인 사본도 못 본다
+        self.b.syncer.unlock(COPY_PW)
         # 켜져 있을 때: 같은 크기·수정 시각이면 사본에서(허브에 묻지 않는다)
         item = next(x for x in self.b.cloud_list("nodeA", "photos")[0] if x.name == "1.jpg")
         self.assertTrue(item.sync)

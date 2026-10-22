@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterator
 from urllib.parse import quote, unquote
 
 from cryptography.hazmat.primitives import hashes
@@ -515,7 +515,10 @@ def _receive_into_store(ch: Channel, header: dict, target, on_progress, peer: st
         up = target.resume(peer, xfer, size, offset)
     else:
         name = cloud_name(sanitize_filename(header["name"]))
-        up = target.begin(name, size, int(time.time() * 1000), peer, xfer or new_xfer())
+        now = int(time.time() * 1000)
+        mtime = header.get("mtime")  # §19.5 허브로 복원: 원래 수정 시각(없거나 이상하면 지금)
+        mtime = mtime if _is_int(mtime) and 0 < mtime <= now + 86_400_000 else now
+        up = target.begin(name, size, mtime, peer, xfer or new_xfer())
     got = offset
     try:
         while True:
@@ -570,7 +573,7 @@ class Received:
 # 본문 없이 헤더 뒤 빈 last 프레임 하나만 오는 메시지(§4 unpair, §11 hello, §12 클라우드 요청)
 CLOUD_REQUESTS = ("cloud_list", "cloud_get", "cloud_del", "cloud_mkdir", "cloud_thumb", "cloud_search",
                   "cloud_lock", "cloud_open", "cloud_unlock", "cloud_repin", "cloud_move", "cloud_rename",
-                  "sync_set", "sync_manifest")
+                  "sync_set", "sync_manifest", "sync_raw")
 STORE_REQUESTS = ("store_unlock", "store_lock")  # 저장소가 잠겨 있어도 받는다(§18.3)
 CLOUD_TYPES = CLOUD_REQUESTS + ("cloud_put",)
 _EMPTY_BODY = ("unpair", "hello", "update_get") + CLOUD_REQUESTS + STORE_REQUESTS
@@ -742,6 +745,29 @@ def send_file_xfer(ch: Channel, sender: str, path: Path, xfer: str, offset: int 
             ch.send(block, last=False)
             if on_progress:
                 on_progress(sent, size)
+    if sent != size:
+        raise FileChanged()
+    ch.send(json.dumps({"sha256": digest.hexdigest()}).encode("utf-8"), last=True)
+
+
+def send_stream_xfer(ch: Channel, sender: str, name: str, size: int, xfer: str,
+                     read: Callable[[int, int], Iterator[bytes]], kind: str = "cloud_put", **fields) -> None:
+    """send_file_xfer와 같은 모양으로, 파일 대신 read(offset, length)에서 흘려 보낸다(§19.5 사본을 허브로 복원:
+    평문을 디스크에 쓰지 않는다). 처음부터 보낸다."""
+    if not 0 <= size <= MAX_FILE:
+        raise ValueError(i18n.t("err.file_too_large"))
+    header = new_header(kind, sender, name=name, size=size, xfer=xfer, offset=0, **fields)
+    ch.send(json.dumps(header).encode("utf-8"), last=False)
+    digest = hashlib.sha256()
+    sent = 0
+    for block in read(0, size):
+        for start in range(0, len(block), CHUNK):
+            piece = block[start:start + CHUNK]
+            sent += len(piece)
+            if sent > size:
+                raise FileChanged()
+            digest.update(piece)
+            ch.send(piece, last=False)
     if sent != size:
         raise FileChanged()
     ch.send(json.dumps({"sha256": digest.hexdigest()}).encode("utf-8"), last=True)

@@ -55,7 +55,7 @@ from node import PAIR_WINDOW_SEC, Node
 APP_NAME = "TailHop"
 CHAT_FILTERS = {"all": "chat.filter_all", "text": "chat.filter_text", "media": "chat.filter_media",
                 "file": "chat.filter_file"}
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 HISTORY_PAGE = 50  # 대화방에 한 번에 그리는 말풍선 수. "더 보기"로 늘린다(기록은 최대 store.HISTORY_LIMIT개).
 SIDEBAR_WIDTH = 236
@@ -1888,12 +1888,19 @@ def selftest(out: Path) -> int:
             up.commit()
             result["store"] = b"".join(st.read(st.node_at(["a.bin"], {}, "local"))) == b"hello"
             st.close()
-            copy = mirror.Mirror(Path(tmp) / "mirror", "selftest")  # 동기화 사본(§19.3): DPAPI로 잠근 열쇠
+            # 동기화 사본(§19.3): 잠긴 채로 공개키로 쓰고, 사본 비밀번호로 연 뒤에만 읽힌다(장부는 DPAPI)
+            base = Path(tmp) / "mirror"
+            device = mirror.DeviceKey(base)
+            device.create("selftest password 1")
+            device.lock()
+            copy = mirror.Mirror(base / ("0" * 16), device, mirror.ledger_aead(base))
             copy.apply("0" * 16, [mirror.Want("1" * 32, "a.bin", False, 5, 0, "2" * 32)],
                        lambda _path, offset, length: b"hello"[offset:offset + length], lambda _path: b"")
             copy.close()
-            again = mirror.Mirror(Path(tmp) / "mirror", "selftest")
-            result["mirror"] = b"".join(again.read(again.find("a.bin"))) == b"hello"
+            fresh = mirror.DeviceKey(base)
+            again = mirror.Mirror(base / ("0" * 16), fresh, mirror.ledger_aead(base))
+            result["mirror"] = fresh.unlock("selftest password 1") \
+                and b"".join(again.read(again.find("a.bin"))) == b"hello"
             again.close()
         ff = media.ffmpeg_dir()
         result["ffmpeg"] = str(ff) if ff else ""

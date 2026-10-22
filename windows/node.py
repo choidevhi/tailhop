@@ -188,6 +188,8 @@ class Node:
         """강한 잠금: Windows가 잠기거나 정한 시간 동안 클라우드를 쓰지 않으면 잠근다(5초마다 본다)."""
         while not self._stop:
             time.sleep(LOCK_POLL_SEC)
+            if not self.syncer.device.locked:  # 열어 둔 동기화 사본도 같은 때 다시 잠근다(§19.3)
+                self.syncer.check_idle(_session_locked())
             st = self._store
             if st is None or not st.strong or st.state != cs.OPEN:
                 continue
@@ -436,7 +438,12 @@ class Node:
             pass
 
     def sync_set(self, stable_id: str, paths: list[str], on: bool) -> tuple[int, list[dict]]:
-        """§19.2: 허브에서 고른 항목을 동기화 대상에 넣거나 뺀다(500개씩, 잠긴 폴더 안이면 그 열쇠도)."""
+        """§19.2: 허브에서 고른 항목을 동기화 대상에 넣거나 뺀다(500개씩, 잠긴 폴더 안이면 그 열쇠도). ""면 이 PC."""
+        if not stable_id:
+            hub = self.hub()
+            if hub is None:
+                raise p.ProtocolError("store_locked")
+            return hub.sync_set([cloud.parse_path(x) for x in paths], on, {}, "local")
         changed, failed = 0, []
         for start in range(0, len(paths), SYNC_SET_BATCH):
             batch = paths[start:start + SYNC_SET_BATCH]
@@ -450,6 +457,31 @@ class Node:
             failed += [x for x in reply.get("failed") or [] if isinstance(x, dict) and x.get("path") in asked
                        and isinstance(x.get("code"), str)]
         return changed, failed
+
+    def cloud_put_stream(self, stable_id: str, folder: str, name: str, size: int, mtime: int, read) -> str:
+        """§19.5 허브로 복원: read(offset, length)에서 흘려 허브의 folder에 올린다(평문을 디스크에 쓰지 않는다). 저장된 이름.
+        stable_id가 ""면 이 PC의 저장소로."""
+        if not stable_id:
+            hub = self.hub()
+            if hub is None:
+                raise p.ProtocolError("store_locked")
+            target = hub.put_target(folder, {}, "local")
+            up = hub.store.begin_upload(target.folder, target.ring, p.cloud_name(p.sanitize_filename(name)), size,
+                                        mtime, "local", p.new_xfer())
+            try:
+                for block in read(0, size):
+                    up.write(block)
+            except BaseException:
+                up.abort()
+                raise
+            return up.commit(unique=True)
+        sock, pairing = self._connect(stable_id)
+        with sock:
+            ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
+            p.send_stream_xfer(ch, self.me.name, p.cloud_name(p.sanitize_filename(name)), size, p.new_xfer(), read,
+                               **self._with_token(stable_id, folder, {"dir": folder, "mtime": mtime}))
+            reply = p.read_reply(ch)
+        return str(reply.get("name") or name)
 
     def sync_all(self, stable_id: str, on: bool) -> None:
         self._cloud_request(stable_id, "sync_set", all=bool(on))
@@ -666,6 +698,9 @@ class Node:
         digest = self._hub_sync()
         if digest:
             reply["sync"] = digest  # §19.2
+        st = self._store
+        if st is not None and st.id and state in (cs.OPEN, cs.LOCKED):
+            reply["store_id"] = st.id  # §19.5: 기기는 저장소가 바뀌면 사본을 지우지 않고 이전 사본으로 둔다
         if state == cs.OPEN and self._store is not None and self._store.sync_all:
             reply["sync_all"] = True
         if state != "off":
@@ -689,7 +724,7 @@ class Node:
         kind, peer = header["type"], pairing.stable_id
         changed = True
         try:
-            if kind in ("sync_set", "sync_manifest"):
+            if kind in ("sync_set", "sync_manifest", "sync_raw"):
                 self._serve_sync(ch, hub, header, peer)
                 if kind == "sync_set":
                     self.on_event("cloud_changed", {"peer": pairing.name, "path": ""})
@@ -761,7 +796,21 @@ class Node:
 
     @staticmethod
     def _serve_sync(ch: p.Channel, hub: hubmod.Hub, header: dict, peer: str) -> None:
-        """§19.2 sync_set·sync_manifest."""
+        """§19.2 sync_set·sync_manifest, §19.6 sync_raw."""
+        if header["type"] == "sync_raw":
+            offset, length = header.get("offset", 0), header.get("length")
+            if not _uint(offset) or (length is not None and not _uint(length)):
+                raise p.ProtocolError("bad_header")
+            size, blocks = hub.sync_raw(header.get("oid"), offset, length)
+            if offset > size:
+                raise p.ProtocolError("bad_header")
+            left = size - offset if length is None else min(length, size - offset)
+            ch.send(json.dumps({"ok": True, "size": size}).encode("utf-8"), last=False)
+            try:
+                Node._stream_blocks(ch, b"", blocks, left)
+            except Exception:  # noqa: BLE001 - ok를 보낸 뒤에는 끊기만 한다
+                pass
+            return
         if header["type"] == "sync_manifest":
             cursor = header.get("cursor", 0)
             if not _uint(cursor):
@@ -1258,16 +1307,25 @@ class Node:
                    variant: str | None = None) -> bytes:
         """허브의 파일(또는 딸린 버전)을 메모리로 받는다(라이트박스·스트리밍). length를 주면 그 부분만(§17.3).
         받을 크기가 limit보다 크면 받지 않고 too_large."""
+        want = {"path": path, "offset": offset}
+        if length is not None:
+            want["length"] = length
+        if variant is not None:
+            want["variant"] = variant
+        return self._ranged_read(stable_id, "cloud_get", self._with_token(stable_id, path, want), limit, offset, length)
+
+    def sync_raw_read(self, stable_id: str, oid: str, offset: int, length: int) -> bytes:
+        """§19.6: 동기화하는 잠긴 폴더 안 객체의 암호문 일부."""
+        return self._ranged_read(stable_id, "sync_raw", {"oid": oid, "offset": offset, "length": length}, length,
+                                 offset, length)
+
+    def _ranged_read(self, stable_id: str, kind: str, fields: dict, limit: int, offset: int,
+                     length: int | None) -> bytes:
+        """머리 {"ok","size"}(last=0) 뒤에 데이터가 오는 요청(cloud_get·sync_raw)을 메모리로 받는다."""
         sock, pairing = self._connect(stable_id)
         with sock:
             ch = p.open_client(sock, p.KIND_MSG, self._send_key(pairing))
-            want = {"path": path, "offset": offset}
-            if length is not None:
-                want["length"] = length
-            if variant is not None:
-                want["variant"] = variant
-            fields = self._with_token(stable_id, path, want)
-            ch.send(json.dumps(p.new_header("cloud_get", self.me.name, **fields)).encode("utf-8"), last=False)
+            ch.send(json.dumps(p.new_header(kind, self.me.name, **fields)).encode("utf-8"), last=False)
             ch.send(b"", last=True)
             raw, last = ch.recv()
             if last:

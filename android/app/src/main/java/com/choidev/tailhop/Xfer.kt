@@ -67,10 +67,12 @@ object Xfer {
     /**
      * 2.3.0(§19): space = 상대의 기기 용량(형식이 틀리면 null), sync = 허브의 동기화 대상 요약값(16자 hex, 대상이 없으면 null),
      * syncAll = 허브의 "전체 동기화"가 켜져 있는지("sync_all":true일 때만).
+     * 2.3.1(§19.5): storeId = 허브 저장소 고유 번호(32자 소문자 hex, 없거나 형식이 틀리면 null).
      */
     data class Hello(val caps: Set<String>, val cloud: Boolean, val have: Long, val done: Boolean,
                      val update: UpdateOffer? = null, val store: String? = null, val strong: Boolean = false,
-                     val space: DeviceSpace? = null, val sync: String? = null, val syncAll: Boolean = false) {
+                     val space: DeviceSpace? = null, val sync: String? = null, val syncAll: Boolean = false,
+                     val storeId: String? = null) {
         val xfer: Boolean get() = "xfer" in caps
     }
 
@@ -80,7 +82,8 @@ object Xfer {
         if (arr != null) for (i in 0 until arr.length()) (arr.opt(i) as? String)?.let { caps += it }
         return Hello(caps, reply.opt("cloud") == true, jsonLong(reply.opt("have")) ?: 0L, reply.opt("done") == true,
             Updates.fromHello(reply, caps), HubStore.parse(reply), reply.opt("strong") == true,
-            DeviceSpace.parse(reply.opt("space")), SyncDigest.parse(reply.opt("sync")), reply.opt("sync_all") == true)
+            DeviceSpace.parse(reply.opt("space")), SyncDigest.parse(reply.opt("sync")), reply.opt("sync_all") == true,
+            MirrorIdentity.parse(reply.opt("store_id")))
     }
 
     /** 이어 보낼 위치: 상대가 알린 have가 0..size 밖이면 처음부터(0). */

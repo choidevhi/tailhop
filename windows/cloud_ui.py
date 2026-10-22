@@ -24,6 +24,7 @@ import customtkinter as ctk
 from tkinterdnd2 import DND_FILES
 
 import cloud
+import cloudkeys
 import lightbox
 import media
 import outbox
@@ -102,13 +103,16 @@ class PinDialog(ctk.CTkToplevel):
         for child in self.fields.winfo_children():
             child.destroy()
         self.current = self.new = self.again = None
-        if self.mode in ("open", "unlock", "repin", "convert", "store"):
-            label = t("vault.recovery") if self.use_recovery else t("store.password") if self.mode == "store" \
-                else t("vault.pin")
+        if self.mode in ("open", "unlock", "repin", "convert", "store", "copy_open"):
+            label = t("vault.recovery") if self.use_recovery else t("store.password") \
+                if self.mode in ("store", "copy_open") else t("vault.pin")
             self.current = self._entry(label, secret=not self.use_recovery)
         if self.mode in ("lock", "repin", "convert"):
             self.new = self._entry(t("vault.new_pin"))
             self.again = self._entry(t("vault.new_pin_again"))
+        if self.mode == "copy_set":
+            self.new = self._entry(t("store.new_password"))
+            self.again = self._entry(t("store.new_password_again"))
         (self.current or self.new).focus_set()
 
     def toggle_recovery(self) -> None:
@@ -124,7 +128,10 @@ class PinDialog(ctk.CTkToplevel):
             if self.new.get() != self.again.get():
                 self.error.configure(text=t("vault.mismatch"))
                 return
-            if not 6 <= len(self.new.get()) <= 64:
+            if self.mode == "copy_set" and not cloudkeys.password_ok(self.new.get()):
+                self.error.configure(text=t("store.password_rule"))
+                return
+            if self.mode != "copy_set" and not 6 <= len(self.new.get()) <= 64:
                 self.error.configure(text=t("vault.pin_rule"))
                 return
             values["new_pin"] = self.new.get()
@@ -138,9 +145,44 @@ class PinDialog(ctk.CTkToplevel):
 
 RECOVERY_HINTS = {"vault.recovery_hint": "vault.recovery_hint", "store.recovery_hint": "store.recovery_hint"}
 VAULT_TITLES = {"open": "vault.open_title", "lock": "vault.lock_title", "unlock": "vault.unlock_title",
-                "repin": "vault.repin_title", "convert": "migrate.vault_title", "store": "store.remote_title"}
+                "repin": "vault.repin_title", "convert": "migrate.vault_title", "store": "store.remote_title",
+                "copy_set": "sync.copy_set_title", "copy_open": "sync.copy_open_title"}
 VAULT_HINTS = {"open": "vault.open_hint", "lock": "vault.lock_hint", "unlock": "vault.unlock_hint",
-               "repin": "vault.repin_hint", "convert": "migrate.vault_hint", "store": "store.remote_hint"}
+               "repin": "vault.repin_hint", "convert": "migrate.vault_hint", "store": "store.remote_hint",
+               "copy_set": "sync.copy_set_hint", "copy_open": "sync.copy_open_hint"}
+
+
+def ask_copy_password(win, then=None) -> None:
+    """동기화 사본(§19.3): 비밀번호를 아직 안 정했으면 정하고, 잠겨 있으면 연다. 되면 then()."""
+    syncer = win.app.node.syncer
+    mode = "copy_open" if syncer.device.exists else "copy_set"
+
+    def done(dialog, values) -> None:
+        def work() -> bool:
+            if mode == "copy_set":
+                syncer.setup(values["new_pin"])
+                return True
+            return syncer.unlock(values.get("pin", ""))
+
+        def after(ok, error) -> None:
+            if error is not None or not ok:
+                dialog.fail(str(error) if error is not None else t("err.store_password"))
+                return
+            dialog.destroy()
+            if then is not None:
+                then()
+
+        threading.Thread(target=lambda: _run(win, work, after), daemon=True).start()
+
+    PinDialog(win, mode, "", done)
+
+
+def _run(win, work, after) -> None:
+    try:
+        result, error = work(), None
+    except Exception as exc:  # noqa: BLE001 - 창에 이유를 보인다
+        result, error = None, exc
+    win.app.events.put(("ui_call", {"fn": lambda: win.winfo_exists() and after(result, error)}))
 
 
 def show_recovery(parent, code: str, hint: str = "vault.recovery_hint") -> None:
@@ -529,6 +571,12 @@ class CloudWindow(ctk.CTkToplevel):
             if code == "not_found" and self.path:
                 self.path = self.path[:-1]  # 폴더가 사라졌다(다른 기기에서 지움): 위로
                 self.reload()
+                return
+            if code == "mirror_locked" and self._offline():  # 사본이 잠겨 있다: 비밀번호로 연다
+                self._message(t("sync.copy_locked", name=self._source_name(self.source)))
+                ctk.CTkButton(self.list, text=t("sync.copy_open"), command=lambda: ask_copy_password(self, self.reload),
+                              fg_color=INK, hover_color=INK_HOVER, text_color=INK_TEXT, corner_radius=6, height=36,
+                              font=font(13, "bold")).pack(pady=14)
                 return
             if code == "vault_locked" and self.path:
                 locked_name = self.path[-1]
@@ -1012,8 +1060,8 @@ class CloudWindow(ctk.CTkToplevel):
             self._bar_button(t("cloud.move"), "folder-input", lambda: self.move_items(dict(self.selected)))
         if self._can_rename():
             self._bar_button(t("cloud.rename"), "file-text", lambda: RenameDialog(self, dict(self.selected)))
-        if self._can_sync() and any(not x.locked for x in self.selected.values()):
-            off = all(x.sync for x in self.selected.values() if not x.locked)
+        if self._can_sync():  # 잠긴 폴더도 폴더째로(§19.6). 잠긴 폴더 안의 것은 허브가 이유와 함께 거부한다
+            off = all(x.sync for x in self.selected.values())
             self._bar_button(t("sync.remove") if off else t("sync.add"), "monitor-smartphone",
                              lambda: self.sync_items(dict(self.selected), not off))
         if not self._offline():
@@ -1106,7 +1154,7 @@ class CloudWindow(ctk.CTkToplevel):
     # ---------- 모든 기기 동기화(§19) ----------
     def sync_items(self, chosen: dict[str, cloud.Item], on: bool) -> None:
         """고른 항목을 모든 기기에 동기화하거나 뺀다(잠긴 폴더는 허브가 거부한다)."""
-        paths = [full for full, item in chosen.items() if not item.locked]
+        paths = list(chosen)
         if not paths:
             return
         src = self._src()
@@ -1139,6 +1187,11 @@ class CloudWindow(ctk.CTkToplevel):
         menu.add_command(label=t("sync.how"), state="disabled")
         if self.source != LOCAL and self.node.syncer.enabled:
             menu.add_command(label=t("sync.now"), command=lambda: self.node.syncer.poke(self.source))
+        syncer = self.node.syncer
+        if self.source != LOCAL and not syncer.device.exists:
+            menu.add_command(label=t("sync.copy_set_title") + "…", command=lambda: ask_copy_password(self))
+        elif self.source != LOCAL and not syncer.device.locked:
+            menu.add_command(label=t("sync.copy_lock"), command=syncer.lock)
         menu.add_command(label=t("sync.settings"), command=self.app.open_settings)
         menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
 
@@ -1193,6 +1246,8 @@ class CloudWindow(ctk.CTkToplevel):
         found = self.node.syncer.mirror(self.source)
         status = self.node.syncer.status.get(self.source, {})
         state = status.get("state")
+        if state == "setup":
+            return t("sync.need_setup")
         if state == "syncing":
             total = status.get("total") or 0
             pct = int(status.get("done", 0) * 100 / total) if total else 0
@@ -1207,11 +1262,15 @@ class CloudWindow(ctk.CTkToplevel):
             return line + " · " + str(p.ProtocolError(status.get("code") or "peer_refused"))
         if found.synced_at:
             line += " · " + t("sync.synced_at", when=dt.datetime.fromtimestamp(found.synced_at).strftime("%m-%d %H:%M"))
-        return line
+        return line + " · " + (t("sync.copy_is_locked") if found.locked else t("sync.copy_is_open"))
 
     def on_sync_changed(self, data: dict) -> None:
         """사본이 바뀌었다(맞춤·지움): 상태 줄을 고치고, 사본을 보는 중이면 다시 읽는다."""
-        if data.get("peer_id") != self.source:
+        if not self.winfo_exists():
+            return
+        if data.get("locked"):  # 사본을 다시 잠갔다: 사본에서 연 그림·영상을 닫는다
+            self.close_viewers()
+        if data.get("peer_id") not in (self.source, ""):
             return
         self.refresh_sync_status()
         self.render_sources()
@@ -1444,7 +1503,7 @@ class CloudWindow(ctk.CTkToplevel):
             menu.add_command(label=t("vault.repin_menu"), command=lambda: self.ask_repin(item.name, full))
         if not item.is_dir:
             menu.add_command(label=t("cloud.download"), command=lambda: self.download(item, full))
-        if self._can_sync() and not item.locked:
+        if self._can_sync() and (not item.locked or item.state == "locked"):
             menu.add_command(label=t("sync.remove") if item.sync else t("sync.add"),
                              command=lambda: self.sync_items({full: item}, not item.sync))
         if self._offline():

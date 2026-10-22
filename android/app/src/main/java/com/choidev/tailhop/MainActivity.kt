@@ -100,6 +100,12 @@ class MainActivity : AppCompatActivity() {
         if (Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.OFF) ReceiverService.start(this)
         SendService.resumeIfNeeded(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
         MirrorSync.request(this) // 앱을 엶: 동기화 사본을 맞춘다(허브마다 10분에 한 번까지, §19.3)
+        // 2.3.1: 예전 사본을 지움·열쇠가 무효가 되어 지움·허브가 바뀌어 이전 사본으로 둠을 한 번 알린다
+        val app = applicationContext
+        Thread {
+            Mirror.migrate(app)
+            ui.post { if (!isDestroyed) MirrorNoticeUi.show(this) }
+        }.start()
         reload(); ui.post(ticker)
         // 업데이트(1.9.0): 6시간에 한 번 조용히 확인. 설치 허용 설정에서 돌아왔으면 이어서 설치한다.
         updateRow()
@@ -469,9 +475,11 @@ class MainActivity : AppCompatActivity() {
                     History.clearDevice(ctx, p.pcIp)
                     SendService.forgetDevice(ctx, p.pcIp)
                     val app = ctx.applicationContext
-                    // 받다 만 조각 파일과 그 PC의 동기화 사본(§19.3)도 지운다
-                    if (MirrorStatus.running == p.pcIp) MirrorSync.cancelRunning()
-                    Thread { Transfers.forgetPeer(app, p.pcIp); Mirror.delete(app, p.pcIp) }.start()
+                    // 받다 만 조각 파일은 지운다. 그 PC의 동기화 사본은 지우지 않고 이전 사본으로 둔다(§19.5, 지우기는 기기 설정에서).
+                    Thread {
+                        Transfers.forgetPeer(app, p.pcIp)
+                        try { MirrorSync.whileStopped { Mirror.archive(app, p.pcIp, p.pcName) } } catch (e: Exception) { }
+                    }.start()
                     PeerSpaces.shared.forget(p.pcIp)
                     Store.remove(ctx, p.pcIp)
                     MirrorWork.schedule(ctx)

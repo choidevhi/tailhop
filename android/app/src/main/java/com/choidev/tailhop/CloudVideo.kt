@@ -190,7 +190,7 @@ interface VideoFeed {
  * 동기화 사본(§19.3)의 영상: 암호화된 객체를 원하는 위치부터 1 MiB 청크씩 메모리로만 풀어 재생기에 넘긴다(평문을 디스크·캐시에 쓰지 않는다).
  * 데이터를 쓰지 않고 허브가 꺼져 있어도 재생된다. close()는 파일을 닫는다(그 뒤 읽기는 오류).
  */
-class MirrorVideo(private val reader: MirrorObject.Reader) : VideoFeed {
+class MirrorVideo(private val reader: MirrorReader) : VideoFeed {
     @Volatile private var closed = false
 
     val size: Long get() = reader.size

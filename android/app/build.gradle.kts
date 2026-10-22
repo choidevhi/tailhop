@@ -18,8 +18,8 @@ android {
         applicationId = "com.choidev.tailhop"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "2.3.0"
+        versionCode = 16
+        versionName = "2.3.1"
     }
 
     signingConfigs {
@@ -63,6 +63,8 @@ android {
     testOptions {
         unitTests.all {
             it.systemProperty("tailhop.vectors", rootProject.file("../docs/test_vectors.json").absolutePath)
+            // §19.6 PIN 확인의 Argon2id(m = 256 MiB)를 실제 값으로 시험한다
+            it.maxHeapSize = "1g"
         }
     }
 }
@@ -82,6 +84,10 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.11.1")
     // 기기 쪽 동기화의 주기 맞추기(2.3.0, Apache-2.0): 1시간, 배터리 부족 아님 + 비데이터 망. 포그라운드 서비스를 더하지 않는다
     implementation("androidx.work:work-runtime:2.10.5")
+    // 잠긴 폴더를 잠긴 채로(2.3.1, §19.6): 허브와 같은 Tink AEAD 키 묶음(Apache-2.0)과 PIN의 Argon2id(BouncyCastle, MIT).
+    // 암호 계산은 직접 만들지 않고 검증된 구현에 맡긴다.
+    implementation("com.google.crypto.tink:tink-android:1.18.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.81")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

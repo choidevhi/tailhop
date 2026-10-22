@@ -90,6 +90,11 @@ object Errors {
         "sync_vault" to R.string.err_sync_vault,
         "sync_space" to R.string.err_sync_space,
         "mirror_damaged" to R.string.err_mirror_damaged,
+        // 2.3.1 사본 잠금(§19.4, 화면용): 지문·화면 잠금으로 열어야 함 / 사본을 잠글 화면 잠금이 없음
+        "mirror_locked" to R.string.err_mirror_locked,
+        "mirror_setup" to R.string.err_mirror_setup,
+        // 2.3.1 사본의 잠긴 폴더(§19.6, 이 폰 안에서만): PIN 확인(Argon2id 256 MiB)에 쓸 메모리가 모자람
+        "vault_memory" to R.string.err_vault_memory,
     )
 
     private val CODE_RE = Regex("[a-z_]{1,40}")

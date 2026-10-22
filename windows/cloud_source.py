@@ -48,15 +48,20 @@ class Source:
         return self.node.syncer.mirror(self.sid)
 
     def _copy(self, path: str, hint: cloud.Item | None):
-        """사본의 그 파일(다 받은 것). 허브가 켜져 있으면 크기·수정 시각까지 같아야 한다(바뀐 것을 옛 사본으로 열지 않게)."""
+        """사본의 그 파일(다 받은 것). 허브가 켜져 있으면 크기·수정 시각까지 같아야 한다(바뀐 것을 옛 사본으로 열지 않게).
+        사본이 잠겨 있으면: 켜진 허브를 볼 때는 허브에서 받고(None), 오프라인이면 mirror_locked(열어 달라고 묻는다)."""
         found = self.mirror()
-        if found is None:
+        if found is None or (not self.offline and hint is None):
             return None
-        if self.offline:
-            return found.find(path)
-        if hint is None:
-            return None
-        return found.find(path, hint.size, hint.mtime)
+        try:
+            info = found.find(path) if self.offline else found.find(path, hint.size, hint.mtime)
+        except p.ProtocolError as exc:
+            if exc.code == "mirror_locked" and not self.offline:
+                return None
+            raise
+        if info is not None:
+            self.node.syncer.touch()
+        return info
 
     def _offline_copy(self, path: str):
         info = self._copy(path, None)
@@ -83,6 +88,8 @@ class Source:
     def list(self, path: str, cursor: int = 0) -> tuple[list[cloud.Item], int | None]:
         if self.offline:
             found = self.mirror()
+            if found is not None:
+                self.node.syncer.touch()
             return (found.list_dir(path) if found is not None else []), None
         if not self.local:
             return self.node.cloud_list(self.sid, path, cursor)
@@ -203,6 +210,13 @@ class Source:
 
     # ---------- 잠긴 폴더 ----------
     def open(self, path: str, pin: str | None = None, recovery: str | None = None) -> None:
+        if self.offline:  # §19.6 사본의 잠긴 폴더: 사본이 열려 있고 그 폴더의 PIN도 맞아야 한다
+            found = self.mirror()
+            vid = found.vault_at(path) if found is not None else None
+            if vid is None:
+                raise p.ProtocolError("not_found")
+            found.open_vault(vid, pin, recovery)
+            return
         if not self.local:
             self.node.cloud_open(self.sid, path, pin, recovery)
             return
@@ -230,6 +244,13 @@ class Source:
         self._hub().repin(cloud.parse_path(path), header, LOCAL_PEER)
 
     def is_open(self, path: str) -> bool:
+        if self.offline:
+            found = self.mirror()
+            try:
+                vid = found.vault_at(path) if found is not None else None
+            except p.ProtocolError:
+                return False
+            return vid is not None and found.vault_open(vid)
         return self.node.token_for(self.sid, path) is not None
 
     # ---------- 모든 기기 동기화(§19.2) ----------

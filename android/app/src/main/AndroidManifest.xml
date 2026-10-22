@@ -19,12 +19,16 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <!-- 업데이트(1.9.0): 페어링한 배포 PC에서 받은 새 APK(같은 서명일 때만)를 PackageInstaller로 설치한다 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 동기화 사본 열기(2.3.1): 시스템 생체 인증 창(지문 등 강한 생체 또는 화면 잠금). 인증은 시스템이 하고 앱은 결과만 받는다 -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- largeHeap(2.3.1): 사본의 잠긴 폴더 PIN 확인(§19.6 Argon2id, m = 256 MiB)이 한 번에 그만큼 메모리를 쓴다 -->
     <application
         android:name=".TailHopApp"
         android:allowBackup="false"
+        android:largeHeap="true"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:usesCleartextTraffic="false"

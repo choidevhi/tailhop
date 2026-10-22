@@ -354,6 +354,7 @@ class Store:
         self.changes = 0  # 항목이 바뀔 때마다 올린다(동기화 목록을 다시 만들지 정한다, §19.2)
         self.sync_all = False
         self._manifest: tuple[int, str, list[dict]] | None = None
+        self._raw_ok: set[str] = set()  # §19.6 sync_raw로 내줄 수 있는 객체(동기화하는 잠긴 폴더 안의 것)
         self.on_media = on_media  # 새 사진·영상이 들어오면(미리보기 만들기)
         self.on_open = on_open  # 저장소·잠긴 폴더가 열리면(밀린 미리보기 만들기)
         self.refresh()
@@ -434,6 +435,9 @@ class Store:
         self.nodes.clear()
         self.kids.clear()
         self.tokens.clear()
+        self.changes += 1  # 닫고 다시 열거나 새로 만든 저장소에 예전 동기화 목록(캐시)이 남지 않게
+        self._manifest = None
+        self.sync_all = False
 
     def close(self) -> None:
         with self._mu:
@@ -1014,8 +1018,11 @@ class Store:
     # ---------- 목록 ----------
     def item_json(self, node: Node, **extra) -> dict:
         if node.vault:
-            return {"name": node.name, "dir": True, "size": 0, "mtime": node.mtime, "locked": True,
-                    "state": "locked", "progress": 0, **extra}
+            out = {"name": node.name, "dir": True, "size": 0, "mtime": node.mtime, "locked": True,
+                   "state": "locked", "progress": 0, **extra}
+            if self.sync_on(node):  # §19.6 잠긴 채로 동기화
+                out["sync"] = True
+            return out
         out = cloud.item_json(cloud.Item(node.name, node.is_dir, 0 if node.is_dir else node.size, node.mtime),
                               **extra)
         roles = sorted((node.meta.get("v") or {}).keys())
@@ -1028,7 +1035,10 @@ class Store:
     # ---------- 모든 기기 동기화(§19.2) ----------
     def sync_on(self, node: Node) -> bool:
         """이 항목이 동기화 대상인가: 자기 또는 가장 가까운 위 폴더의 표시(y), 없으면 저장소 전체 설정.
-        잠긴 폴더와 그 안, 휴지통은 늘 아니다."""
+        잠긴 폴더는 그 폴더에 직접 넣은 것만(§19.6), 그 안의 항목과 휴지통은 늘 아니다."""
+        if node.vault and node.ring == MAIN:
+            parent = self.nodes.get(node.parent)
+            return node.meta.get("y") == 1 and (node.parent == "" or (parent is not None and self._syncable(parent)))
         here = node
         while True:
             if here.ring != MAIN or here.vault:
@@ -1072,6 +1082,18 @@ class Store:
                 if node is None:
                     failed.append({"path": path, "code": "bad_path"})
                     continue
+                if node.vault and node.ring == MAIN and self.sync_on(node) != on:
+                    if on:  # §19.6 잠긴 폴더는 폴더째로, 직접 넣은 것만(위 폴더·전체를 따르지 않는다)
+                        node.meta["y"] = 1
+                    else:
+                        node.meta.pop("y", None)
+                    with self.db:
+                        self.db.execute("BEGIN")
+                        self._put_row(node)
+                    changed += 1
+                    continue
+                if node.vault and node.ring == MAIN:
+                    continue  # 이미 그렇다
                 if not self._syncable(node):
                     failed.append({"path": path, "code": "sync_vault"})
                     continue
@@ -1086,7 +1108,8 @@ class Store:
                 if node.is_dir:
                     for nid, _parent, ring in self._subtree(node.id):
                         kid = self.nodes.get(nid)
-                        if nid != node.id and ring == MAIN and kid is not None and kid.meta.pop("y", None) is not None:
+                        if nid != node.id and ring == MAIN and kid is not None and not kid.vault \
+                                and kid.meta.pop("y", None) is not None:  # 잠긴 폴더의 표시는 따로 둔다
                             touched.append(kid)
                 if touched:
                     with self.db:
@@ -1114,11 +1137,15 @@ class Store:
             if self._manifest is not None and self._manifest[0] == self.changes:
                 return self._manifest[1], self._manifest[2]
             items: list[dict] = []
+            raw_ok: set[str] = set()
             stack = [("", "", self.sync_all)]
             while stack:
                 folder, prefix, inherited = stack.pop()
                 for name, nid in self.kids.get(folder, {}).items():
                     node = self.nodes[nid]
+                    if node.vault and node.ring == MAIN and node.meta.get("y") == 1:
+                        items += self._vault_entries(node, prefix + name, raw_ok)
+                        continue
                     if node.ring != MAIN or node.vault:
                         continue
                     mark = node.meta.get("y")
@@ -1137,11 +1164,70 @@ class Store:
                     if thumb:
                         entry["thumb"], entry["tver"] = int(thumb["s"]), thumb["o"]
                     items.append(entry)
-            items.sort(key=lambda x: x["path"])
+            items.sort(key=lambda x: (x["path"], x.get("row", "")))
             digest = hashlib.sha256(json.dumps(items, separators=(",", ":"), ensure_ascii=False).encode()) \
                 .hexdigest()[:16] if items else ""
             self._manifest = (self.changes, digest, items)
+            self._raw_ok = raw_ok
             return digest, items
+
+    def _vault_entries(self, node: Node, path: str, raw_ok: set[str]) -> list[dict]:
+        """§19.6: 잠긴 폴더 줄(PIN·복구 코드 봉인)과 그 안의 줄(meta 암호문 그대로)과 객체 크기. 풀지 않는다."""
+        ring = node.vault
+        try:
+            record = self._ring_record(ring)
+        except (p.ProtocolError, keys.tink.TinkError, ValueError):
+            return []
+        out = [{"id": node.id, "path": path, "dir": True,
+                "vault": {"ring": ring, "pin": record["pin"], "recovery": record["recovery"],
+                          "pin_ad": self._ad("pin " + ring).decode(),
+                          "recovery_ad": self._ad("vault recovery " + ring).decode()}}]
+        rows = [r for r in self._subtree(node.id) if r[0] != node.id and r[2] == ring]
+        for rid, parent, _ in rows:
+            meta = self.db.execute("SELECT meta FROM nodes WHERE id=?", (rid,)).fetchone()
+            if meta is None or parent == TRASH:
+                continue
+            objs = []
+            for (oid,) in self.db.execute("SELECT oid FROM objects WHERE node=?", (rid,)).fetchall():
+                if not OID_RE.fullmatch(oid):
+                    continue
+                try:
+                    size = self._object_path(oid).stat().st_size
+                except OSError:
+                    continue
+                objs.append({"o": oid, "s": size})
+                raw_ok.add(oid)
+            objs.sort(key=lambda x: x["o"])
+            out.append({"id": node.id, "path": path, "row": rid, "parent": parent, "ring": ring,
+                        "meta": keys.b64(meta[0]), "objs": objs})
+        return out
+
+    def read_raw(self, oid: str, offset: int = 0, length: int | None = None) -> tuple[int, Iterator[bytes]]:
+        """§19.6 sync_raw: 동기화하는 잠긴 폴더 안 객체의 암호문 그대로(풀지 않는다). (전체 크기, 조각들)."""
+        with self._mu:
+            self._require_open()
+            self.sync_manifest()
+            if not isinstance(oid, str) or not OID_RE.fullmatch(oid) or oid not in self._raw_ok:
+                raise p.ProtocolError("not_found")
+            path = self._object_path(oid)
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise p.ProtocolError("not_found") from exc
+        end = size if length is None else min(size, offset + length)
+
+        def pieces() -> Iterator[bytes]:
+            with open(path, "rb") as src:
+                src.seek(offset)
+                left = max(0, end - offset)
+                while left > 0:
+                    block = src.read(min(CHUNK, left))
+                    if not block:
+                        return
+                    left -= len(block)
+                    yield block
+
+        return size, pieces()
 
     def list_children(self, parts: list[str], header: dict, peer: str) -> list[dict]:
         with self._mu:
