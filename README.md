@@ -57,5 +57,9 @@ Windows PC와 Android 폰, 또는 Windows PC끼리 텍스트·이미지·파일�
 4. `v1.2.3` 형식의 태그를 push하거나 Actions에서 Release를 수동 실행한다.
 로컬 빌드는 `android/keystore/keystore.properties`(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`)와 키 파일을 두면 `assembleRelease`가 서명한다. 이 폴더는 `.gitignore`에 있다. 비밀번호와 키 파일은 커밋하지 않는다.
 
+키 파일을 저장소 밖에 두려면 `~/.gradle/gradle.properties`에 `TAILHOP_RELEASE_STORE_FILE`(키 파일의 전체 경로), `TAILHOP_RELEASE_STORE_PASSWORD`, `TAILHOP_RELEASE_KEY_ALIAS`, `TAILHOP_RELEASE_KEY_PASSWORD`를 넣는다. 저장소를 새로 받아도 그대로 서명된다.
+
+**2.3.2부터 Android 서명 키가 바뀌었다**(인증서 SHA-256 `18a9b006…e0c56a`). 2.3.1까지의 앱 위에는 업데이트로 깔리지 않는다: 예전 앱을 지우고 새로 깐 뒤 PC와 다시 페어링한다.
+
 ## 라이선스
 MIT (`LICENSE`). 아이콘(Lucide, ISC)과 함께 쓰는 라이브러리의 라이선스는 `THIRD_PARTY_NOTICES.md`.

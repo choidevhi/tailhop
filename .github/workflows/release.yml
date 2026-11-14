@@ -57,7 +57,7 @@ jobs:
       contents: read
     env:
       # 릴리스 서명 인증서(CN=TailHop, O=choidev)의 SHA-256. 키를 바꾸면 이 값(또는 저장소 변수)을 함께 바꾼다.
-      EXPECTED_SIGNER_SHA256: ${{ vars.ANDROID_SIGNER_SHA256 || 'e910aa8f1da90619c6e3f7a2c0e84cb040a151fe5458cdacf0410b44f0aff789' }}
+      EXPECTED_SIGNER_SHA256: ${{ vars.ANDROID_SIGNER_SHA256 || '18a9b00626ddb6c60d0834011153d878d6104b003ec75c18522f7595bee0c56a' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

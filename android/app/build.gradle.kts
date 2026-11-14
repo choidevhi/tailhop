@@ -5,10 +5,16 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// The release key, from one of two places:
+//  1. android/keystore/keystore.properties (the GitHub workflow writes it from the repository secrets), or
+//  2. TAILHOP_RELEASE_* in the user's ~/.gradle/gradle.properties, pointing at a keystore kept outside
+//     the repository. A fresh clone then builds a signed APK with nothing copied into it (2.3.2: the
+//     first key lived only in this folder and was lost with it).
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore/keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
+val userStoreFile = providers.gradleProperty("TAILHOP_RELEASE_STORE_FILE").orNull
 
 android {
     namespace = "com.choidev.tailhop"
@@ -29,6 +35,11 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+            } else if (userStoreFile != null) {
+                storeFile = file(userStoreFile)
+                storePassword = providers.gradleProperty("TAILHOP_RELEASE_STORE_PASSWORD").orNull
+                keyAlias = providers.gradleProperty("TAILHOP_RELEASE_KEY_ALIAS").orNull
+                keyPassword = providers.gradleProperty("TAILHOP_RELEASE_KEY_PASSWORD").orNull
             }
         }
     }
