@@ -101,6 +101,9 @@ object Outbox {
     @Synchronized
     private fun add(ctx: Context, jobs: List<OutboxJob>) {
         val l = list(ctx)
+        // 새로 보낸다 = 지금 다시 닿아 본다: 그 PC로 기다리던 건(상대가 꺼져 있음)을 바로 다시 시도하게 당긴다(Idle.retryNow).
+        val pulled = Idle.retryNow(l, jobs.map { it.dev }.toSet(), System.currentTimeMillis())
+        for (i in l.indices) l[i] = pulled[i]
         l += jobs
         while (l.size > MAX) {
             val i = l.indexOfFirst { it.failed }

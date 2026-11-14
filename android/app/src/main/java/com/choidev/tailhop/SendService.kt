@@ -401,6 +401,22 @@ class SendService : Service() {
             if (live == null && Idle.needsService(Outbox.heads(ctx))) start(ctx.applicationContext)
         }
 
+        /** 화면을 열 때 같은 PC를 다시 두드리는 최소 간격(닿지 않는 PC 때문에 알림이 깜빡이지 않게). */
+        private val openGate = PingGate(30_000L)
+
+        /**
+         * 사용자가 앱 화면을 열었다(2.3.2): 멈춰 있던 보내기를 잇고(resumeIfNeeded), 상대가 꺼져 기다리던 줄도 지금 한 번 다시
+         * 시도한다 — 예전에는 이 줄을 네트워크 바뀜·15분 깨우기·상대의 hello만 깨워서, PC가 켜져 있어도 화면에 "상대가 꺼져 있음"이
+         * 남았다. 닿지 않으면 다시 기다린다.
+         */
+        fun userOpened(ctx: Context) {
+            resumeIfNeeded(ctx)
+            try {
+                val now = System.currentTimeMillis()
+                for (dev in Idle.offlineDevs(Outbox.all(ctx))) if (openGate.take(dev, now)) wake(ctx, dev)
+            } catch (e: Exception) { }
+        }
+
         /** 상대 PC가 켜졌다(그 PC에서 메시지·hello가 옴, 이 폰의 hello가 닿음): 그 PC로 보낼 대기 건을 바로 보낸다. 실패해도 조용히. */
         fun wake(ctx: Context, dev: String) {
             try {

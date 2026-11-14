@@ -402,7 +402,7 @@ class CloudActivity : AppCompatActivity() {
         resumed = true
         val p = pc
         if (p != null && Store.get(this, p.pcIp) == null) { finish(); return }
-        SendService.resumeIfNeeded(this)
+        SendService.userOpened(this)
         ui.post(ticker)
         // 가려진 동안 멈춘 미리보기를 다시 받는다(메모리에 있으면 바로 보인다).
         if (p != null) adapter.notifyDataSetChanged()

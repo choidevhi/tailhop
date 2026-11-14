@@ -48,6 +48,29 @@ class OutboxIdleTest {
         assertNull(Retry.expire(waiting.copy(state = OutboxJob.SENDING), t0 + Retry.KEEP_MS * 2))
     }
 
+    /** 2.3.2: 새로 보내거나 화면을 열면, 상대가 꺼져 기다리던 그 PC의 건을 지금 다시 시도한다. */
+    @Test fun userActionRetriesTheWaitingLineNow() {
+        val now = t0 + 10_000
+        val off = failed(text(), "connect_failed", 6, now)          // 5분 뒤 다시 시도로 기다리는 중
+        val other = failed(text("100.64.0.2"), "connect_failed", 6, now)
+        val dead = Retry.afterFailure(text(), now, false, "refused", null) // 끝내 실패한 건
+        val sending = text().copy(state = OutboxJob.SENDING, nextAt = now + 9_000)
+        assertTrue(off.nextAt > now)
+
+        val pulled = Idle.retryNow(listOf(off, other, dead, sending), setOf("100.64.0.1"), now)
+
+        assertEquals(now, pulled[0].nextAt)                 // 그 PC의 기다리던 건: 지금
+        assertEquals(off.attempts, pulled[0].attempts)      // 시도 횟수·이유는 그대로(또 실패하면 이어서 센다)
+        assertEquals(other, pulled[1])                      // 다른 PC는 건드리지 않는다
+        assertEquals(dead, pulled[2])                       // 실패로 끝난 건은 그대로
+        assertEquals(sending, pulled[3])                    // 보내는 중인 건도 그대로
+        // 다시 시도할 수 있게 되면 그 줄은 더는 쉬는 줄이 아니다
+        assertFalse(Idle.parked(pulled[0], now))
+
+        assertEquals(setOf("100.64.0.1", "100.64.0.2"), Idle.offlineDevs(listOf(off, other, dead, sending, text("100.64.0.3"))))
+        assertTrue(Idle.offlineDevs(listOf(text(), dead)).isEmpty())
+    }
+
     @Test fun parkedOnlyWhenPeerOffAndLongWait() {
         val now = t0 + 10_000
         // 처음 넣은 건(실패 없음)·연결 실패 아닌 이유는 꺼짐이 아니다

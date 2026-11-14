@@ -98,7 +98,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // 정해 둔 수신 중지 시간이 지났으면(알람이 늦거나 막혔어도) 여기서 다시 켠다.
         if (Receiving.isOn(this) && ReceiverService.state == ReceiverService.State.OFF) ReceiverService.start(this)
-        SendService.resumeIfNeeded(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
+        SendService.userOpened(this) // 멈춰 있던 보내기(시간 제한·프로세스 종료)를 이어서
         MirrorSync.request(this) // 앱을 엶: 동기화 사본을 맞춘다(허브마다 10분에 한 번까지, §19.3)
         // 2.3.1: 예전 사본을 지움·열쇠가 무효가 되어 지움·허브가 바뀌어 이전 사본으로 둠을 한 번 알린다
         val app = applicationContext

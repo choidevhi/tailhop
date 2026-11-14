@@ -170,7 +170,7 @@ class ChatActivity : AppCompatActivity() {
         super.onResume()
         if (pairing() == null) { finish(); return }
         Store.setCurrent(this, ip)
-        SendService.resumeIfNeeded(this)
+        SendService.userOpened(this)
         updateHeader(); reloadChat(); updateSendEnabled(); ui.post(ticker)
     }
     override fun onPause() {

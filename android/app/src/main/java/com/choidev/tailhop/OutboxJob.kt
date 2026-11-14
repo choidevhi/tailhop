@@ -251,6 +251,17 @@ object Idle {
     /** 상대가 꺼져 있어 기다리는 건(대화방에 "상대가 꺼져 있음"). */
     fun offline(j: OutboxJob): Boolean = j.state == OutboxJob.WAITING && j.attempts > 0 && j.error in OFFLINE_CODES
 
+    /**
+     * 사용자가 직접 움직였다(그 PC로 새로 보냄·앱 화면을 엶, 2.3.2): 그 PC로 기다리던 건의 다음 시도를 지금으로 당긴 목록.
+     * 한 번 닿지 못한 뒤로는 네트워크 바뀜·15분 깨우기·상대의 hello만 다시 시도하게 해서, PC가 켜져 있는데도 새로 보낸 건이
+     * "상대가 꺼져 있음" 뒤에 줄을 서서 기다렸다. 끝내 실패한 건(FAILED)과 보내는 중인 건은 그대로 둔다.
+     */
+    fun retryNow(jobs: List<OutboxJob>, devs: Set<String>, now: Long): List<OutboxJob> =
+        jobs.map { if (it.dev in devs && it.state == OutboxJob.WAITING && it.nextAt > now) it.copy(nextAt = now) else it }
+
+    /** 상대가 꺼져 기다리는 건이 있는 PC들(앱 화면을 열 때 다시 닿아 볼 곳). */
+    fun offlineDevs(jobs: Collection<OutboxJob>): Set<String> = jobs.filter { offline(it) }.map { it.dev }.toSet()
+
     /** 그 줄의 일꾼을 끝내도 되는지: 맨 앞 건이 상대가 꺼져 다음 시도까지 PARK_MS보다 오래 남았다. */
     fun parked(head: OutboxJob, now: Long): Boolean = offline(head) && head.nextAt - now > PARK_MS
 
